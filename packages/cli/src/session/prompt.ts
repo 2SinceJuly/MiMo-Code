@@ -51,6 +51,7 @@ import { Global } from "@/global"
 import { NotFoundError, Database, eq } from "@/storage"
 import { SessionTable } from "./session.sql"
 import { Bus } from "../bus"
+import { Question } from "../question"
 import { ProviderTransform } from "../provider"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
@@ -606,6 +607,8 @@ export interface ResumeTurnInput {
   titleLocale?: string
   /** Optional model override: use the newly selected model for the recovery step. */
   model?: { providerID: string; modelID: string }
+  /** Session-level HTTP resume waits for exact-target admission, not the full turn. */
+  waitForAdmission?: boolean
   /** Cascade epoch captured at cascade start; cancel bumps it to invalidate pending resumes. */
   cascadeEpoch?: number
   /** Fired after exclusive admission (acquire + epoch + candidate re-check) succeeded. */
@@ -630,6 +633,7 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const commands = yield* Command.Service
     const permission = yield* Permission.Service
+    const question = yield* Question.Service
     const fsys = yield* AppFileSystem.Service
     const mcp = yield* MCP.Service
     const lsp = yield* LSP.Service
@@ -6244,8 +6248,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
      */
     type ResumePlan =
       | { action: "tool-resume"; assistantMessageID: MessageID; parentMessageID: MessageID }
-      | { action: "user-resume"; parentMessageID: MessageID; strictTail?: boolean }
+      | { action: "user-resume"; parentMessageID: MessageID; assistantMessageID?: MessageID; strictTail?: boolean }
       | { action: "reject"; error: InstanceType<typeof NotFoundError> | Session.BusyError }
+
+    const resumeInputPending = Effect.fn("SessionPrompt.resumeInputPending")(function* (sessionID: SessionID) {
+      return (yield* permission.list()).some((item) => item.sessionID === sessionID) ||
+        (yield* question.list()).some((item) => item.sessionID === sessionID)
+    })
 
     const planResume = Effect.fn("SessionPrompt.planResume")(function* (input: {
       sessionID: SessionID
@@ -6265,7 +6274,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // by an already-accepted main Resume (cascade after main 202).
       const statusBusy =
         input.allowSessionBusy !== true && (yield* status.get(input.sessionID)).type !== "idle"
-      if (runnerBusy || statusBusy) {
+      if (runnerBusy || statusBusy || (yield* resumeInputPending(input.sessionID))) {
         const busy: ResumePlan = {
           action: "reject",
           error: new Session.BusyError(input.sessionID),
@@ -6321,7 +6330,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         return tool
       }
 
-      const user: ResumePlan = { action: "user-resume", parentMessageID }
+      const user: ResumePlan = { action: "user-resume", parentMessageID, assistantMessageID: target.info.id }
       return user
     })
 
@@ -6334,6 +6343,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       model?: ResumeTurnInput["model"]
       plan: Exclude<ResumePlan, { action: "reject" }>
       mode: "ensure" | "start"
+      waitForAdmission?: boolean
     }) {
       // [C002] `*` is a message-read selector (every slice), not an execution owner.
       // Resume must lock the concrete slice Runner that will own the new assistant.
@@ -6350,56 +6360,56 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // [R003] Trailing-user plan requires strict tail at first step.
       const strictTail = plan.action === "user-resume" && plan.strictTail === true
       // [C001] start() forks work; HTTP must wait for admission handshake, not the full turn.
-      const admission = yield* Deferred.make<void, InstanceType<typeof NotFoundError>>()
+      const admission = yield* Deferred.make<void, InstanceType<typeof NotFoundError> | Session.BusyError>()
 
-      const work =
-        plan.action === "user-resume"
-          ? // [R003] Admission re-check runs OUTSIDE the ensuring(final-cleanup) scope so a
-            // stale reject has zero side effects (finalizer must not delete later messages).
-            Effect.gen(function* () {
-              yield* Effect.yieldNow
-              // [C001/C004] Test seam: stop after occupy, before admission re-check.
-              const beforeAdmission = ResumeTestHooks.beforeAdmissionRecheck
-              if (beforeAdmission) yield* beforeAdmission()
-              const tailMsgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })
-              const parentIdx = tailMsgs.findIndex(
-                (m) => m.info.role === "user" && m.info.id === plan.parentMessageID,
-              )
-              if (parentIdx < 0) {
-                const err = new NotFoundError({
-                  message:
-                    "No resumable trailing user found for message " + plan.parentMessageID + " (missing parent)",
-                })
-                yield* Deferred.fail(admission, err)
-                throw err
-              }
-              const after = tailMsgs.slice(parentIdx + 1)
-              const laterUser = after.some((m) => m.info.role === "user")
-              if (laterUser) {
-                const err = new NotFoundError({
-                  message:
-                    "No resumable trailing user found for message " +
-                    plan.parentMessageID +
-                    " (stale at runner admission)",
-                })
-                yield* Deferred.fail(admission, err)
-                throw err
-              }
-              if (strictTail && after.some((m) => m.info.role === "assistant")) {
-                const err = new NotFoundError({
-                  message:
-                    "No resumable trailing user found for message " +
-                    plan.parentMessageID +
-                    " (assistant after parent at admission)",
-                })
-                yield* Deferred.fail(admission, err)
-                throw err
-              }
-              // Admission granted — tell the waiting HTTP/sync caller before runLoop.
-              yield* Deferred.succeed(admission, void 0)
-              // [C003] Test seam: after handshake, before any cleanup read.
-              const afterAdmission = ResumeTestHooks.afterAdmissionBeforeCleanup
-              if (afterAdmission) yield* afterAdmission()
+      const admit = Effect.gen(function* () {
+        yield* Effect.yieldNow
+        const beforeAdmission = ResumeTestHooks.beforeAdmissionRecheck
+        if (beforeAdmission) yield* beforeAdmission()
+        if (yield* resumeInputPending(input.sessionID)) {
+          const err = new Session.BusyError(input.sessionID)
+          yield* Deferred.fail(admission, err)
+          throw err
+        }
+        const tailMsgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })
+        const parentIdx = tailMsgs.findIndex((m) => m.info.role === "user" && m.info.id === plan.parentMessageID)
+        const tail = tailMsgs.at(-1)
+        const after = tailMsgs.slice(parentIdx + 1)
+        const reason = parentIdx < 0
+          ? "missing parent"
+          : after.some((m) => m.info.role === "user")
+            ? "stale at runner admission"
+            : strictTail && after.some((m) => m.info.role === "assistant")
+              ? "assistant after parent at admission"
+              : plan.assistantMessageID && (
+                  tail?.info.role !== "assistant" ||
+                  tail.info.id !== plan.assistantMessageID ||
+                  tail.info.parentID !== plan.parentMessageID ||
+                  !isRecoveryWorthyAssistant(tail.info, tail.parts) ||
+                  isEmptyAssistantResidue(tail.info, tail.parts) !== (plan.action === "user-resume")
+                )
+                ? "assistant changed at runner admission"
+                : undefined
+        if (reason) {
+          const err = new NotFoundError({ message: `No resumable target for message ${plan.assistantMessageID ?? plan.parentMessageID} (${reason})` })
+          yield* Deferred.fail(admission, err)
+          throw err
+        }
+        yield* Deferred.succeed(admission, void 0)
+      }).pipe(
+        Effect.ensuring(
+          Deferred.done(admission, Exit.fail(new NotFoundError({ message: "Resume admission did not complete" }))).pipe(
+            Effect.asVoid,
+            Effect.ignore,
+          ),
+        ),
+      )
+
+      const work = Effect.gen(function* () {
+        const afterAdmission = ResumeTestHooks.afterAdmissionBeforeCleanup
+        if (afterAdmission) yield* afterAdmission()
+        return yield* (plan.action === "user-resume"
+          ? Effect.gen(function* () {
               // [C003] strict trailing-user must NOT pre-clean: deleting a later
               // empty assistant would manufacture a legal tail after admission.
               // Empty-shell user-resume still clears residue under parent so
@@ -6446,17 +6456,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ),
               )
               return result
-            }).pipe(
-              // If work dies before handshake (interrupt/defect), release the waiter.
-              Effect.ensuring(
-                Deferred.done(
-                  admission,
-                  Exit.fail(
-                    new NotFoundError({ message: "Resume admission did not complete" }),
-                  ),
-                ).pipe(Effect.asVoid, Effect.ignore),
-              ),
-            )
+            })
           : Effect.gen(function* () {
               yield* cleanupEmptyResidueAssistants({
                 sessionID: input.sessionID,
@@ -6470,7 +6470,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 assistantMessageID: plan.assistantMessageID,
                 agentID: input.agentID,
               })
-              yield* Deferred.succeed(admission, void 0)
               return yield* runLoop(
                 input.sessionID,
                 input.agentID,
@@ -6482,18 +6481,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 // tool-resume continues an assistant turn — not a user-source turn.
                 undefined,
                 "hook",
+                plan.parentMessageID,
               )
             }).pipe(
-              // Complete the HTTP/sync waiter BEFORE other finalizers — an interrupt
-              // during cleanup/abandon must not leave Deferred.await(admission) hanging.
-              Effect.ensuring(
-                Deferred.done(
-                  admission,
-                  Exit.fail(
-                    new NotFoundError({ message: "Resume admission did not complete" }),
-                  ),
-                ).pipe(Effect.asVoid, Effect.ignore),
-              ),
               Effect.ensuring(
                 abandonRecoveredAssistant({
                   sessionID: input.sessionID,
@@ -6509,18 +6499,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   ),
                 ),
               ),
-            )
+            ))
+      })
 
       // [R003] Exclusive admission: never join an unrelated run (ensureRunning would).
       // ensure mode waits for work result (sync resume()); start mode forks (HTTP 202 after handshake).
       if (input.mode === "ensure") {
-        return yield* state.ensureExclusive(input.sessionID, input.agentID, resumeInterrupt, work)
+        return yield* state.ensureExclusive(input.sessionID, input.agentID, resumeInterrupt, admit.pipe(Effect.andThen(work)))
       }
-      // [C001] Trailing-user resumeUser: wait for admission handshake, and on
-      // timeout interrupt THIS run only (never a replacement). Assistant resume /
-      // cascade stay fire-and-forget after start() (D16f-HTTP).
-      if (plan.action === "user-resume" && plan.strictTail === true) {
-        const owned = yield* state.startOwned(input.sessionID, input.agentID, resumeInterrupt, work)
+      if (!input.waitForAdmission && !strictTail) {
+        yield* state.start(input.sessionID, input.agentID, resumeInterrupt, work, admit)
+        return undefined
+      }
+      const owned = yield* state.startOwned(input.sessionID, input.agentID, resumeInterrupt, work, admit)
+      if (input.waitForAdmission || strictTail) {
         const handshake = yield* Deferred.await(admission).pipe(
           Effect.timeout("5 seconds"),
           Effect.exit,
@@ -6544,7 +6536,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
         return
       }
-      yield* state.start(input.sessionID, input.agentID, resumeInterrupt, work)
     })
 
     const resume = Effect.fn("SessionPrompt.resume")(function* (input: ResumeTurnInput) {
@@ -6588,7 +6579,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // [R004] Test seam: expose resolved plan so tests can assert the actual target.
       ResumeTestHooks.onPlanResolved?.({
         action: plan.action,
-        ...(plan.action === "tool-resume" ? { assistantMessageID: plan.assistantMessageID } : {}),
+        ...(plan.assistantMessageID ? { assistantMessageID: plan.assistantMessageID } : {}),
         parentMessageID: plan.parentMessageID,
       })
       // [C004] Test seam: pause after ALL busy preflights (incl. planResume), before exclusive occupy.
@@ -6654,9 +6645,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // [R004] Test seam: expose resolved plan so tests can assert the actual target.
       ResumeTestHooks.onPlanResolved?.({
         action: plan.action,
-        ...(plan.action === "tool-resume" ? { assistantMessageID: plan.assistantMessageID } : {}),
+        ...(plan.assistantMessageID ? { assistantMessageID: plan.assistantMessageID } : {}),
         parentMessageID: plan.parentMessageID,
       })
+      const beforeOccupy = ResumeTestHooks.beforeExclusiveOccupy
+      if (beforeOccupy) yield* beforeOccupy()
       yield* launchResume({
         sessionID: input.sessionID,
         agentID,
@@ -6665,6 +6658,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         model: input.model,
         plan,
         mode: "start",
+        waitForAdmission: input.waitForAdmission,
       })
       return
     })
@@ -6963,6 +6957,7 @@ export const appLayer = Layer.suspend(() =>
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Command.appLayer),
     Layer.provide(Permission.defaultLayer),
+    Layer.provide(Question.defaultLayer),
     Layer.provide(LSP.defaultLayer),
     Layer.provide(ToolRegistry.defaultLayer),
     Layer.provide(Truncate.defaultLayer),
