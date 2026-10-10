@@ -1,4 +1,4 @@
-import { Effect, Fiber, ScopedCache, Scope, Context } from "effect"
+import { Deferred, Effect, Fiber, ScopedCache, Scope, Context } from "effect"
 import * as EffectLogger from "./logger"
 import { Instance, type InstanceContext } from "@/project/instance"
 import { LocalContext } from "@/util"
@@ -10,7 +10,7 @@ const TypeId = "~opencode/InstanceState"
 
 export interface InstanceState<A, E = never, R = never> {
   readonly [TypeId]: typeof TypeId
-  readonly cache: ScopedCache.ScopedCache<string, A, E, R>
+  readonly cache: ScopedCache.ScopedCache<string, Deferred.Deferred<A, E>, never, R>
 }
 
 export const bind = <F extends (...args: any[]) => any>(fn: F): F => {
@@ -41,12 +41,27 @@ export const make = <A, E = never, R = never>(
   opts?: { phase?: "normal" | "late" },
 ): Effect.Effect<InstanceState<A, E, Exclude<R, Scope.Scope>>, never, R | Scope.Scope> =>
   Effect.gen(function* () {
-    const cache = yield* ScopedCache.make<string, A, E, R>({
+    const cache = yield* ScopedCache.make<string, Deferred.Deferred<A, E>, never, R>({
       capacity: Number.POSITIVE_INFINITY,
       lookup: () =>
         Effect.gen(function* () {
-          return yield* init(yield* context)
-        }),
+          const ctx = yield* context
+          const workspace = yield* workspaceID
+          const entry = yield* Effect.scope
+          // Register resources first so entry closure stops their users before releasing them.
+          const resources = yield* Scope.fork(entry)
+          const result = yield* Deferred.make<A, E>()
+          yield* Effect.suspend(() => init(ctx)).pipe(
+            Scope.provide(resources),
+            Effect.provideService(InstanceRef, ctx),
+            Effect.provideService(WorkspaceRef, workspace),
+            Effect.interruptible,
+            Deferred.into(result),
+            // Enter Deferred.into even if invalidation precedes the fiber's first scheduled step.
+            Effect.forkIn(entry, { uninterruptible: true }),
+          )
+          return result
+        }).pipe(Effect.uninterruptible),
     })
 
     const off = registerDisposer(
@@ -63,7 +78,8 @@ export const make = <A, E = never, R = never>(
 
 export const get = <A, E, R>(self: InstanceState<A, E, R>) =>
   Effect.gen(function* () {
-    return yield* ScopedCache.get(self.cache, yield* directory)
+    const result = yield* ScopedCache.get(self.cache, yield* directory).pipe(Effect.uninterruptible)
+    return yield* Deferred.await(result)
   })
 
 export const use = <A, E, R, B>(self: InstanceState<A, E, R>, select: (value: A) => B) => Effect.map(get(self), select)

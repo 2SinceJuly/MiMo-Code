@@ -7,6 +7,7 @@ import { Bus } from "../../src/bus"
 import { Question } from "../../src/question"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ToolGate } from "../../src/tool/gate"
+import * as Tool from "../../src/tool/tool"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -159,6 +160,134 @@ it.live(
     }),
   20000,
 )
+
+// [TP-RUN-R4-09] [TP-CA-R8-09]
+for (const recovery of ["send", "resume", "edit"] as const) {
+  it.live(
+    `Stop during cold ToolRegistry initialization allows ${recovery} in the same instance`,
+    () =>
+      Effect.gen(function* () {
+        const server = startScriptedLLMServer([{ lines: textStopResponse("recovered request completed") }])
+        yield* Effect.addFinalizer(() => Effect.promise(() => server.stop()))
+        yield* provideTmpdirInstance(
+          () =>
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "Cold initialization cancellation" })
+              const entered = yield* Deferred.make<void>()
+              const release = yield* Deferred.make<void>()
+              const original = Tool.init
+              const gated: typeof Tool.init = (info) =>
+                info.id === "bash"
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(Effect.suspend(() => original(info))),
+                    )
+                  : original(info)
+              const initialize = spyOn(Tool, "init").mockImplementation(gated)
+              yield* Effect.addFinalizer(() => Effect.sync(() => initialize.mockRestore()))
+              yield* Effect.addFinalizer(() => prompt.cancel(session.id))
+              const first = yield* prompt
+                .prompt({
+                  sessionID: session.id,
+                  agent: "build",
+                  harness: "default",
+                  parts: [{ type: "text", text: "First cold request" }],
+                })
+                .pipe(Effect.forkChild)
+              yield* Deferred.await(entered).pipe(Effect.timeout("10 seconds"))
+              yield* prompt.cancel(session.id)
+              yield* Fiber.join(first)
+              const stopped = yield* sessions.messages({ sessionID: session.id })
+              const interrupted = stopped.find((message) => message.info.role === "assistant")
+              expect(interrupted?.info).toMatchObject({
+                error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+              })
+              expect(server.captures).toHaveLength(0)
+              if (interrupted?.info.role !== "assistant") throw new Error("missing interrupted assistant")
+              const originalParentID = interrupted.info.parentID
+              const originalUser = stopped.find((message) => message.info.id === originalParentID)!
+              if (recovery === "edit") {
+                expect(stopped.map((message) => message.info.role)).toEqual(["user", "assistant"])
+                for (const message of [...stopped].reverse()) {
+                  yield* sessions.removeMessage({ sessionID: session.id, messageID: message.info.id })
+                }
+                expect(yield* sessions.messages({ sessionID: session.id })).toEqual([])
+              }
+              yield* Deferred.succeed(release, undefined)
+              const text = recovery === "edit" ? "Edited question after Stop" : "Fresh request after Stop"
+              const next = yield* recovery === "resume"
+                ? prompt.resume({ sessionID: session.id, assistantMessageID: interrupted.info.id })
+                : prompt.prompt({
+                    sessionID: session.id,
+                    agent: "build",
+                    harness: "default",
+                    parts: [{ type: "text", text }],
+                  })
+              const after = yield* sessions.messages({ sessionID: session.id })
+              const users = after.filter((message) => message.info.role === "user")
+              expect(users).toHaveLength(recovery === "send" ? 2 : 1)
+              if (recovery === "edit") {
+                expect(after).toHaveLength(2)
+                expect(after.some((message) => stopped.some((old) => old.info.id === message.info.id))).toBe(false)
+                expect(users[0].parts).toEqual([expect.objectContaining({ type: "text", text })])
+                expect(JSON.stringify(after)).not.toContain("First cold request")
+              } else {
+                const retainedUser = after.find((message) => message.info.id === originalUser.info.id)!
+                expect(retainedUser.info).toMatchObject(originalUser.info)
+                expect(retainedUser.parts).toEqual(originalUser.parts)
+              }
+              expect(next.info.id).not.toBe(interrupted.info.id)
+              expect(next.info).toMatchObject({
+                role: "assistant",
+                parentID: users.at(-1)!.info.id,
+                time: { completed: expect.any(Number) },
+              })
+              expect(next.info.role === "assistant" ? next.info.error : undefined).toBeUndefined()
+              expect(server.captures).toHaveLength(1)
+              expect(server.captures[0].messages.at(-1)?.role).toBe("user")
+              expect(JSON.stringify(server.captures[0].messages)).toContain(
+                recovery === "resume" ? "First cold request" : text,
+              )
+              if (recovery === "edit") {
+                expect(JSON.stringify(server.captures[0].messages)).not.toContain("First cold request")
+                expect(server.captures[0].messages.filter((message) => message.role === "user")).toHaveLength(1)
+              }
+              expect(
+                next.parts.some((part) => part.type === "text" && part.text === "recovered request completed"),
+              ).toBe(true)
+            }),
+          {
+            git: true,
+            config: {
+              enabled_providers: ["test"],
+              model: "test/model",
+              provider: {
+                test: {
+                  npm: "@ai-sdk/openai-compatible",
+                  env: [],
+                  options: { apiKey: "test-key", baseURL: `${server.origin}/v1` },
+                  models: {
+                    model: {
+                      name: "Test",
+                      tool_call: true,
+                      limit: { context: 32000, output: 2000 },
+                      modalities: { input: ["text"], output: ["text"] },
+                    },
+                  },
+                },
+              },
+              agent: { build: { model: "test/model" } },
+              lsp: false,
+              formatter: false,
+            },
+          },
+        )
+      }),
+    20000,
+  )
+}
 
 // [TP-SR-R21-28] [TP-SR-R21-30]
 for (const boundary of ["partial", "complete-empty"] as const) {
