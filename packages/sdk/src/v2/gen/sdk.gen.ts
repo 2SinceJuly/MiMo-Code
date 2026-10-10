@@ -2719,6 +2719,10 @@ export class Session2 extends HeyApiClient {
       modelID?: string
       userMessageID?: string
       assistantMessageID?: string
+      attempt?: {
+        requestId: string
+        attemptId: string
+      }
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2737,6 +2741,7 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "modelID" },
             { in: "body", key: "userMessageID" },
             { in: "body", key: "assistantMessageID" },
+            { in: "body", key: "attempt" },
           ],
         },
       ],

@@ -2289,17 +2289,10 @@ it.live("resume continues an incomplete assistant without creating or rewriting 
 
       const after = yield* sessions.messages({ sessionID: chat.id })
       expect(after.filter((message) => message.info.role === "user")).toHaveLength(1)
-      expect(after.length).toBe(before.length + 1)
-      expect(after.find((message) => message.info.id === seeded.assistant.id)?.info).toMatchObject(seeded.assistant)
-      // tool-resume must stamp Abandoned-as-resumed on the continued assistant
-      const seededAfter = after.find((message) => message.info.id === seeded.assistant.id)?.info
-      const abandonMsg =
-        seededAfter && seededAfter.role === "assistant" && seededAfter.error
-          ? ((seededAfter.error as { data?: { message?: string }; message?: string }).data?.message ??
-            (seededAfter.error as { message?: string }).message ??
-            "")
-          : ""
-      expect(abandonMsg).toContain("Abandoned: resumed as a new assistant turn")
+      // [TP-SR-R21-27] Pure assistant tails are durably removed, not reused as prefill.
+      expect(after.length).toBe(before.length)
+      expect(after.find((message) => message.info.id === seeded.assistant.id)).toBeUndefined()
+      expect((requests[0]?.messages as { role: string }[]).at(-1)?.role).toBe("user")
       expect(result.info.role).toBe("assistant")
       expect(result.info.id).not.toBe(seeded.assistant.id)
       expect(result.parts.some((part) => part.type === "text" && part.text === "world")).toBe(true)
@@ -2359,24 +2352,10 @@ it.live(
         expect(JSON.stringify(requests[0]?.messages ?? [])).not.toContain("Abandoned: resumed as a new assistant turn")
 
         const after = yield* sessions.messages({ sessionID: chat.id })
-        expect(after.find((m) => m.info.id === shell.id)).toBeUndefined()
+        // [TP-SR-R21-27] Empty output containers are not a reason to delete history.
+        expect(after.find((m) => m.info.id === shell.id)?.info).toMatchObject(shell)
+        expect(after.find((m) => m.info.id === shell.id)?.parts).toEqual([])
         expect(after.filter((m) => m.info.role === "user")).toHaveLength(1)
-        const assistants = after.filter((m) => m.info.role === "assistant")
-        expect(assistants.length).toBeGreaterThan(0)
-        // success path: no stacked empty residue under parent
-        expect(
-          assistants.every(
-            (m) =>
-              m.info.role !== "assistant" ||
-              m.parts.some(
-                (part) =>
-                  (part.type === "text" && part.text.trim().length > 0) ||
-                  part.type === "tool" ||
-                  (part.type === "reasoning" && part.text.trim().length > 0),
-              ) ||
-              Boolean(m.info.role === "assistant" && m.info.error),
-          ),
-        ).toBe(true)
         expect(result.info.role).toBe("assistant")
         expect(result.parts.some((part) => part.type === "text" && part.text === "found 2 resumes")).toBe(true)
       }),

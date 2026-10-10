@@ -679,6 +679,10 @@ const live: Layer.Layer<
         )
         .pipe(Effect.ignore)
 
+      const execution = yield* HostModelTransport.ExecutionScope
+      const executionScope = !input.ephemeral && (!input.agentID || input.agentID === "main")
+        && execution?.sessionID === input.sessionID && execution.userMessageID === input.user.id
+        ? { executionAttempt: execution.attempt, directory: execution.directory } : {}
       const result = streamText({
         onError(error) {
           l.debug("streamText error", {
@@ -753,6 +757,7 @@ const live: Layer.Layer<
             {
               specificationVersion: "v3" as const,
               wrapStream: ({ doStream, params }) => HostModelTransport.modelCall({
+                ...executionScope,
                 sessionID: input.sessionID, userMessageID: input.user.id,
                 assistantMessageID: input.assistantMessageID,
                 providerID: input.model.providerID, modelID: input.model.id, sdk: input.model.api.npm,

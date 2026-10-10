@@ -82,6 +82,131 @@ function withInputCapabilities(
   }
 }
 
+// [TP-SR-R21-27] [TP-SR-R21-28] [TP-SR-R21-30]
+describe("resume trim model boundary", () => {
+  const userID = MessageID.make("resume-user")
+  const assistantID = MessageID.make("resume-assistant")
+  const base = { sessionID, messageID: assistantID }
+  function history(parts: MessageV2.Part[]): MessageV2.WithParts[] {
+    return [
+      { info: userInfo(userID), parts: [{ ...base, id: PartID.make("user-text"), messageID: userID, type: "text", text: "Original input" }] },
+      { info: { ...assistantInfo(assistantID, userID), finish: "length" }, parts },
+    ]
+  }
+  function tool(id: string, providerExecuted = false): MessageV2.ToolPart {
+    return { ...base, id: PartID.make(id), type: "tool", tool: "bash", callID: id,
+      metadata: providerExecuted ? { providerExecuted: true } : undefined,
+      state: { status: "completed", input: { command: "already executed" }, output: "original output", title: "done", metadata: {}, time: { start: 1, end: 2 } },
+    }
+  }
+  test("legacy tool block keeps text after the call because SDK emits results after the entire block", async () => {
+    const parts: MessageV2.Part[] = [tool("call-a"),
+      { ...base, id: PartID.make("after-tool"), type: "text", text: "still before SDK results" }, tool("call-b"),
+      { ...base, id: PartID.make("trailing-reasoning"), type: "reasoning", text: "same block", time: { start: 1, end: 2 } },
+    ]
+    const input = history(parts)
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.messages).toEqual(input)
+    expect(trim.removeMessages).toEqual([])
+    expect(trim.removeParts).toEqual([])
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
+    expect(converted[1].content).toEqual(expect.arrayContaining([{ type: "text", text: "still before SDK results" }]))
+    expect(() => MessageV2.assertResumeModelBoundary(converted)).not.toThrow()
+  })
+  test("step-start defines discarded text even when end timestamps say completed", async () => {
+    const parts: MessageV2.Part[] = [tool("call-a"), tool("call-b"),
+      { ...base, id: PartID.make("next-block"), type: "step-start" },
+      { ...base, id: PartID.make("discard"), type: "text", text: "half answer", time: { start: 1, end: 2 } },
+    ]
+    const input = history(parts)
+    const original = structuredClone(input)
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.removeParts).toEqual(parts.slice(2))
+    expect(trim.messages[1].parts).toEqual(parts.slice(0, 2))
+    expect(input).toEqual(original)
+    MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true }))
+  })
+  test("provider-executed results stay assistant; a synthetic attachment cannot manufacture a safe boundary", async () => {
+    const part = tool("provider-call", true)
+    if (part.state.status === "completed") part.state.attachments = [{ ...base, id: PartID.make("attachment"), type: "file", mime: "image/png", url: `data:image/png;base64,${pngBase64}` }]
+    const trim = MessageV2.planResumeTrim(history([part]), userID)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.at(-1)?.role).toBe("assistant")
+    expect(converted.at(-1)?.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "tool-result", toolCallId: "provider-call" })]))
+    expect(() => MessageV2.assertResumeModelBoundary(converted)).toThrow("boundary")
+    expect(trim.removeMessages).toEqual([])
+    expect(trim.removeParts).toEqual([])
+  })
+  test("mixed provider/client group is paired and ends at the client result", async () => {
+    const trim = MessageV2.planResumeTrim(history([tool("provider-call", true), tool("client-call")]), userID)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    expect(converted.at(-1)?.role).toBe("tool")
+    MessageV2.assertResumeModelBoundary(converted)
+  })
+  test("pending raw input rejects; running tools get an explicit interruption without changing completed tools", async () => {
+    const pending: MessageV2.ToolPart = { ...tool("pending"), state: { status: "pending", input: {}, raw: '{"command":' } }
+    const pendingInput = history([tool("completed"), pending])
+    const original = structuredClone(pendingInput)
+    expect(() => MessageV2.planResumeTrim(pendingInput, userID)).toThrow("execution boundary")
+    expect(pendingInput).toEqual(original)
+    const running: MessageV2.ToolPart = { ...tool("running"), state: { status: "running", input: { command: "already started" }, time: { start: 1 }, metadata: { output: "partial output" } } }
+    const completed = tool("completed")
+    const trim = MessageV2.planResumeTrim(history([completed, running]), userID)
+    expect(trim.messages[1].parts[0]).toEqual(completed)
+    expect(trim.updateParts).toEqual([expect.objectContaining({ id: running.id, state: expect.objectContaining({ status: "error", error: "Tool execution aborted", input: running.state.input, metadata: { output: "partial output", interrupted: true } }) })])
+    expect(running.state.status).toBe("running")
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    MessageV2.assertResumeModelBoundary(converted)
+    expect(JSON.stringify(converted)).toContain("partial output")
+  })
+  test("interrupted errors require a persisted complete-call boundary, including after repeated cleanup", async () => {
+    for (const inputComplete of [undefined, false, true]) {
+      const state: MessageV2.ToolStateError = {
+        status: "error", input: {}, inputComplete, error: "interrupted",
+        metadata: { interrupted: true }, time: { start: 1, end: 2 },
+      }
+      const settled = MessageV2.abortedToolState(state)
+      expect(settled.inputComplete).toBe(inputComplete)
+      const input = history([{ ...tool("interrupted"), state: settled }])
+      const original = structuredClone(input)
+      if (inputComplete !== true) {
+        expect(() => MessageV2.planResumeTrim(input, userID)).toThrow("execution boundary")
+      } else {
+        const trim = MessageV2.planResumeTrim(input, userID)
+        expect(trim.updateParts).toEqual([])
+        MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true }))
+      }
+      expect(input).toEqual(original)
+    }
+  })
+  test("APIError on tool carrier cannot silently hide completed observations", async () => {
+    const input = history([tool("completed")])
+    input[1].info = { ...assistantInfo(assistantID, userID), error: { name: "APIError", data: { message: "unavailable", isRetryable: false } } }
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.updateMessages).toHaveLength(1)
+    expect(trim.messages[1].parts).toEqual(input[1].parts)
+    const converted = await MessageV2.toModelMessages(trim.messages, model, { stripMedia: true })
+    MessageV2.assertResumeModelBoundary(converted)
+    expect(JSON.stringify(converted)).toContain("original output")
+  })
+  test("empty containers stay durable but never become model input", async () => {
+    const input = history([{ ...base, id: PartID.make("step"), type: "step-start" },
+      { ...base, id: PartID.make("placeholder"), type: "text", text: "ignored placeholder", ignored: true }])
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.messages).toEqual(input)
+    expect(trim.removeMessages).toEqual([])
+    expect((await MessageV2.toModelMessages(trim.messages, model)).map((message) => message.role)).toEqual(["user"])
+  })
+  for (const protectedInfo of [{ summary: true }, { structured: null }, { finish: "stop" }]) {
+    test(`protect delivered output ${JSON.stringify(protectedInfo)}`, () => {
+      const input = history([{ ...base, id: PartID.make("text"), type: "text", text: "delivered" }])
+      input[1].info = { ...assistantInfo(assistantID, userID), ...protectedInfo }
+      expect(() => MessageV2.planResumeTrim(input, userID)).toThrow("protected output")
+    })
+  }
+})
+
 function userInfo(id: string): MessageV2.User {
   return {
     id,

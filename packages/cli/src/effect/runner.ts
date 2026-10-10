@@ -13,7 +13,7 @@ export interface Runner<A, E = never, B = never> {
    */
   readonly startOwned: (
     work: Effect.Effect<A, E>,
-  ) => Effect.Effect<{ readonly runId: number; readonly interruptOwned: Effect.Effect<void> }, B>
+  ) => Effect.Effect<{ readonly runId: number; readonly interruptOwned: Effect.Effect<void>; readonly awaitExit: Effect.Effect<void> }, B>
   readonly startShell: (work: Effect.Effect<A, E>) => Effect.Effect<A, E | B>
   readonly cancel: Effect.Effect<void>
 }
@@ -98,6 +98,7 @@ export const make = <A, E = never, B = never>(
     Effect.gen(function* () {
       const id = next()
       const release = opts?.onRunStart ? yield* opts.onRunStart : () => {}
+      yield* busy
       const fiber = yield* work.pipe(
         Effect.onExit((exit) => finishRun(id, done, exit)),
         Effect.forkIn(scope),
@@ -344,18 +345,19 @@ export const make = <A, E = never, B = never>(
 
   const startOwned = (
     work: Effect.Effect<A, E>,
-  ): Effect.Effect<{ readonly runId: number; readonly interruptOwned: Effect.Effect<void> }, B> =>
+  ): Effect.Effect<{ readonly runId: number; readonly interruptOwned: Effect.Effect<void>; readonly awaitExit: Effect.Effect<void> }, B> =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
         if (st._tag !== "Idle") {
-          return [busyFailure<{ runId: number; interruptOwned: Effect.Effect<void> }>(), st] as const
+          return [busyFailure<{ runId: number; interruptOwned: Effect.Effect<void>; awaitExit: Effect.Effect<void> }>(), st] as const
         }
         const done = yield* Deferred.make<A, E | Cancelled>()
         const run = yield* startRun(work, done)
         const owned = {
           runId: run.id,
           interruptOwned: interruptOwned(run.id),
+          awaitExit: Fiber.await(run.fiber).pipe(Effect.asVoid),
         }
         return [Effect.succeed(owned), { _tag: "Running", run } as const] as const
       }),

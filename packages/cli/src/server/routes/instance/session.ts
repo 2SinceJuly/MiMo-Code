@@ -1161,6 +1161,7 @@ export const SessionRoutes = lazy(() =>
       validator("json", z.object({
         userMessageID: MessageID.zod.optional(),
         assistantMessageID: MessageID.zod.optional(),
+        attempt: z.object({ requestId: z.string().min(1), attemptId: z.string().min(1) }).optional(),
       }).refine((body) => !(body.userMessageID && body.assistantMessageID), {
         message: "userMessageID and assistantMessageID are mutually exclusive",
       }).optional()),

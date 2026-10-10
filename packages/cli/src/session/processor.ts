@@ -429,6 +429,7 @@ export const layer: Layer.Layer<
           state: {
             status: "error",
             input: match.part.state.input,
+            inputComplete: true,
             error: errorMessage(error),
             ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
             ...(attachments && attachments.length > 0 ? { attachments } : {}),

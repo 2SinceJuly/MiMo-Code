@@ -442,6 +442,7 @@ export const ToolStateError = z
   .object({
     status: z.literal("error"),
     input: z.record(z.string(), z.any()),
+    inputComplete: z.boolean().optional(),
     error: z.string(),
     metadata: z.record(z.string(), z.any()).optional(),
     time: z.object({
@@ -468,6 +469,7 @@ export function abortedToolState(state: ToolPart["state"], error = "Tool executi
   return {
     status: "error",
     input: state.input,
+    inputComplete: state.status === "error" ? state.inputComplete : state.status !== "pending",
     error,
     metadata: { ...("metadata" in state && state.metadata ? state.metadata : {}), interrupted: true },
     time: { start: "time" in state ? state.time.start : end, end },
@@ -846,6 +848,90 @@ function providerMeta(metadata: Record<string, any> | undefined) {
   return Object.keys(rest).length > 0 ? rest : undefined
 }
 
+export function planResumeTrim(input: WithParts[], parentID: MessageID) {
+  const parent = input.findIndex((message) => message.info.id === parentID && message.info.role === "user")
+  if (parent < 0) throw new Error("Resume parent is missing")
+  const tail = input.slice(parent + 1)
+  if (tail.some((message) => message.info.role !== "assistant" || message.info.parentID !== parentID)) {
+    throw new Error("Resume trim crosses a parent boundary")
+  }
+  const lastToolMessage = tail.findLastIndex((message) => message.parts.some((part) => part.type === "tool"))
+  const removeMessages: MessageID[] = []
+  const removeParts: Part[] = []
+  const updateParts: ToolPart[] = []
+  const updateMessages: Assistant[] = []
+  const retained = tail.flatMap((message, index): WithParts[] => {
+    const info = message.info as Assistant
+    const lastTool = message.parts.findLastIndex((part) => part.type === "tool")
+    // SDK flushes a whole assistant block before emitting its tool results.
+    const nextBlock = index === lastToolMessage
+      ? message.parts.findIndex((part, partIndex) => partIndex > lastTool && part.type === "step-start")
+      : -1
+    const cut = index < lastToolMessage ? message.parts.length
+      : index === lastToolMessage ? (nextBlock < 0 ? message.parts.length : nextBlock)
+      : 0
+    const discarded = message.parts.slice(cut)
+    const hasContent = discarded.some((part) =>
+      part.type === "text" ? !part.ignored && part.text.trim().length > 0
+        : part.type === "reasoning" ? part.text.trim().length > 0 : part.type === "tool",
+    )
+    if (cut < message.parts.length && (
+      info.summary || info.structured !== undefined ||
+      (!info.error && info.finish && info.finish !== "length" && info.finish !== "tool-calls" &&
+        (info.finish === "stop" || info.time.completed !== undefined) && discarded.some((part) =>
+          part.type === "text" ? !part.synthetic && !part.ignored && part.text.trim().length > 0
+            : part.type === "reasoning" && part.text.trim().length > 0)) ||
+      discarded.some((part) => !["text", "reasoning", "step-start", "step-finish", "retry"].includes(part.type))
+    )) throw new Error("Resume trim would discard protected output")
+    if (cut === 0 && !hasContent) return [message]
+    if (cut === 0) {
+      removeMessages.push(info.id)
+      return []
+    }
+    removeParts.push(...discarded)
+    const parts = message.parts.slice(0, cut).map((part) => {
+      if (part.type !== "tool") return part
+      if (part.state.status === "pending" || (part.state.status === "error" && (
+        part.state.inputComplete === false ||
+        (part.state.metadata?.interrupted === true && part.state.inputComplete !== true)
+      ))) throw new Error("Resume tool input has no execution boundary")
+      if (part.state.status !== "running") return part
+      const settled = { ...part, state: abortedToolState(part.state) }
+      updateParts.push(settled)
+      return settled
+    })
+    if (info.error && !AbortedError.isInstance(info.error) && parts.some((part) => part.type === "tool")) {
+      const restored = { ...info, error: new AbortedError({ message: "Interrupted before resume" }).toObject() }
+      updateMessages.push(restored)
+      return [{ info: restored, parts }]
+    }
+    return [{ info, parts }]
+  })
+  return { messages: [...input.slice(0, parent + 1), ...retained], removeMessages, removeParts, updateParts, updateMessages }
+}
+
+export function assertResumeModelBoundary(messages: ModelMessage[]) {
+  const pending = new Map<string, string>()
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (part.type === "tool-call") {
+        if (pending.has(part.toolCallId)) throw new Error("Duplicate resume tool call")
+        pending.set(part.toolCallId, part.toolName)
+      }
+      if (part.type === "tool-result") {
+        if (pending.get(part.toolCallId) !== part.toolName) throw new Error("Unpaired resume tool result")
+        pending.delete(part.toolCallId)
+      }
+    }
+  }
+  if (pending.size > 0) throw new Error("Missing resume tool result")
+  if (messages.at(-1)?.role === "assistant") {
+    throw new Error("Resume requires a user or complete client tool-result boundary")
+  }
+  if (messages.length === 0) throw new Error("Resume has no model input")
+}
+
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
@@ -919,6 +1005,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   for (const msg of source) {
     if (msg.parts.length === 0) continue
+    if (msg.info.role === "assistant" && msg.parts.every((part) =>
+      part.type === "step-start" || part.type === "step-finish" || part.type === "retry" ||
+      (part.type === "text" && (part.ignored || part.text.trim().length === 0)) ||
+      (part.type === "reasoning" && part.text.trim().length === 0),
+    )) continue
 
     if (projection && msg.info.id === projection.summary_message_id) {
       result.push({

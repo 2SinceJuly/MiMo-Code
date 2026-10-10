@@ -146,10 +146,11 @@ describe("invalid-output continuation — integration", () => {
       expect(result.candidates).toMatchObject([{ kind: "assistant", assistantMessageID: assistant?.info.id }])
       expect(result.resumeStatus).toBe(202)
       expect(result.providerCalls).toBe(2)
-      expect(result.afterResume.some((message) => message.info.id === assistant?.info.id)).toBe(false)
+      // [TP-SR-R21-27] The original empty container stays outside the request, not deleted merely for being empty.
+      expect(result.afterResume.find((message) => message.info.id === assistant?.info.id)).toEqual(assistant)
       const users = result.afterResume.filter((message) => message.info.role === "user")
       expect(users.map((message) => message.info.id)).toEqual(result.atBarrier.filter((message) => message.info.role === "user").map((message) => message.info.id))
-      const recovered = result.afterResume.find((message) => message.info.role === "assistant")
+      const recovered = result.afterResume.find((message) => message.info.role === "assistant" && message.info.id !== assistant?.info.id)
       expect(recovered?.info).toMatchObject({ role: "assistant", parentID: users[0].info.id, finish: "stop", time: { completed: expect.any(Number) } })
       expect(recovered?.parts.some((part) => part.type === "text" && part.text === "recovered answer")).toBe(true)
     } finally {

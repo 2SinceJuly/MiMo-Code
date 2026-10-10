@@ -598,6 +598,7 @@ export type RecoveryCandidate =
 
 export interface ResumeTurnInput {
   sessionID: SessionID
+  attempt?: HostModelTransport.ExecutionAttempt
   /** tool/user-resume of an incomplete assistant (existing). */
   assistantMessageID?: MessageID
   /** trailing-user resume: start a new run from this user (no new user message). */
@@ -3527,57 +3528,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return true
     }
 
-    /**
-     * Delete empty-residue assistants under one parent user.
-     * `parentMessageID` is required: cleanup is parent-scoped, never session-wide.
-     * - Live empty shells (busy, no terminal marker) are skipped by default.
-     * - `preserveError`: keep empty shells that carry `error` (recovery candidates / failure site).
-     * - `force`: post-run ensuring sweep; still respects preserveError.
-     * Resolved structured output and summaries are retained even without useful parts.
-     * `error` is a keep-for-recovery signal, not useful content.
-     */
-    const cleanupEmptyResidueAssistants = Effect.fn("SessionPrompt.cleanupEmptyResidueAssistants")(function* (input: {
-      sessionID: SessionID
-      agentID?: string
-      parentMessageID: MessageID
-      sessionBusy?: boolean
-      force?: boolean
-      /** Default true: keep error-marked empty shells for recovery; user-resume pre-clean passes false. */
-      preserveError?: boolean
-    }) {
-      const busy = input.sessionBusy ?? (yield* status.get(input.sessionID)).type !== "idle"
-      const preserveError = input.preserveError ?? true
-      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
-      const removed: MessageID[] = []
-      let skippedLive = 0
-      let skippedError = 0
-      for (const msg of msgs) {
-        if (msg.info.role !== "assistant") continue
-        if (msg.info.parentID !== input.parentMessageID) continue
-        if (!isEmptyAssistantResidue(msg.info, msg.parts)) continue
-        if (preserveError && msg.info.error) {
-          skippedError += 1
-          continue
-        }
-        const liveOwned = !input.force && busy && !msg.info.error && !("completed" in msg.info.time)
-        if (liveOwned) {
-          skippedLive += 1
-          continue
-        }
-        yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: msg.info.id })
-        removed.push(msg.info.id)
-      }
-      if (removed.length > 0 || skippedLive > 0 || skippedError > 0)
-        elog.info("empty-residue-assistants-cleanup", {
-          sessionID: input.sessionID,
-          parentMessageID: input.parentMessageID,
-          removed,
-          skippedLive,
-          skippedError,
-        })
-      return removed
-    })
-
     const recovery = Effect.fn("SessionPrompt.recovery")(function* (input: { sessionID: SessionID; agentID?: string; allowBusy?: boolean }) {
       if (!input.allowBusy && (yield* status.get(input.sessionID)).type !== "idle") return []
       const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
@@ -3610,26 +3560,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       }
       return candidates
-    })
-
-    const abandonRecoveredAssistant = Effect.fn("SessionPrompt.abandonRecoveredAssistant")(function* (input: {
-      sessionID: SessionID
-      assistantMessageID: MessageID
-      agentID?: string
-    }) {
-      const messages = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
-      const message = messages.find((item) => item.info.id === input.assistantMessageID)
-      if (!message || message.info.role !== "assistant") return
-      // Empty residue must not get an Abandoned-as-resumed stamp — that would fake a continue.
-      // Shells are deleted by cleanup.
-      if (isEmptyAssistantResidue(message.info, message.parts)) return
-      // Already completed with error => idempotent skip
-      if ("completed" in message.info.time && message.info.error) return
-      yield* sessions.updateMessage({
-        ...message.info,
-        time: { ...message.info.time, completed: message.info.time.completed ?? Date.now() },
-        error: new MessageV2.AbortedError({ message: "Abandoned: resumed as a new assistant turn" }).toObject(),
-      })
     })
 
     const runLoop: (
@@ -6236,16 +6166,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return result
     })
 
-    /**
-     * Resume has exactly two launch paths (no cleanup-only that skips runLoop):
-     * - **tool-resume**: target assistant has useful parts (tool / non-synthetic text / non-empty reasoning)
-     *   → abandon + `resumeFrom` continue that assistant.
-     * - **user-resume**: target has no such parts (dirty empty shells), or the recovery target is a
-     *   trailing user (D16f) → delete empty residue under that user, re-run from that user (no assistant prefill).
-     * Classification uses only the assistant the client clicked; empty shells are dirty data
-     * cleaned during user-resume, not a third product path.
-     * busy / vanished target → reject (no removeMessage).
-     */
+    // Preserve the reviewed target shape through admission; both plans trim and restart from the original user.
     type ResumePlan =
       | { action: "tool-resume"; assistantMessageID: MessageID; parentMessageID: MessageID }
       | { action: "user-resume"; parentMessageID: MessageID; assistantMessageID?: MessageID; strictTail?: boolean }
@@ -6334,7 +6255,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return user
     })
 
-    /** Launch: tool-resume continues the assistant; user-resume re-runs from the parent user. Both start runLoop. */
+    /** Trim only after exclusive target validation; the new output is never a prefill. */
     const launchResume = Effect.fn("SessionPrompt.launchResume")(function* (input: {
       sessionID: SessionID
       agentID: string
@@ -6342,6 +6263,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       titleLocale?: string
       model?: ResumeTurnInput["model"]
       plan: Exclude<ResumePlan, { action: "reject" }>
+      attempt?: HostModelTransport.ExecutionAttempt
       mode: "ensure" | "start"
       waitForAdmission?: boolean
     }) {
@@ -6361,11 +6283,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const strictTail = plan.action === "user-resume" && plan.strictTail === true
       // [C001] start() forks work; HTTP must wait for admission handshake, not the full turn.
       const admission = yield* Deferred.make<void, InstanceType<typeof NotFoundError> | Session.BusyError>()
+      let trim: ReturnType<typeof MessageV2.planResumeTrim> | undefined
+      let trimModel: Provider.Model | undefined
 
-      const admit = Effect.gen(function* () {
-        yield* Effect.yieldNow
-        const beforeAdmission = ResumeTestHooks.beforeAdmissionRecheck
-        if (beforeAdmission) yield* beforeAdmission()
+      const execution = input.attempt ? {
+        attempt: input.attempt,
+        directory: (yield* InstanceState.context).directory,
+        sessionID: input.sessionID,
+        userMessageID: plan.parentMessageID,
+      } : undefined
+      const outcome = yield* Deferred.make<Exit.Exit<MessageV2.WithParts>>()
+      let activation: HostModelTransport.ExecutionActivation | void
+      const prepare = Effect.gen(function* () {
         if (yield* resumeInputPending(input.sessionID)) {
           const err = new Session.BusyError(input.sessionID)
           yield* Deferred.fail(admission, err)
@@ -6395,8 +6324,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* Deferred.fail(admission, err)
           throw err
         }
-        yield* Deferred.succeed(admission, void 0)
+        trim = yield* Effect.sync(() => MessageV2.planResumeTrim(tailMsgs, plan.parentMessageID)).pipe(
+          Effect.catchCause(() => Effect.sync(() => { throw new NotFoundError({ message: "No safe resume history boundary" }) })),
+        )
+        const parent = tailMsgs[parentIdx].info as MessageV2.User
+        trimModel = yield* getModel(
+          input.model ? ProviderID.make(input.model.providerID) : parent.model.providerID,
+          input.model ? ModelID.make(input.model.modelID) : parent.model.modelID,
+          input.sessionID,
+          parent,
+        )
+        const converted = yield* MessageV2.toModelMessagesEffect(trim.messages, trimModel, { stripMedia: true })
+        yield* Effect.sync(() => MessageV2.assertResumeModelBoundary(converted)).pipe(
+          Effect.catchCause(() => Effect.sync(() => { throw new NotFoundError({ message: "No complete resume tool-result boundary" }) })),
+        )
+      })
+      const admit = Effect.gen(function* () {
+        yield* Effect.yieldNow
+        const beforeAdmission = ResumeTestHooks.beforeAdmissionRecheck
+        if (beforeAdmission) yield* beforeAdmission()
+        yield* prepare
+        const hostInput = execution ? {
+          ...execution,
+          target: plan.assistantMessageID ? { assistantMessageID: plan.assistantMessageID } : { userMessageID: plan.parentMessageID },
+        } : undefined
+        if (hostInput) {
+          yield* Effect.promise(() => Promise.resolve(HostModelTransport.prepareExecution(hostInput)))
+          yield* prepare
+        }
+        yield* Effect.uninterruptible(Effect.gen(function* () {
+          if (hostInput) activation = yield* Effect.sync(() => HostModelTransport.admitExecution(hostInput))
+          yield* Deferred.succeed(admission, void 0)
+        }))
       }).pipe(
+        Effect.onExit((exit) => Exit.isFailure(exit) ? Deferred.succeed(outcome, Exit.failCause(exit.cause)).pipe(Effect.asVoid) : Effect.void),
         Effect.ensuring(
           Deferred.done(admission, Exit.fail(new NotFoundError({ message: "Resume admission did not complete" }))).pipe(
             Effect.asVoid,
@@ -6406,113 +6367,59 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       )
 
       const work = Effect.gen(function* () {
+        if (activation) yield* Effect.promise(activation.beforeWork)
         const afterAdmission = ResumeTestHooks.afterAdmissionBeforeCleanup
         if (afterAdmission) yield* afterAdmission()
-        return yield* (plan.action === "user-resume"
-          ? Effect.gen(function* () {
-              // [C003] strict trailing-user must NOT pre-clean: deleting a later
-              // empty assistant would manufacture a legal tail after admission.
-              // Empty-shell user-resume still clears residue under parent so
-              // lastAssistant is not a dirty shell blocking re-dispatch.
-              if (!strictTail) {
-                yield* cleanupEmptyResidueAssistants({
-                  sessionID: input.sessionID,
-                  agentID: input.agentID,
-                  parentMessageID: plan.parentMessageID,
-                  sessionBusy: false,
-                  preserveError: false,
-                })
-              }
-              // [C003] Force cleanup runs only after successful runLoop return so a later
-              // step-0 strict reject cannot delete a subsequent empty assistant it did not create.
-              const result = yield* runLoop(
-                input.sessionID,
-                input.agentID,
-                input.task_id,
-                input.titleLocale,
-                false,
-                undefined,
-                input.model,
-                true,
-                // user-resume re-runs from the parent user message — trusted user source.
-                "user",
-                plan.parentMessageID,
-                strictTail,
-              )
-              yield* cleanupEmptyResidueAssistants({
-                sessionID: input.sessionID,
-                agentID: input.agentID,
-                parentMessageID: plan.parentMessageID,
-                force: true,
-                preserveError: true,
-              }).pipe(
-                Effect.catchCause((cause) =>
-                  elog.warn("empty-residue-assistants-cleanup-failed", {
-                    sessionID: input.sessionID,
-                    parentMessageID: plan.parentMessageID,
-                    phase: "after-success",
-                    cause,
-                  }),
-                ),
-              )
-              return result
-            })
-          : Effect.gen(function* () {
-              yield* cleanupEmptyResidueAssistants({
-                sessionID: input.sessionID,
-                agentID: input.agentID,
-                parentMessageID: plan.parentMessageID,
-                sessionBusy: false,
-                preserveError: true,
-              })
-              yield* abandonRecoveredAssistant({
-                sessionID: input.sessionID,
-                assistantMessageID: plan.assistantMessageID,
-                agentID: input.agentID,
-              })
-              return yield* runLoop(
-                input.sessionID,
-                input.agentID,
-                input.task_id,
-                input.titleLocale,
-                false,
-                plan.assistantMessageID,
-                input.model,
-                // tool-resume continues an assistant turn — not a user-source turn.
-                undefined,
-                "hook",
-                plan.parentMessageID,
-              )
-            }).pipe(
-              Effect.ensuring(
-                abandonRecoveredAssistant({
-                  sessionID: input.sessionID,
-                  assistantMessageID: plan.assistantMessageID,
-                  agentID: input.agentID,
-                }).pipe(
-                  Effect.catchCause((cause) =>
-                    elog.warn("recovered-assistant-abandon-failed", {
-                      sessionID: input.sessionID,
-                      messageID: plan.assistantMessageID,
-                      cause,
-                    }),
-                  ),
-                ),
-              ),
-            ))
-      })
+        if (!trim || !trimModel) throw new Error("Resume trim was not admitted")
+        for (const messageID of trim.removeMessages) yield* sessions.removeMessage({ sessionID: input.sessionID, messageID })
+        for (const part of trim.removeParts) yield* sessions.removePart({ sessionID: input.sessionID, messageID: part.messageID, partID: part.id })
+        for (const part of trim.updateParts) yield* sessions.updatePart(part)
+        for (const message of trim.updateMessages) yield* sessions.updateMessage(message)
+        const committed = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })
+        MessageV2.assertResumeModelBoundary(yield* MessageV2.toModelMessagesEffect(committed, trimModel, { stripMedia: true }))
+        return yield* runLoop(
+          input.sessionID,
+          input.agentID,
+          input.task_id,
+          input.titleLocale,
+          false,
+          undefined,
+          input.model,
+          true,
+          plan.action === "user-resume" ? "user" : "hook",
+          plan.parentMessageID,
+          strictTail,
+        )
+      }).pipe(
+        Effect.provideService(HostModelTransport.ExecutionScope, execution),
+        Effect.onExit((exit) => Deferred.succeed(outcome, exit).pipe(Effect.asVoid)),
+      )
 
       // [R003] Exclusive admission: never join an unrelated run (ensureRunning would).
       // ensure mode waits for work result (sync resume()); start mode forks (HTTP 202 after handshake).
-      if (input.mode === "ensure") {
+      if (input.mode === "ensure" && !execution) {
         return yield* state.ensureExclusive(input.sessionID, input.agentID, resumeInterrupt, admit.pipe(Effect.andThen(work)))
       }
-      if (!input.waitForAdmission && !strictTail) {
+      if (!input.waitForAdmission && !strictTail && !execution) {
         yield* state.start(input.sessionID, input.agentID, resumeInterrupt, work, admit)
         return undefined
       }
-      const owned = yield* state.startOwned(input.sessionID, input.agentID, resumeInterrupt, work, admit)
-      if (input.waitForAdmission || strictTail) {
+      const owned = yield* Effect.uninterruptible(Effect.gen(function* () {
+        const owned = yield* state.startOwned(input.sessionID, input.agentID, resumeInterrupt, work.pipe(Effect.interruptible), admit.pipe(Effect.interruptible))
+        if (execution) yield* owned.awaitExit.pipe(
+          Effect.andThen(Effect.sync(() => HostModelTransport.finishExecution(execution.attempt))),
+          Effect.ensuring(Deferred.succeed(outcome, Exit.die(new Error("Resume execution ended before work"))).pipe(Effect.asVoid)),
+          Effect.forkIn(scope),
+        )
+        return owned
+      }))
+      if (input.mode === "ensure") {
+        yield* owned.awaitExit
+        const exit = yield* Deferred.await(outcome)
+        if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause)
+        return exit.value
+      }
+      if (input.waitForAdmission || strictTail || execution) {
         const handshake = yield* Deferred.await(admission).pipe(
           Effect.timeout("5 seconds"),
           Effect.exit,
@@ -6592,6 +6499,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         titleLocale: input.titleLocale,
         model: input.model,
         plan,
+        attempt: input.attempt,
         mode: "ensure",
       })
       if (launched === undefined) {
@@ -6657,6 +6565,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         titleLocale: input.titleLocale,
         model: input.model,
         plan,
+        attempt: input.attempt,
         mode: "start",
         waitForAdmission: input.waitForAdmission,
       })
@@ -6727,6 +6636,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               titleLocale: input.titleLocale,
               model: input.model,
               plan,
+              attempt: input.attempt,
               // Join the Runner so runTurn can settle registry + notify on exit.
               mode: "ensure",
             }).pipe(
