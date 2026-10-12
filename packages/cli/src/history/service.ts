@@ -159,7 +159,7 @@ export const layer = Layer.effect(
         }
         const hayN = chars.join("")
         const qn = input.query.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
-        const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).filter(Boolean)
+        const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).map((s) => s.trim()).filter(Boolean)
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
           const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
@@ -187,7 +187,7 @@ export const layer = Layer.effect(
         for (const rawSeg of segments) {
           const seg = rawSeg.trim()
           if (!seg) continue
-          const segWords = seg.match(/[\p{L}\p{N}_]+/gu) ?? []
+          const segWords = seg.match(/[\p{L}\p{N}_]+/gu)?.flatMap((w) => w.split(/_/).filter(Boolean)) ?? []
           if (!segWords.length) continue
           // Mirror buildFtsQuery: punct segment or contiguous run = one phrase;
           // whitespace-separated multi-word = token AND.
