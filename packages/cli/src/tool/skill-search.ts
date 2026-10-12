@@ -25,7 +25,7 @@ export const SkillSearchTool = Tool.define(
 
     return {
       description: [
-        "Search the available non-Compose skills using exact ID/name/alias matching and BM25 relevance.",
+        "Search the available skills using exact ID/name/alias matching and BM25 relevance.",
         "Include: action, input, desired output, and audience. Omit dimensions the user did not provide.",
         "An exact high-confidence match is loaded automatically; uncertain matches are returned for you to assess.",
       ].join("\n"),

@@ -94,13 +94,13 @@ describe("skill.search", () => {
     expect(results[0]).toMatchObject({ skill_id: "data-analytics", score: 1 })
   })
 
-  test("excludes compose skills from the searchable manifest", () => {
-    expect(searchSkills("compose:tdd", [skill("compose:tdd", "Use test-driven development.")])).toEqual([])
+  test("compose-named skills are searchable like any other skill", () => {
+    expect(searchSkills("compose:tdd", [skill("compose:tdd", "Use test-driven development.")])).toEqual([
+      expect.objectContaining({ skill_id: "compose:tdd" }),
+    ])
   })
 
-  test("does not special-case compose-next: its name is not a compose: namespace", () => {
-    // Compose Next is a normal model-invocable skill. Legacy compose:* skills
-    // remain excluded by the namespace filter.
+  test("compose-next is a normal model-invocable skill", () => {
     const results = searchSkills("compose-next", [
       skill("compose-next", "End-to-end feature orchestration for frontier models."),
     ])

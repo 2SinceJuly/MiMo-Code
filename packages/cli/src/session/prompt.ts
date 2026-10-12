@@ -3,7 +3,7 @@ import path from "path"
 import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
-import { MessageV2, COMPOSE_REMINDER_MARKER, promoteComposeProtocolFirst } from "./message-v2"
+import { MessageV2, COMPOSE_REMINDER_MARKER } from "./message-v2"
 export { COMPOSE_REMINDER_MARKER }
 import {
   base64ByteSize,
@@ -20,7 +20,7 @@ import { classifyAssistantStep } from "./classify"
 import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
-import { Agent } from "../agent/agent"
+import { Agent, resolveStoredAgent } from "../agent/agent"
 import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy } from "@/agent/config"
 import { makeTerminalNotifier } from "@/actor/notification"
 import { ActorExecution } from "@/actor/execution"
@@ -58,7 +58,6 @@ import { TuiEvent } from "@/cli/cmd/tui/event"
 import { Plugin } from "../plugin"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
-import PROMPT_COMPOSE from "../session/prompt/compose.txt"
 import {
   RECOVERY_PROMPT_MILD,
   RECOVERY_PROMPT_STRONG,
@@ -118,7 +117,7 @@ import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
 import * as Stream from "effect/Stream"
 import { Command } from "../command"
 import { pathToFileURL, fileURLToPath } from "url"
-import { ConfigMarkdown, ConfigCompose } from "../config"
+import { ConfigMarkdown } from "../config"
 import { SessionSummary } from "./summary"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { SessionProcessor } from "./processor"
@@ -1413,21 +1412,11 @@ export const layer = Layer.effect(
       message: MessageV2.WithParts
       marker: string
       text: string
-      /**
-       * `head` promotes the compose protocol to parts[0] for this request.
-       * Durable load-order lives in MessageV2.promoteComposeProtocolFirst
-       * (hydrate/parts); this flag only aligns the in-memory slice before
-       * the first DB reload after inject.
-       */
-      position?: "append" | "head"
     }) {
       const existingIdx = input.message.parts.findIndex(
         (p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(input.marker),
       )
-      if (existingIdx >= 0) {
-        if (input.position === "head") promoteComposeProtocolFirst(input.message.parts as MessageV2.Part[])
-        return
-      }
+      if (existingIdx >= 0) return
       const part = yield* sessions.updatePart({
         id: PartID.ascending(),
         messageID: input.message.info.id,
@@ -1437,7 +1426,6 @@ export const layer = Layer.effect(
         text: input.text,
       })
       input.message.parts.push(part)
-      if (input.position === "head") promoteComposeProtocolFirst(input.message.parts as MessageV2.Part[])
     })
 
     const insertReminders = Effect.fn("SessionPrompt.insertReminders")(function* (input: {
@@ -1453,26 +1441,7 @@ export const layer = Layer.effect(
         ...input.agent,
         permission: Agent.runtimePermission(input.agent, input.session.permission),
       }
-      const composeModeMsg = input.messages.find(
-        (msg) => msg.info.role === "user" && msg.info.agent === "compose",
-      )
       const cfg = yield* config.get()
-      if (composeModeMsg) {
-        const ctx = yield* InstanceState.context
-        const composeCfg = cfg.compose
-        const docsDir = ConfigCompose.resolveDocsDir(ctx.worktree, composeCfg)
-        const text = PROMPT_COMPOSE.replace(
-          "{{compose_docs_dir}}",
-          `Save compose skill outputs: specs in \`${path.join(docsDir, "specs")}\`, plans in \`${path.join(docsDir, "plans")}\`, reports in \`${path.join(docsDir, "reports")}\`.`,
-        )
-        yield* ensurePersistedUserSynthetic({
-          message: composeModeMsg,
-          marker: COMPOSE_REMINDER_MARKER,
-          text,
-          position: "head",
-        })
-      }
-
       const assistantMessage = input.messages.findLast((msg) => msg.info.role === "assistant")
       if (!Flag.MIMOCODE_DISABLE_BUILTIN_SKILLS && !Flag.MIMOCODE_DISABLE_OFFICIAL_SKILLS) {
         const fileCandidates = userMessage.parts.flatMap((p) => {
@@ -4593,7 +4562,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .pipe(Effect.catch(() => Effect.succeed(false)))
             if (hasRecallTarget) {
               const sessMemDir = path.join(Global.Path.data, "memory", "sessions", sessionID)
-              const hints = recallHintLines(hasActorTool(yield* agents.get(lastUser.agent)))
+              const hints = recallHintLines(hasActorTool(yield* resolveStoredAgent(agents, lastUser.agent)))
               yield* ensurePersistedUserSynthetic({
                 message: lastUserMsgForRecall,
                 marker: RECALL_REMINDER_MARKER,
@@ -4788,7 +4757,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // Bounded computation agents (native + hidden — currently title,
           // summary, checkpoint-writer) are exempt from context management;
           // see docs/superpowers/specs/2026-04-28-bounded-computation-agents-design.md
-          const agent = yield* agents.get(lastUser.agent)
+          const agent = yield* resolveStoredAgent(agents, lastUser.agent)
           const isBoundedComputation =
             agent?.native === true && agent?.hidden === true
 
@@ -4915,8 +4884,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
           skipOverflowCheck = false
 
-          // `agent` resolved at iteration start; reuse here for the
-          // agent-not-found user-visible error.
+          // `agent` resolved at iteration start via resolveStoredAgent (historical
+          // names fall back to the default agent), so this branch only fires if
+          // the default agent itself is missing.
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""

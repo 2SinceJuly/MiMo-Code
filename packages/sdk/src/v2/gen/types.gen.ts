@@ -2251,19 +2251,6 @@ export type Config = {
      */
     urls?: Array<string>
   }
-  /**
-   * Compose mode configuration
-   */
-  compose?: {
-    /**
-     * Directory where compose skills save specs, plans, and reports. Relative paths are passed to the agent prompt verbatim; set docs_absolute: true to anchor them to the project root. Defaults to docs/compose.
-     */
-    docs?: string
-    /**
-     * Whether the docs directory injected into the compose prompt is an absolute path. When false (default), a relative `docs` value is passed through verbatim. When true, a relative `docs` is resolved against the active worktree root so it is unambiguous regardless of the agent's working directory. Ignored when `docs` is already absolute.
-     */
-    docs_absolute?: boolean
-  }
   watcher?: {
     ignore?: Array<string>
   }

@@ -620,7 +620,11 @@ function hit(url: string, body: unknown) {
 
 function isTitleRequest(body: unknown): boolean {
   if (!body || typeof body !== "object") return false
-  return JSON.stringify(body).includes("Generate a title for this conversation")
+  // Must match the real PROMPT_TITLE body (agent/prompt/title.txt). A stale
+  // phrase here makes title generation fall through to pull() and steal a
+  // queued reply from whichever test is running — e.g. WorkflowRuntime
+  // structure tree sees ["done", "ok"] instead of ["done", "done"].
+  return JSON.stringify(body).includes("You are a title generator")
 }
 
 namespace TestLLMServer {

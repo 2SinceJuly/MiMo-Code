@@ -211,7 +211,7 @@ test("build agent unaffected — no hardPermission", async () => {
   })
 })
 
-test("compose:* skills are denied for build/plan, allowed for compose", async () => {
+test("default skill rules no longer special-case compose:*", async () => {
   await using tmp = await tmpdir()
   await Instance.provide({
     directory: tmp.path,
@@ -220,20 +220,25 @@ test("compose:* skills are denied for build/plan, allowed for compose", async ()
       for (const name of ["build", "plan"]) {
         const agent = agents.find((a) => a.name === name)
         expect(agent).toBeDefined()
-        expect(Permission.evaluate("skill", "compose:brainstorm", agent!.permission).action).toBe("deny")
-        expect(Permission.evaluate("skill", "compose:tdd", agent!.permission).action).toBe("deny")
-        expect(Permission.evaluate("skill", "compose:review", agent!.permission).action).toBe("deny")
+        // compose:* skills are retired; namespaced lookups are ordinary skills.
+        expect(Permission.evaluate("skill", "compose:brainstorm", agent!.permission).action).toBe("allow")
       }
-      const compose = agents.find((a) => a.name === "compose")
-      expect(compose).toBeDefined()
-      expect(Permission.evaluate("skill", "compose:brainstorm", compose!.permission).action).toBe("allow")
-      expect(Permission.evaluate("skill", "compose:tdd", compose!.permission).action).toBe("allow")
-      expect(Permission.evaluate("skill", "compose:review", compose!.permission).action).toBe("allow")
-      // Non-compose skills remain allowed for all agents
-      expect(Permission.evaluate("skill", "effect", agents.find((a) => a.name === "build")!.permission).action).toBe(
-        "allow",
-      )
-      expect(Permission.evaluate("skill", "effect", compose!.permission).action).toBe("allow")
+      expect(agents.find((a) => a.name === "compose")).toBeUndefined()
+    },
+  })
+})
+
+test("resolveStoredAgent maps historical compose (and any unknown name) to the default agent", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const compose = await load(tmp.path, (svc) => Agent.resolveStoredAgent(svc, "compose"))
+      expect(compose.name).toBe("build")
+      const unknown = await load(tmp.path, (svc) => Agent.resolveStoredAgent(svc, "no-such-agent-xyz"))
+      expect(unknown.name).toBe("build")
+      const plan = await load(tmp.path, (svc) => Agent.resolveStoredAgent(svc, "plan"))
+      expect(plan.name).toBe("plan")
     },
   })
 })
@@ -250,19 +255,6 @@ test("plan_exit is allowed for build and plan agents", async () => {
         const disabled = Permission.disabled(["plan_exit"], agent!.permission)
         expect(disabled.has("plan_exit")).toBe(false)
       }
-    },
-  })
-})
-
-test("plan_exit is denied for compose agent", async () => {
-  await using tmp = await tmpdir()
-  await Instance.provide({
-    directory: tmp.path,
-    fn: async () => {
-      const compose = await load(tmp.path, (svc) => svc.get("compose"))
-      expect(compose).toBeDefined()
-      const disabled = Permission.disabled(["plan_exit"], compose!.permission)
-      expect(disabled.has("plan_exit")).toBe(true)
     },
   })
 })
@@ -651,7 +643,7 @@ test("Agent.list keeps the default agent first, then native primaries, then the 
       // default_agent comes first
       expect(names[0]).toBe("plan")
       expect(names[1]).toBe("build")
-      expect(names[2]).toBe("compose")
+      expect(names).not.toContain("compose")
     },
   })
 })
@@ -1010,14 +1002,13 @@ test("defaultAgent throws when all primary agents are disabled", async () => {
       agent: {
         build: { disable: true },
         plan: { disable: true },
-        compose: { disable: true },
       },
     },
   })
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      // build, plan, compose are disabled — no primary agents remain
+      // build and plan are disabled — no primary agents remain
       await expect(load(tmp.path, (svc) => svc.defaultAgent())).rejects.toThrow("no primary visible agent found")
     },
   })
@@ -1128,22 +1119,22 @@ test("title/summary/checkpoint-writer are mode=subagent + hidden (spawnable filt
   })
 })
 
-// Regression for ses_19d1aa927: the fork agent (checkpoint-writer) inherits
-// compose's tool list verbatim (Task 2.6 removed toolAllowlist). This test
-// confirms the patch-swap in registry.ts fires correctly per model family.
-itTool.live("compose's tool list swaps GPT-specific file tools", () =>
+// The fork agent (checkpoint-writer) inherits the primary agent's tool list
+// verbatim (Task 2.6 removed toolAllowlist). This test confirms the
+// patch-swap in registry.ts fires correctly per model family.
+itTool.live("build's tool list swaps GPT-specific file tools", () =>
   provideTmpdirInstance((dir) =>
     Effect.gen(function* () {
       const agents = yield* Agent.Service
-      const compose = yield* agents.get("compose")
-      expect(compose).toBeDefined()
+      const build = yield* agents.get("build")
+      expect(build).toBeDefined()
 
       const registry = yield* ToolRegistry.Service
 
       const gptTools = yield* registry.tools({
         modelID: ModelID.make("gpt-5.5"),
         providerID: ProviderID.make("openai"),
-        agent: compose!,
+        agent: build!,
       })
       const gptIDs = gptTools.map((t) => t.id)
       expect(gptIDs).toContain("exec")
@@ -1159,7 +1150,7 @@ itTool.live("compose's tool list swaps GPT-specific file tools", () =>
       const claudeTools = yield* registry.tools({
         modelID: ModelID.make("claude-opus-4-7"),
         providerID: ProviderID.make("anthropic"),
-        agent: compose!,
+        agent: build!,
       })
       const claudeIDs = claudeTools.map((t) => t.id)
       expect(claudeIDs).toContain("edit")
@@ -1172,7 +1163,7 @@ itTool.live("compose's tool list swaps GPT-specific file tools", () =>
         yield* registry.tools({
           modelID: ModelID.make("claude-opus-4-7"),
           providerID: ProviderID.make("anthropic"),
-          agent: compose!,
+          agent: build!,
           harness: "codex",
         })
       ).map((tool) => tool.id)

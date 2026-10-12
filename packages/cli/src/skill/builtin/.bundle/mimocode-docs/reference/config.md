@@ -38,7 +38,7 @@ Memory files live under `~/.local/share/mimocode/memory/`:
 - `MIMOCODE_MIMO_ONLY` — pure-MiMo mode: don't inherit Claude Code settings (CLAUDE.md, `~/.claude/CLAUDE.md`), don't read provider API keys from env, fall back to the mimo-auto model.
 - **External skill roots** — default load surface is `.mimocode` + open-standard `.agents`. Brand roots are opt-in: `MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS`, `MIMOCODE_ENABLE_CODEX_SKILLS`, `MIMOCODE_ENABLE_OPENCODE_SKILLS`. Turn agents off with `MIMOCODE_DISABLE_AGENTS_SKILLS`. External scans skip dotted path segments under `skills/`.
 - `MIMOCODE_ENABLE_CLAUDE_IMPORT` — automatically import Claude Code sessions on startup; off by default. Set to `true` or `1` to enable. Manual session imports remain available; Codex sessions are imported only on explicit request.
-- `MIMOCODE_DISABLE_BUILTIN_SKILLS`, `_COMPOSE_SKILLS`, `_PROJECT_CONFIG` — feature toggles.
+- `MIMOCODE_DISABLE_BUILTIN_SKILLS`, `_PROJECT_CONFIG` — feature toggles.
 
 ## Top-level config keys
 
@@ -138,7 +138,6 @@ The trigger is the model's prompt capacity (`limit.input` when the provider publ
 | `distill.auto` / `distill.interval_days` | Auto workflow packaging (default true / 30 days) |
 | `voice.asr_model` | ASR model (default `xiaomi/mimo-v2.5-asr`) |
 | `voice.control_model` | Voice control model (default `xiaomi/mimo-v2.5`) |
-| `compose` | Compose mode config (`docs` dir default `docs/compose`, `docs_absolute`) |
 | `workflow.maxConcurrentAgents` | Process-wide subagent concurrency ceiling (default min(16, 2×cores)) |
 | `workflow.maxDepth` | Max workflow nesting depth (default 8) |
 

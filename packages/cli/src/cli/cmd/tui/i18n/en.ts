@@ -46,7 +46,7 @@ export const dict: Record<string, string> = {
   "tui.tips.shell_prefix":
     "Start a message with {highlight}!{/highlight} to run shell commands directly (e.g., {highlight}!ls -la{/highlight})",
   "tui.tips.tab_agent":
-    "Press {highlight}Tab{/highlight} or {highlight}Shift+Tab{/highlight} to cycle between Build, Plan, and Compose agents",
+    "Press {highlight}Tab{/highlight} or {highlight}Shift+Tab{/highlight} to cycle between Build and Plan agents",
   "tui.tips.theme_mode":
     "Run {highlight}/dark{/highlight} for dark mode or {highlight}/light{/highlight} for light mode",
   "tui.tips.doc": "Run {highlight}/doc{/highlight} to open the user documentation",
@@ -58,7 +58,7 @@ export const dict: Record<string, string> = {
     "Run {highlight}/background{/highlight} to set a custom image as your home background",
   "tui.tips.vivid": "Run {highlight}/vivid{/highlight} to switch between Vivid and Minimal visuals as needed",
   "tui.tips.compose_next":
-    "Try {highlight}/compose-next{/highlight} instead of the Compose agent for frontier models",
+    "{highlight}/compose-next{/highlight} — clarify, spec, implement, review",
   "tui.tips.undo": "Use {highlight}/undo{/highlight} to revert the last message and file changes",
   "tui.tips.redo": "Use {highlight}/redo{/highlight} to restore previously undone messages and file changes",
   "tui.tips.drag_drop": "Drag and drop images or PDFs into the terminal to add them as context",
@@ -222,22 +222,8 @@ export const dict: Record<string, string> = {
     "Analyze product and business data, design KPIs, and build dashboards and reports",
   "tui.skill.product-design.description": "Research, audit, prototype, and validate product and UX designs",
   "tui.skill.sales.description": "Prepare meetings, research accounts, plan deals, and work with sales systems",
-  "tui.skill.compose:ask.description": "Ask the user for decisions or clarifications",
-  "tui.skill.compose:brainstorm.description": "Explore requirements and design before implementation",
-  "tui.skill.compose:debug.description": "Systematic debugging before proposing fixes",
-  "tui.skill.compose:execute.description": "Execute an implementation plan with review checkpoints",
-  "tui.skill.compose:feedback.description": "Handle code review feedback with technical rigor",
-  "tui.skill.compose:merge.description": "Integrate completed work — merge, PR, or cleanup",
-  "tui.skill.compose:parallel.description": "Run independent tasks concurrently",
-  "tui.skill.compose:plan.description": "Create a step-by-step implementation plan from spec",
-  "tui.skill.compose:report.description": "Consolidate implementation into a final-state report",
-  "tui.skill.compose:review.description": "Verify work meets requirements before merging",
-  "tui.skill.compose:subagent.description": "Dispatch independent tasks to fresh sub-agents",
-  "tui.skill.compose:tdd.description": "Test-driven development — write tests before code",
-  "tui.skill.compose:verify.description": "Run verification and confirm passing output",
-  "tui.skill.compose:worktree.description": "Create an isolated workspace for feature work",
   "tui.skill.compose-next.description":
-    "Next-generation orchestration: end-to-end feature work (grill, spec, implement, verify, review, finish) for strong models",
+    "End-to-end delivery: clarify, spec, implement, review",
 
   // Language switching
   "tui.command.language.switch.title": "Switch language",

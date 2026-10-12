@@ -12,7 +12,6 @@ import fs from "fs/promises"
 // existing .claude/.codex discovery cases stay meaningful; default-surface and
 // dotted-dir negatives live in skill-external-roots.test.ts.
 withEnv({
-  MIMOCODE_DISABLE_COMPOSE_SKILLS: "true",
   MIMOCODE_DISABLE_BUILTIN_SKILLS: "true",
   MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS: "true",
   MIMOCODE_ENABLE_CODEX_SKILLS: "true",

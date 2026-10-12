@@ -131,14 +131,13 @@ Inspect/manage with `mimo mcp`. Request timeout defaults to 5000ms (`timeout` pe
 
 ## Compose mode
 
-Compose is MiMoCode's specs-driven spec→ship lifecycle. Two interactive paths:
+Use the `compose-next` skill for end-to-end feature delivery:
 
-- **Recommended: `compose-next` on Build** — one self-contained skill covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. Built for frontier models (Fable/Sol-class). The model may invoke it after the user explicitly requests this workflow by slash command, name, or any other clear natural language; it must not infer that request from task complexity.
-- **Legacy: the `compose` agent** (switch with `Tab`) — coordinates built-in skills (plan, tdd, debug, review, verify, merge) across the lifecycle; its step-by-step curriculum remains useful for weaker models.
+- **`compose-next`** — one self-contained skill covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. Do not combine it with plan mode.
 
-Artifacts land under `docs/compose/` by default (`specs/`, `plans/`, `reports/`). Change the location with `compose.docs`; set `compose.docs_absolute: true` to anchor a relative path to the worktree root.
+Artifacts land under `docs/compose/spec/` by default.
 
-For well-defined tasks that split into independent subtasks, prefer the deterministic **`compose` workflow** (fire-and-forget, auto-parallelized) over either interactive path — see @workflows.md.
+For well-defined tasks that split into independent subtasks, prefer a deterministic **workflow** (fire-and-forget, auto-parallelized) — see @workflows.md.
 
 ## Jupyter notebooks
 

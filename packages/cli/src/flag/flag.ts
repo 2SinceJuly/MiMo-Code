@@ -429,15 +429,8 @@ export const Flag = {
   // Evaluated at access time (not module load) because tests, the CLI, and
   // external tooling set these env vars at runtime.
 
-  // Disables compose-agent-internal skills (e.g. compose:plan, compose:review,
-  // compose:tdd). These are hidden workflow-orchestration skills only visible
-  // to the compose agent and are NOT part of builtin skills.
-  get MIMOCODE_DISABLE_COMPOSE_SKILLS() {
-    return truthy("MIMOCODE_DISABLE_COMPOSE_SKILLS")
-  },
   // Disables user-facing builtin skills shipped with the binary (e.g.
-  // mimocode-docs). Does not affect compose skills — the two sets are
-  // independent and non-overlapping.
+  // mimocode-docs).
   get MIMOCODE_DISABLE_BUILTIN_SKILLS() {
     return truthy("MIMOCODE_DISABLE_BUILTIN_SKILLS")
   },

@@ -195,7 +195,7 @@ description: Analyze quasar telemetry and operational metrics.
   )
 
   // Compose Next is available to the model; its description and body carry the
-  // semantic explicit-request boundary. Legacy compose:* remains filtered.
+  // semantic explicit-request boundary.
   it.live("surfaces compose-next to primary agents", () =>
     provideTmpdirInstance(
       () =>
@@ -214,7 +214,7 @@ description: Analyze quasar telemetry and operational metrics.
 
           const query = "use compose-next for end to end feature orchestration grill spec implement verify review finish"
 
-          for (const agentName of ["build", "plan", "compose"] as const) {
+          for (const agentName of ["build", "plan"] as const) {
             const agent = yield* agents.get(agentName)
             expect(agent).toBeDefined()
 

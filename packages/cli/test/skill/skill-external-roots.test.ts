@@ -10,7 +10,6 @@ import { withEnv } from "../lib/env"
 
 // Isolate from bundles and host ~/.agents. Each case sets the root env it needs.
 withEnv({
-  MIMOCODE_DISABLE_COMPOSE_SKILLS: "true",
   MIMOCODE_DISABLE_BUILTIN_SKILLS: "true",
   MIMOCODE_DISABLE_AGENTS_SKILLS: "true",
   MIMOCODE_ENABLE_CLAUDE_CODE_SKILLS: undefined,

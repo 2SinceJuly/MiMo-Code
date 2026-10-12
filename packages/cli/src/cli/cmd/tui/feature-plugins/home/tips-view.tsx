@@ -7,7 +7,6 @@ import { Flag } from "@/flag/flag"
 
 const themeCount = Object.keys(DEFAULT_THEMES).length
 const TIP_ROTATION_MS = 10_000
-const COMPOSE_LOCK_TIP = "tui.tips.compose_next"
 const LOGIN_TIP = "tui.tips.login"
 
 // Weighted tip priority. Higher weight = shown more often.
@@ -21,6 +20,7 @@ const PRIORITY_WEIGHTS: Record<string, number> = {
   "tui.tips.login": 40,
   "tui.tips.theme_mode": 40,
   "tui.tips.tab_agent": 40,
+  "tui.tips.compose_next": 35,
 
   "tui.tips.doc": 30,
   "tui.tips.models": 30,
@@ -32,6 +32,7 @@ const TIP_KEYS = [
   "tui.tips.multi_skills",
   "tui.tips.background",
   "tui.tips.vivid",
+  "tui.tips.compose_next",
   "tui.tips.theme_mode",
   "tui.tips.doc",
   "tui.tips.attach_file",
@@ -135,15 +136,13 @@ export function tipWeight(key: string) {
 }
 
 /**
- * Display override for the rotating tip. Compose deprecation wins over the
- * rotation; a credential-less install shows /login (default model needs auth).
+ * Display override for the rotating tip. A credential-less install shows
+ * /login (default model needs auth); otherwise the weighted rotation wins.
  */
 export function pickDisplayKey(input: {
-  agentName?: string
   authenticatedCount: number
   rotationKey: string
 }): string {
-  if (input.agentName === "compose") return COMPOSE_LOCK_TIP
   if (!input.authenticatedCount) return LOGIN_TIP
   return input.rotationKey
 }
@@ -204,15 +203,11 @@ export function Tips() {
   })
   const interval = setInterval(() => setKey(pickWeighted(allKeys())), TIP_ROTATION_MS)
   onCleanup(() => clearInterval(interval))
-  // Display override: while the current agent is Compose, show the compose-next
-  // deprecation tip in place of whatever the rotation currently holds. The
-  // rotation keeps running underneath; leaving Compose reveals the current
-  // rotation key with no artificial swap. With no authenticated provider,
-  // surface the /login tip instead so a credential-less install knows how to
-  // proceed (the default model requires login).
+  // With no authenticated provider, surface the /login tip instead so a
+  // credential-less install knows how to proceed (the default model requires
+  // login). Otherwise the weighted rotation is shown as-is.
   const displayKey = createMemo(() =>
     pickDisplayKey({
-      agentName: local.agent.current()?.name,
       authenticatedCount: sync.data.provider_next.authenticated.length,
       rotationKey: key(),
     }),

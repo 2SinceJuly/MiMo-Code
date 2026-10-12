@@ -5,7 +5,7 @@ import type { Skill } from "."
 const dictionaries: Record<string, string>[] = [zh, zht]
 
 export function localizedAliases(skill: Skill.Info) {
-  if (!skill.bundled || skill.name.startsWith("compose:")) return []
+  if (!skill.bundled) return []
   return [
     ...new Set(
       dictionaries.flatMap((dict) =>

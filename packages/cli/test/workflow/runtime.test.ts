@@ -1103,8 +1103,13 @@ describe("WorkflowRuntime structure tree", () => {
           title: "wf structure",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
-        yield* llm.text("done")
-        yield* llm.text("done")
+        // Bind replies to the two subagent turns. A parent actor-notification
+        // turn can fire in between and would otherwise steal a queued reply —
+        // the later agent would see the mock's empty-queue auto-reply "ok".
+        const isSubagent = (hit: { body: Record<string, unknown> }) =>
+          JSON.stringify(hit.body).includes("full-capability general-purpose subagent")
+        yield* llm.textMatch(isSubagent, "done")
+        yield* llm.textMatch(isSubagent, "done")
         const script = [
           `export const meta = { name: "t", description: "d" }`,
           `phase("Plan")`,
@@ -1138,7 +1143,7 @@ describe("WorkflowRuntime structure tree", () => {
         // actorID is captured so the TUI can navigate to the spawned subagent.
         expect(agents.every((a) => typeof a.actorID === "string" && a.actorID.length > 0)).toBe(true)
         // result summary is captured so the tree shows what the agent produced.
-        expect(agents.every((a) => a.resultSummary === "done")).toBe(true)
+        expect(agents.map((a) => a.resultSummary)).toEqual(["done", "done"])
       }),
       { git: true, config: providerCfg },
     ),

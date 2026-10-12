@@ -1,6 +1,6 @@
 import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
 import * as Stream from "effect/Stream"
-import { Agent } from "@/agent/agent"
+import { Agent, resolveStoredAgent } from "@/agent/agent"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Bus } from "@/bus"
 import { Metrics } from "@/metrics"
@@ -563,7 +563,7 @@ export const layer: Layer.Layer<
               return
             }
 
-            const agent = yield* agents.get(ctx.assistantMessage.agent)
+            const agent = yield* resolveStoredAgent(agents, ctx.assistantMessage.agent)
             yield* permission.ask({
               permission: "doom_loop",
               patterns: [value.toolName],

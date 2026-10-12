@@ -8,7 +8,7 @@ import z from "zod"
 import { Token } from "../util"
 import { Log } from "../util"
 import { SessionProcessor } from "./processor"
-import { Agent } from "@/agent/agent"
+import { Agent, resolveStoredAgent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config"
 import { NotFoundError } from "@/storage"
@@ -404,7 +404,7 @@ export const layer: Layer.Layer<
         yield* session.removeMessage({ sessionID: input.sessionID, messageID: input.parentID })
         return "stop" as const
       }
-      const parentAgent = yield* agents.get(requestUser.info.agent)
+      const parentAgent = yield* resolveStoredAgent(agents, requestUser.info.agent)
       const parentModel = yield* provider.getModel(requestUser.info.model.providerID, requestUser.info.model.modelID)
       const parentSession = yield* session.get(input.sessionID)
       const profileKey = SessionPrefixSnapshot.profileKey({
