@@ -37,8 +37,12 @@ describe("compaction date policy", () => {
     const message = buildSummaryMessage("## Goal\nShip it", "manual", false, compactedAt)
     expect(message).toContain('compacted-at="2026-10-12T07:30:00.000Z"')
     expect(message).toContain("Compacted at 2026-10-12T07:30:00.000Z (UTC)")
-    expect(message).not.toMatch(/today is 2026-10-12/i)
-    expect(message).not.toMatch(/current date is 2026-10-12/i)
+    // 包装器只允许出现 compacted-at 这一个日历日，禁止夹带其它日期
+    const days = message.match(/\d{4}-\d{2}-\d{2}/g) ?? []
+    expect(days.length).toBeGreaterThan(0)
+    expect(days.every((day) => day === "2026-10-12")).toBe(true)
+    expect(message).not.toMatch(/today is/i)
+    expect(message).not.toMatch(/current date is/i)
   })
 
   test("summary wrapper reminds restore path to resolve today from date or the user", () => {
