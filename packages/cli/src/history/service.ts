@@ -184,6 +184,19 @@ export const layer = Layer.effect(
           }
           return -1
         }
+        for (const seg of segments) {
+          const segWords = seg.match(/[\p{L}\p{N}]+/gu) ?? []
+          if (!segWords.length) continue
+          if (segments.length >= 2 || segWords.length === 1) {
+            const at = findSeq(segWords.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)))
+            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+          } else {
+            for (const w of segWords) {
+              const at = findSeq(w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean))
+              if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+            }
+          }
+        }
         const winStart = Math.max(0, hitAt - 200)
         const snippet = bodyFull.slice(winStart, winStart + 1000)
         hits.push({
