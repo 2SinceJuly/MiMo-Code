@@ -13,7 +13,7 @@ import {
   defaultLayer as SchedulerDefaultLayer,
 } from "@/cron/scheduler"
 import { clearAllLoopStates } from "@/cron/loop-state"
-import { getSessionCronTasks, removeSessionCronTasks, type CronTask } from "@/cron/cron-task"
+import { getSessionCronTasks, removeSessionCronTasks, addSessionCronTask, fireTargetSessionId, type CronTask } from "@/cron/cron-task"
 import { Flag } from "@/flag/flag"
 import { Instance } from "@/project/instance"
 import { provideTmpdirInstance } from "../fixture/fixture"
@@ -106,15 +106,16 @@ beforeEach(() => {
 
 const sid = SessionID.make("ses_e2e_test")
 
-// Same shape as cron-bridge's onFire callback (cron-bridge.ts:159-200): on
-// fire, prepend an ISO fire timestamp to the resolved prompt and call
+// Same shape as cron-bridge's onFire callback (cron-bridge.ts): on
+// fire, resolve the target session via fireTargetSessionId (creator, else
+// fallback), prepend an ISO fire timestamp to the resolved prompt and call
 // injectScheduledPrompt with the task's origin marker plus the firedAt field.
 // Captured inside an Effect so it runs against the SAME test Service stub,
 // instead of the production AppRuntime the live bridge dynamically imports.
 const fireToInject = (task: CronTask) => {
   const firedAtISO = new Date().toISOString().replace(/\.\d{3}Z$/, "Z")
   return injectScheduledPrompt({
-    sessionID: sid,
+    sessionID: SessionID.make(fireTargetSessionId(task, sid)),
     value: `[cron fire @ ${firedAtISO}] ${task.prompt}`,
     origin: {
       kind: "cron",
@@ -222,6 +223,98 @@ describe("cron + loop end-to-end smoke", () => {
         expect(fired.length).toBe(0)
         for (const task of fired) yield* fireToInject(task)
         expect(captured.value.length).toBe(0)
+
+        yield* scheduler.stop()
+      }),
+    ),
+  )
+})
+
+describe("cron session affinity", () => {
+  it.live("fires into the creating session even when the bridge session differs", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const scheduler = yield* Scheduler
+        const owner = SessionID.make("ses_owner_b")
+        const bridgeSid = SessionID.make("ses_bridge_a")
+
+        const fired: CronTask[] = []
+        yield* scheduler.start({
+          workspaceRoot: dir,
+          sessionID: bridgeSid,
+          isLoading: () => false,
+          isKilled: () => false,
+          onFire: (task) => {
+            fired.push(task)
+          },
+          onLoopEnded: () => undefined,
+          dir,
+        })
+
+        // Task created by session B while the bridge is mounted on A.
+        const created = yield* scheduler.add({
+          session_id: owner,
+          cron: "* * * * *",
+          prompt: "cross session",
+          recurring: true,
+          durable: false,
+        })
+        expect(created.createdBySessionId).toBe(owner)
+
+        const all = getSessionCronTasks()
+        const target = all.find((t) => t.id === created.id)
+        expect(target).toBeDefined()
+        ;(target as { createdAt: number }).createdAt = Date.now() - 5 * 60_000
+
+        yield* scheduler.tickOnce()
+        expect(fired.length).toBe(1)
+
+        // Drain through the same fireTargetSessionId the production onFire uses.
+        for (const task of fired) yield* fireToInject(task)
+        expect(captured.value.length).toBe(1)
+        expect(captured.value[0]!.sessionID).toBe(owner)
+
+        yield* scheduler.stop()
+      }),
+    ),
+  )
+
+  it.live("legacy unmarked tasks fall back to the bridge session", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const scheduler = yield* Scheduler
+        const bridgeSid = SessionID.make("ses_bridge_fallback")
+
+        const fired: CronTask[] = []
+        yield* scheduler.start({
+          workspaceRoot: dir,
+          sessionID: bridgeSid,
+          isLoading: () => false,
+          isKilled: () => false,
+          onFire: (task) => {
+            fired.push(task)
+          },
+          onLoopEnded: () => undefined,
+          dir,
+        })
+
+        // Pre-affinity durable row: no createdBySessionId.
+        addSessionCronTask({
+          id: "legacyfire",
+          cron: "* * * * *",
+          prompt: "legacy fire",
+          createdAt: Date.now() - 5 * 60_000,
+          recurring: true,
+          durable: false,
+        })
+
+        yield* scheduler.tickOnce()
+        expect(fired.length).toBe(1)
+        for (const task of fired) yield* fireToInject(task)
+        expect(captured.value.length).toBe(1)
+        // fireToInject falls back to `sid` (this harness's stand-in for the bridge
+        // session) when createdBySessionId is absent — same contract as production onFire.
+        expect(captured.value[0]!.sessionID).toBe(sid)
 
         yield* scheduler.stop()
       }),

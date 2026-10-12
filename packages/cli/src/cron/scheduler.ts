@@ -75,6 +75,8 @@ export type ArmLoopInput = {
   prompt: string
   delay_seconds: number
   reason_length: number
+  /** Owner session for the armed loop task. Stamped as createdBySessionId. */
+  session_id?: string
   /**
    * Marks this arm as a bridge-driven keepalive auto-fire. When true the
    * scheduler skips invoking `StartOpts.onArmLoop` so the bridge does not
@@ -383,7 +385,11 @@ const makeImpl = (): Interface => {
         ...session.map((t) => ({ ...t, durable: false as const })),
       ]
       return all.filter((t) => {
-        if (filter.session_id && t.createdBySessionId !== filter.session_id) return false
+        // Same legacy tolerance as findById / fireTargetSessionId: a missing
+        // createdBySessionId is not "someone else's job" — hide only tasks
+        // explicitly stamped to another session.
+        if (filter.session_id && t.createdBySessionId && t.createdBySessionId !== filter.session_id)
+          return false
         if (filter.kind === "loop" && t.kind !== "loop") return false
         if (filter.kind === "cron" && t.kind === "loop") return false
         if (filter.durable_only && t.durable !== true) return false
@@ -428,6 +434,16 @@ const makeImpl = (): Interface => {
       const prior = getSessionCronTasks().filter(
         (t) => t.kind === "loop" && t.prompt === input.prompt,
       )
+      // Keepalive re-arms omit session_id and, after the one-shot loop task has
+      // fired and been removed, often find no prior row either. Resolve the
+      // owner from the explicit input, then any still-live stamped prior, then
+      // LoopState (which outlives the task). Truthiness treats "" as unmarked,
+      // matching fireTargetSessionId / findById / list.
+      const inheritedSessionId =
+        input.session_id ||
+        prior.find((p) => p.createdBySessionId)?.createdBySessionId ||
+        existing?.createdBySessionId ||
+        undefined
       if (prior.length > 0) {
         removeSessionCronTasks(prior.map((p) => p.id))
         if (rt) for (const p of prior) rt.nextFireAt.delete(p.id)
@@ -442,6 +458,7 @@ const makeImpl = (): Interface => {
         createdAt: now,
         kind: "loop",
         recurring: false,
+        ...(inheritedSessionId ? { createdBySessionId: inheritedSessionId } : {}),
       })
 
       // PR #1479 finding #4: pin nextFireAt to the requested target so the
@@ -458,6 +475,7 @@ const makeImpl = (): Interface => {
         startedAt: existing?.startedAt ?? now,
         lastScheduledFor: target.getTime(),
         keepaliveStrikes: existing?.keepaliveStrikes ?? 0,
+        ...(inheritedSessionId ? { createdBySessionId: inheritedSessionId } : {}),
       })
 
       if (!input.viaKeepalive && rt?.opts.onArmLoop) rt.opts.onArmLoop(input.prompt)

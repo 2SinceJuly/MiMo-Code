@@ -289,3 +289,157 @@ test("same-tick double-fire: only the first due task fires per tick", async () =
   removeSessionCronTasks(["taskA", "taskB"])
   rmSync(dir, { recursive: true, force: true })
 })
+
+test("armLoop stamps createdBySessionId when session_id is provided", async () => {
+  const dir = freshDir()
+  await provided(
+    Effect.gen(function* () {
+      const sched = yield* Scheduler
+      yield* sched.start(baseStartOpts(dir))
+
+      const result = yield* sched.armLoop({
+        prompt: "owned-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        session_id: "ses_owner",
+      })
+      expect(result).not.toBe(null)
+
+      const tasks = yield* sched.list({ kind: "loop", session_id: "ses_owner" })
+      expect(tasks.length).toBe(1)
+      expect(tasks[0]!.createdBySessionId).toBe("ses_owner")
+
+      // Other sessions cannot see or cancel it.
+      const otherList = yield* sched.list({ kind: "loop", session_id: "ses_other" })
+      expect(otherList.length).toBe(0)
+      const stolen = yield* sched.remove(tasks[0]!.id, { session_id: "ses_other" })
+      expect(stolen).toBe(false)
+
+      const own = yield* sched.remove(tasks[0]!.id, { session_id: "ses_owner" })
+      expect(own).toBe(true)
+
+      yield* sched.stop()
+    }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("get/delete/rename honor session ownership; unmarked tasks stay accessible", async () => {
+  const dir = freshDir()
+  await provided(
+    Effect.gen(function* () {
+      const sched = yield* Scheduler
+      yield* sched.start(baseStartOpts(dir))
+
+      const mine = yield* sched.add({
+        session_id: "ses_a",
+        cron: "*/5 * * * *",
+        prompt: "mine",
+        recurring: true,
+        durable: false,
+      })
+      // Pre-affinity disk/session rows have no createdBySessionId.
+      addSessionCronTask({
+        id: "legacy1",
+        cron: "*/5 * * * *",
+        prompt: "legacy",
+        createdAt: Date.now(),
+        recurring: true,
+        durable: false,
+      })
+
+      expect(yield* sched.get(mine.id, { session_id: "ses_b" })).toBe(null)
+      expect(yield* sched.get(mine.id, { session_id: "ses_a" })).not.toBe(null)
+      expect(yield* sched.rename(mine.id, "nope", { session_id: "ses_b" })).toBe(false)
+      expect(yield* sched.remove(mine.id, { session_id: "ses_b" })).toBe(false)
+
+      // Legacy unmarked: visible to any session filter (fire-time fallback parity).
+      expect(yield* sched.get("legacy1", { session_id: "ses_b" })).not.toBe(null)
+      const listed = yield* sched.list({ session_id: "ses_b" })
+      expect(listed.map((t) => t.id)).toContain("legacy1")
+      expect(yield* sched.remove("legacy1", { session_id: "ses_b" })).toBe(true)
+
+      expect(yield* sched.remove(mine.id, { session_id: "ses_a" })).toBe(true)
+
+      yield* sched.stop()
+    }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("armLoop without session_id inherits the superseded task's owner", async () => {
+  const dir = freshDir()
+  await provided(
+    Effect.gen(function* () {
+      const sched = yield* Scheduler
+      yield* sched.start(baseStartOpts(dir))
+
+      // Model-driven first arm stamps the owner.
+      yield* sched.armLoop({
+        prompt: "keepalive-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        session_id: "ses_b",
+      })
+      const first = yield* sched.list({ kind: "loop", session_id: "ses_b" })
+      expect(first.length).toBe(1)
+
+      // Keepalive re-arm omits session_id — must not drop the stamp.
+      yield* sched.armLoop({
+        prompt: "keepalive-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        viaKeepalive: true,
+      })
+      const after = yield* sched.list({ kind: "loop" })
+      expect(after.length).toBe(1)
+      expect(after[0]!.createdBySessionId).toBe("ses_b")
+      // Still not visible to a different session filter.
+      expect(yield* sched.list({ kind: "loop", session_id: "ses_a" })).toEqual([])
+
+      yield* sched.stop()
+    }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("keepalive armLoop after fire retains owner via LoopState", async () => {
+  const dir = freshDir()
+  await provided(
+    Effect.gen(function* () {
+      const sched = yield* Scheduler
+      yield* sched.start(baseStartOpts(dir))
+
+      // Model-driven first arm stamps the owner.
+      yield* sched.armLoop({
+        prompt: "postfire-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        session_id: "ses_b",
+      })
+      const armed = getSessionCronTasks().filter((t) => t.prompt === "postfire-loop")
+      expect(armed.length).toBe(1)
+      expect(armed[0]!.createdBySessionId).toBe("ses_b")
+
+      // Simulate the tick's post-fire path: one-shot loop tasks are removed
+      // after fire, leaving only LoopState behind.
+      removeSessionCronTasks(armed.map((t) => t.id))
+      expect(getSessionCronTasks().filter((t) => t.prompt === "postfire-loop")).toEqual([])
+
+      // Keepalive re-arm has no session_id and no prior row to inherit from.
+      yield* sched.armLoop({
+        prompt: "postfire-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        viaKeepalive: true,
+      })
+      const after = getSessionCronTasks().filter((t) => t.prompt === "postfire-loop")
+      expect(after.length).toBe(1)
+      expect(after[0]!.createdBySessionId).toBe("ses_b")
+      expect(yield* sched.list({ kind: "loop", session_id: "ses_a" })).toEqual([])
+
+      yield* sched.stop()
+    }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+})

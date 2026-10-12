@@ -97,6 +97,15 @@ export const getSessionCronTasks = (): CronTask[] => [...SESSION_STORE.values()]
 export const removeSessionCronTasks = (ids: string[]) =>
   ids.forEach((id) => SESSION_STORE.delete(id))
 
+/**
+ * Session that should receive a fired task. Prefer the creator; unmarked
+ * tasks fall back to the caller's session (legacy durable jobs written before
+ * createdBySessionId existed). Uses the same truthiness rule as findById/list
+ * so an empty-string stamp is treated as unmarked everywhere.
+ */
+export const fireTargetSessionId = (task: CronTask, fallbackSessionId: string): string =>
+  task.createdBySessionId || fallbackSessionId
+
 export const findMissedTasks = (tasks: CronTask[], now: number): CronTask[] =>
   tasks.filter((t) => {
     if (t.recurring) return false

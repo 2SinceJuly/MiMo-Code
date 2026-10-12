@@ -4,6 +4,12 @@ export type LoopState = {
   lastScheduledFor: number
   agedOut?: boolean
   keepaliveStrikes: number
+  /**
+   * Owner session of the loop. Survives task removal after fire so keepalive
+   * re-arms (which have no session_id and often find no prior row) still stamp
+   * the replacement task with the creating session.
+   */
+  createdBySessionId?: string
 }
 
 const STATE = new Map<string, LoopState>()
