@@ -10,6 +10,7 @@ export function buildFtsQuery(raw: string): string | null {
       ?.map((t) => t.trim())
       .filter(Boolean) ?? []
   if (tokens.length === 0) return null
-  const quoted = tokens.map((t) => `"${t.replaceAll('"', "")}"`)
+  // FTS5 phrase: inner `"` must be doubled, not stripped (MATCH syntax injection).
+  const quoted = tokens.map((t) => `"${t.replaceAll('"', '""')}"`)
   return quoted.join(" AND ")
 }
