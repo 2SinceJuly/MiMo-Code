@@ -187,7 +187,7 @@ export const layer = Layer.effect(
           return -1
         }
         // Structure matches buildFtsQuery: punct segments → AND; each space-separated
-        // word is one phrase; `_`/Han inside a word allow optional breaks (unicode61).
+        // word is one phrase. Han–Han may run together; Latin tokens need a real break.
         for (const seg of segments) {
           const words = seg.match(/[\p{L}\p{N}_]+/gu) ?? []
           if (!words.length) continue
