@@ -225,7 +225,7 @@ export function buildSummaryMessage(
     hasTail
       ? "Complete API rounds that arrived while compaction was running follow this summary."
       : "No additional API rounds arrived while compaction was running.",
-    `Compacted at ${stamped} (UTC). Dates in the summary are not "today" — resolve the current date with \`date\` or the user after resume. Relative times in the summary are relative to this compaction timestamp.`,
+    `Compacted at ${stamped}. Dates in the summary are not "today" — resolve the current date with \`date\` or the user after resume. Relative times in the summary are relative to this compaction timestamp.`,
     "",
     summary.trim(),
     "</conversation-summary>",
