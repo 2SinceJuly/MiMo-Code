@@ -163,9 +163,13 @@ export const layer = Layer.effect(
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
           const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
+          // C15: latin/digit tokens need word edges (alpha ≠ alphabet); Han may run together.
           const re = new RegExp(tokens.map((w, i) => {
-            const sep = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
-            return sep + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            const edgeL = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
+            const needL = i === 0 && !isHan(w) ? "(?<![\\p{L}\\p{N}])" : ""
+            const needR = i === tokens.length - 1 && !isHan(w) ? "(?![\\p{L}\\p{N}])" : ""
+            return edgeL + needL + body + needR
           }).join(""), "iu")
           const m = re.exec(hayN)
           return m ? map[m.index] ?? -1 : -1
