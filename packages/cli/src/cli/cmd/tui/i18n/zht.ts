@@ -208,7 +208,7 @@ export const dict = {
   "tui.skill.product-design.description": "研究、稽核、製作原型並驗證產品與使用者體驗設計",
   "tui.skill.sales.description": "準備客戶會議、研究客戶、規劃交易並使用銷售系統",
   "tui.skill.compose-next.description":
-    "編排模式：釐清需求、規格、實作與評審",
+    "端到端交付：釐清需求、規格、實作與評審",
   "tui.skill.docx-official.slash": "Word文件",
   "tui.skill.xlsx-official.slash": "Excel表格",
   "tui.skill.pdf-official.slash": "PDF文件",

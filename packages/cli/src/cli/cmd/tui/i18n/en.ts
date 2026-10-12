@@ -223,7 +223,7 @@ export const dict: Record<string, string> = {
   "tui.skill.product-design.description": "Research, audit, prototype, and validate product and UX designs",
   "tui.skill.sales.description": "Prepare meetings, research accounts, plan deals, and work with sales systems",
   "tui.skill.compose-next.description":
-    "Orchestration mode: clarify, spec, implement, review",
+    "End-to-end delivery: clarify, spec, implement, review",
 
   // Language switching
   "tui.command.language.switch.title": "Switch language",

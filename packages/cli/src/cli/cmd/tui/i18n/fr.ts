@@ -287,7 +287,7 @@ export const dict = {
   "tui.skill.sales.description":
     "Préparer les rendez-vous, étudier les comptes, planifier les ventes et utiliser les outils commerciaux",
   "tui.skill.compose-next.description":
-    "Mode orchestration : clarifier, spécifier, implémenter, revoir",
+    "Livraison de bout en bout : clarifier, spécifier, implémenter, revoir",
 
   // Language switching
   "tui.command.language.switch.title": "Changer de langue",

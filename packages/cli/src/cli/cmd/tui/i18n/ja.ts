@@ -231,7 +231,7 @@ export const dict = {
   "tui.skill.product-design.description": "製品・UX デザインの調査、監査、プロトタイプ作成、検証",
   "tui.skill.sales.description": "商談準備、アカウント調査、案件計画、営業システムの活用",
   "tui.skill.compose-next.description":
-    "編成モード：要件整理、仕様、実装、レビュー",
+    "エンドツーエンドの納品：要件整理、仕様、実装、レビュー",
 
   // Language switching
   "tui.command.language.switch.title": "言語を切り替え",

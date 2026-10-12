@@ -60,9 +60,9 @@ Homepage tips now rotate `tui.tips.compose_next` as a normal weighted tip. Copy 
 - **Tips** (`tui.tips.compose_next`): keep short and lead with the literal slash command so the user knows what to type. Never "instead of Compose" / 「代替 Compose」.
   - zh: `{highlight}/compose-next{/highlight} — 澄清需求、规格、实现与评审`
   - en: `{highlight}/compose-next{/highlight} — clarify, spec, implement, review`
-- **Skill description** (`tui.skill.compose-next.description`): 「编排模式」 framing is allowed and the copy is not capped at tip length — keep the mode label plus the four-beat capability line.
-  - zh: `编排模式：澄清需求、规格、实现与评审`
-  - en: `Orchestration mode: clarify, spec, implement, review`
+- **Skill description** (`tui.skill.compose-next.description`): do not say "Orchestration mode" / 「编排模式」 — that name belonged to the retired mode and the skill name already contains "compose". Lead with end-to-end delivery plus the four-beat capability line (tip length limits do not apply here).
+  - zh: `端到端交付：澄清需求、规格、实现与评审`
+  - en: `End-to-end delivery: clarify, spec, implement, review`
 - **Slash display name** (`tui.skill.compose-next.slash`): localized names are fine; not forced to the English id.
   - zh: `新编排模式` · zht: `新編排模式`
 

@@ -299,7 +299,7 @@ export const dict = {
   "tui.skill.sales.description":
     "Preparar reuniones, investigar cuentas, planificar ventas y usar sistemas comerciales",
   "tui.skill.compose-next.description":
-    "Modo orquestación: aclarar, especificar, implementar, revisar",
+    "Entrega de extremo a extremo: aclarar, especificar, implementar, revisar",
 
   // Language switching
   "tui.command.language.switch.title": "Cambiar idioma",
