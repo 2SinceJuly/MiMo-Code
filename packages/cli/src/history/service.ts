@@ -162,15 +162,23 @@ export const layer = Layer.effect(
         const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).filter(Boolean)
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
-          const re = new RegExp(tokens.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]*"), "iu")
+          const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
+          const re = new RegExp(tokens.map((w, i) => {
+            const sep = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
+            return sep + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+          }).join(""), "iu")
           const m = re.exec(hayN)
           return m ? map[m.index] ?? -1 : -1
         }
         for (const seg of segments) {
           const words = seg.match(/[\p{L}\p{N}]+/gu)?.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
           if (!words.length) continue
-          if (/\s/.test(seg)) {
-            // token AND: earliest token position
+          if (segments.length >= 2) {
+            // punct segment → one adjacent phrase
+            const at = findSeq(words)
+            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+          } else if (/\s/.test(seg)) {
+            // space multi-word → token AND (order-free)
             for (const w of words) {
               const at = findSeq([w])
               if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
