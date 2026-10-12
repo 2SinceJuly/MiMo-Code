@@ -63,12 +63,13 @@ function handle(job: Job, resolver: Resolver) {
   return Effect.gen(function* () {
     const part = job.part
     const role = yield* resolver.role(part.messageID)
-    const extracted = extract(part, role)
+    const summary = yield* resolver.summary(part.messageID)
+    const extracted = extract(part, role, { summary })
     if (!extracted) {
       Database.use((db) => deleteHistoryRows(db, part.id))
       return
     }
-    // Truncation (tool-result path) is applied inside upsertHistoryBody.
+    // Preview budget is applied in extract() on original text (D7).
     const projectID = yield* resolver.projectID(part.sessionID)
     Database.use((db) =>
       upsertHistoryBody(db, {

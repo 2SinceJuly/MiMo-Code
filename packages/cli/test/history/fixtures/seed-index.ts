@@ -81,6 +81,7 @@ function writeBatch(
     type ToWrite = {
       part: (typeof parts)[number]
       body: string
+      body_idx: string
       tool_name: string | null
       time: number
     }

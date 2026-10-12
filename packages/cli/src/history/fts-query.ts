@@ -6,10 +6,7 @@
 // Space-separated multi-word = token AND (order-free).
 //
 // Independent copy from memory/fts-query.ts so the two modules can evolve apart.
-export type BuiltFtsQuery = {
-  fts: string | null
-  shortTokens: string[]
-}
+export type BuiltFtsQuery = { fts: string | null }
 
 function segmentCjk(text: string): string {
   return text
@@ -28,11 +25,10 @@ const PUNCT = /[、，,。.；;：:！!？?（）()【】\[\]「」“”"'\|/\\
 
 export function buildFtsQuery(raw: string): BuiltFtsQuery {
   const q = (raw || "").toLowerCase().trim()
-  if (!q) return { fts: null, shortTokens: [] }
+  if (!q) return { fts: null }
 
   const segments = q.split(PUNCT).map((s) => s.trim()).filter(Boolean)
   const fts: string[] = []
-  const shortTokens: string[] = []
 
   const addSegment = (seg: string, adjacent: boolean) => {
     const words = seg.match(/[\p{L}\p{N}_]+/gu)?.filter(Boolean) ?? []
@@ -57,7 +53,7 @@ export function buildFtsQuery(raw: string): BuiltFtsQuery {
     const seg = segments[0] ?? q
     addSegment(seg, !/\s/.test(seg))
   }
-  return { fts: fts.length ? fts.join(" AND ") : null, shortTokens }
+  return { fts: fts.length ? fts.join(" AND ") : null }
 }
 
 /** Back-compat: MATCH string only (null if nothing FTS-usable). */
