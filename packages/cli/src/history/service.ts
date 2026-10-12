@@ -150,7 +150,17 @@ export const layer = Layer.effect(
         if (seen.has(partId)) continue
         seen.add(partId)
         const bodyFull = String((r as { body_full?: string }).body_full ?? "")
-        const winStart = Math.max(0, Math.min(bodyFull.length - 1, bodyFull.toLowerCase().indexOf(input.query.toLowerCase()) ) - 200)
+        // C15: locate first hit with the same phrase semantics as FTS (not whole-query indexOf).
+        const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+        const hayN = norm(bodyFull)
+        const words = norm(input.query).match(/[\p{L}\p{N}]+/gu)?.filter(Boolean) ?? []
+        let hitAt = -1
+        if (words.length) {
+          const re = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]+"), "iu")
+          const m = re.exec(hayN)
+          hitAt = m ? m.index : -1
+        }
+        const winStart = Math.max(0, hitAt - 200)
         const snippet = bodyFull.slice(winStart, winStart + 1000)
         hits.push({
           part_id: partId,
