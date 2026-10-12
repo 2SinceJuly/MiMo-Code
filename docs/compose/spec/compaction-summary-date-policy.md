@@ -1,9 +1,9 @@
 ---
 feature: compaction-summary-date-policy
-status: in-progress
+status: delivered
 updated: 2026-10-12
 branch: fix/compaction-summary-date-policy
-commits:
+commits: 4a5e2140bc..882b72ad10
 ---
 
 # Compaction Summary Date Policy
@@ -11,6 +11,26 @@ commits:
 Continuation summaries must never assert the present calendar date as fact.
 Stale "today is YYYY-MM-DD" claims survive across multi-day sessions and cause
 the resumed agent to stamp documents and records with the wrong day.
+
+## Report
+
+**What was built** — Compaction Continuation Summary now follows a mandatory
+date policy: no present-date claims, calendar dates only on events that already
+carried them, relative time expressed against compaction, and post-resume
+"today" resolved from `date` or the user. The summary wrapper stamps
+`compacted-at` (ISO-8601 UTC) as the sole time anchor and reminds the restore
+path to resolve the current date from the world rather than from the summary.
+
+**Verification** —
+- `bun test test/session/compaction-date-policy.test.ts test/session/compaction-projection.test.ts` → PASS 11 / 0 fail
+- `bun test test/session/compaction-agent-scope.test.ts test/session/prompt-effect.test.ts` → PASS 112 / 3 skip / 0 fail
+- `bun run typecheck` → PASS
+- Independent review (general-1): spec compliance met; no critical correctness findings.
+
+**Journey log** —
+- Date policy was first placed under summary section 5; review noted it read as section content rather than a global writing constraint, so it moved above the Include list.
+- Wrapper tests first only rejected two English phrases carrying the stamped day; they now assert every `YYYY-MM-DD` in the wrapper equals the `compacted-at` day.
+- Tests lock policy properties with independent matchers rather than one English sentence, matching the delivery requirement.
 
 ## [S1] Problem
 
