@@ -163,34 +163,26 @@ export const layer = Layer.effect(
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
           const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
-          // C15: latin/digit tokens need word edges (alpha ≠ alphabet); Han may run together.
-          const re = new RegExp(tokens.map((w, i) => {
-            const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-            const edgeL = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
-            const needL = i === 0 && !isHan(w) ? "(?<![\\p{L}\\p{N}])" : ""
-            const needR = i === tokens.length - 1 && !isHan(w) ? "(?![\\p{L}\\p{N}])" : ""
-            return edgeL + needL + body + needR
-          }).join(""), "iu")
-          const m = re.exec(hayN)
-          return m ? map[m.index] ?? -1 : -1
-        }
-        for (const seg of segments) {
-          const words = seg.match(/[\p{L}\p{N}]+/gu)?.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
-          if (!words.length) continue
-          // Preserve phrase structure: space-separated words are each a phrase
-          // (Han isolated inside); punct segments are one phrase.
-          const segWords = seg.match(/[\p{L}\p{N}]+/gu) ?? []
-          if (segments.length >= 2 || segWords.length === 1) {
-            const at = findSeq(words)
-            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
-          } else {
-            // multi-word AND: each original word is its own adjacent phrase
-            for (const w of segWords) {
-              const ws = w.match(/[\p{L}\p{N}]+/gu)?.flatMap((x) => x.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
-              const at = findSeq(ws)
-              if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
-            }
+          const re = new RegExp(
+            tokens.map((w, i) => {
+              const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+              const sep = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
+              return sep + body
+            }).join(""),
+            "giu",
+          )
+          const badEdge = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c) && !/\p{Script=Han}/u.test(c)
+          let m: RegExpExecArray | null
+          while ((m = re.exec(hayN))) {
+            const s = m.index
+            const e = s + m[0].length
+            const first = tokens[0]!
+            const last = tokens[tokens.length - 1]!
+            if (!isHan(first) && badEdge(hayN[s - 1])) continue
+            if (!isHan(last) && badEdge(hayN[e])) continue
+            return map[s] ?? -1
           }
+          return -1
         }
         const winStart = Math.max(0, hitAt - 200)
         const snippet = bodyFull.slice(winStart, winStart + 1000)
