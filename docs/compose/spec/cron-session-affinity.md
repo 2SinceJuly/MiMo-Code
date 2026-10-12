@@ -3,7 +3,7 @@ feature: cron-session-affinity
 status: delivered
 updated: 2026-10-12
 branch: fix/cron-session-affinity
-commits: 3c6e6bb0..082b8124
+commits: 3c6e6bb0..4c3a7e46
 ---
 
 # Cron Session Affinity
@@ -12,13 +12,13 @@ commits: 3c6e6bb0..082b8124
 
 **What was built** — Scheduled `cron` / `loop` prompts now fire into the session that created the job instead of whichever session first started the process-wide CronBridge. `onFire` resolves the inject target via `fireTargetSessionId(task, bridgeSession)`; `createdBySessionId` is stamped on `armLoop` and inherited across keepalive re-arms so a loop owned by session B keeps its stamp even when the bridge is mounted on A. `get` / `delete` / `rename` / `list` share one ownership rule: hide only tasks stamped to another session; legacy unmarked rows stay visible and fire into the current bridge session. Empty-string stamps count as unmarked everywhere.
 
-**Verification** — `bun test packages/cli/test/cron packages/cli/test/tool/cron.test.ts packages/cli/test/session/cron-bridge.integration.test.ts` → 78 pass / 0 fail. `bun run typecheck` → PASS. `bun run lint` → 0 errors (warnings pre-existing). Independent review of `3c6e6bb0..bfdb2b17` found one CRITICAL (keepalive `armLoop` dropped the owner stamp); fixed in `082b8124` and re-review confirmed no remaining criticals.
+**Verification** — `bun test packages/cli/test/cron packages/cli/test/tool/cron.test.ts packages/cli/test/session/cron-bridge.integration.test.ts` → 79 pass / 0 fail. `bun run typecheck` → PASS. Lint on touched files: 0 errors (warnings pre-existing). Review 1 of `3c6e6bb0..bfdb2b17` found CRITICAL (keepalive `armLoop` dropped the owner stamp) → fixed in `082b8124`. Review 2 of the PR found CRITICAL on the post-fire path (one-shot loop row removed after fire, so inherit-from-prior found nothing) → fixed in `4c3a7e46` by persisting the owner on `LoopState`. Re-review of `4c3a7e46` → APPROVE, no remaining criticals.
 
 **Journey log** —
 1. User guess "cron never marks the session" was only half-right: `createdBySessionId` existed on `schedule` but was ignored at fire time and never written by `armLoop`.
 2. `loop` is not a standalone tool: `/loop` is a skill wrapping `cron schedule`; `cron` also has a `loop` action (`armLoop`). Both shared the wrong-session fire path.
 3. Desktop EngineInstanceStore already accepts cron into non-active sessions by design (R2/R9); the bug was engine-side routing, not desktop mis-attribution. Sidebar lag for a never-listed session (30s poll) is a UI-discovery gap, out of scope.
-4. First review pass was necessary: keepalive re-arm looked like a caller-only gap but reintroduced the whole bug class. Inheriting the prior task's stamp in `armLoop` is more robust than fixing the single caller.
+4. Keepalive affinity needed two layers: inherit-from-prior covers supersession of a live row; `LoopState.createdBySessionId` covers the post-fire path where the one-shot row is already gone. Persist owner on the longer-lived state object.
 5. e2e `fireToInject` mirrors production `onFire` rather than invoking it (AppRuntime dynamic-import seam); helper-level tests cover the contract, not the live callback wiring.
 
 ## [S1] Problem
