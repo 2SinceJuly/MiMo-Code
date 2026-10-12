@@ -102,10 +102,12 @@ test("writeCronTasks drops tasks with malformed cron", async () => {
 
 // Session affinity: fired tasks go to their creator; unmarked legacy tasks
 // fall back to the caller's session so durable jobs written before
-// createdBySessionId existed keep firing.
+// createdBySessionId existed keep firing. Empty-string stamps count as
+// unmarked, matching findById/list truthiness.
 test("fireTargetSessionId prefers createdBySessionId, else fallback", () => {
   const base = { id: "t1", cron: "*/5 * * * *", prompt: "p", createdAt: 1 }
   expect(fireTargetSessionId({ ...base, createdBySessionId: "ses_b" }, "ses_a")).toBe("ses_b")
   expect(fireTargetSessionId({ ...base }, "ses_a")).toBe("ses_a")
+  expect(fireTargetSessionId({ ...base, createdBySessionId: "" }, "ses_a")).toBe("ses_a")
   expect(fireTargetSessionId({ ...base, createdBySessionId: "ses_a" }, "ses_a")).toBe("ses_a")
 })

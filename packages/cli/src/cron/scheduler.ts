@@ -434,6 +434,10 @@ const makeImpl = (): Interface => {
       const prior = getSessionCronTasks().filter(
         (t) => t.kind === "loop" && t.prompt === input.prompt,
       )
+      // Keepalive re-arms omit session_id. Inherit the superseded task's owner
+      // so a loop that was created by session B does not lose its stamp and
+      // fall back to whatever session the bridge happens to be mounted on.
+      const inheritedSessionId = input.session_id ?? prior.find((p) => p.createdBySessionId)?.createdBySessionId
       if (prior.length > 0) {
         removeSessionCronTasks(prior.map((p) => p.id))
         if (rt) for (const p of prior) rt.nextFireAt.delete(p.id)
@@ -448,7 +452,7 @@ const makeImpl = (): Interface => {
         createdAt: now,
         kind: "loop",
         recurring: false,
-        ...(input.session_id ? { createdBySessionId: input.session_id } : {}),
+        ...(inheritedSessionId ? { createdBySessionId: inheritedSessionId } : {}),
       })
 
       // PR #1479 finding #4: pin nextFireAt to the requested target so the

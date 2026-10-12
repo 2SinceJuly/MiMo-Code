@@ -366,3 +366,39 @@ test("get/delete/rename honor session ownership; unmarked tasks stay accessible"
   )
   rmSync(dir, { recursive: true, force: true })
 })
+
+test("armLoop without session_id inherits the superseded task's owner", async () => {
+  const dir = freshDir()
+  await provided(
+    Effect.gen(function* () {
+      const sched = yield* Scheduler
+      yield* sched.start(baseStartOpts(dir))
+
+      // Model-driven first arm stamps the owner.
+      yield* sched.armLoop({
+        prompt: "keepalive-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        session_id: "ses_b",
+      })
+      const first = yield* sched.list({ kind: "loop", session_id: "ses_b" })
+      expect(first.length).toBe(1)
+
+      // Keepalive re-arm omits session_id — must not drop the stamp.
+      yield* sched.armLoop({
+        prompt: "keepalive-loop",
+        delay_seconds: 120,
+        reason_length: 0,
+        viaKeepalive: true,
+      })
+      const after = yield* sched.list({ kind: "loop" })
+      expect(after.length).toBe(1)
+      expect(after[0]!.createdBySessionId).toBe("ses_b")
+      // Still not visible to a different session filter.
+      expect(yield* sched.list({ kind: "loop", session_id: "ses_a" })).toEqual([])
+
+      yield* sched.stop()
+    }),
+  )
+  rmSync(dir, { recursive: true, force: true })
+})
