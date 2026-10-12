@@ -55,9 +55,11 @@ session id so the cache is keyed per receiving session.
 ### Session stamping
 
 - `scheduler.add` stamps `createdBySessionId` when `input.session_id` is set.
-- `armLoop` accepts and stamps `session_id`. When superseding prior same-prompt
-  loop tasks without an explicit `session_id` (keepalive path), it inherits the
-  first stamped prior's owner so re-arm never drops affinity.
+- `armLoop` accepts and stamps `session_id`. Owner resolution is truthiness
+  (`""` = unmarked): explicit `session_id`, else a stamped prior same-prompt
+  loop task, else `LoopState.createdBySessionId`. `LoopState` outlives the
+  one-shot task (which the tick removes after fire), so post-fire keepalive
+  re-arms still stamp the creating session.
 - The cron tool's `loop` action passes `sessionID` (resolved like `schedule`).
 
 ### Ownership on read/update/delete
@@ -76,9 +78,10 @@ session id so the cache is keyed per receiving session.
 
 ### Loop state
 
-`armLoop` stamps the task; `LoopState` remains keyed by prompt for this
-iteration (keepalive and max-age). Full per-session LoopState isolation is out
-of scope; see S3.
+`armLoop` stamps the task and stores the owner on `LoopState.createdBySessionId`
+so affinity survives post-fire removal of the one-shot loop row. `LoopState`
+remains keyed by prompt for this iteration (keepalive and max-age). Full
+per-session LoopState isolation is out of scope; see S3.
 
 ### Desktop (mimo-desktop) alignment
 

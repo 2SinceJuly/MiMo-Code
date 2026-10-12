@@ -434,10 +434,16 @@ const makeImpl = (): Interface => {
       const prior = getSessionCronTasks().filter(
         (t) => t.kind === "loop" && t.prompt === input.prompt,
       )
-      // Keepalive re-arms omit session_id. Inherit the superseded task's owner
-      // so a loop that was created by session B does not lose its stamp and
-      // fall back to whatever session the bridge happens to be mounted on.
-      const inheritedSessionId = input.session_id ?? prior.find((p) => p.createdBySessionId)?.createdBySessionId
+      // Keepalive re-arms omit session_id and, after the one-shot loop task has
+      // fired and been removed, often find no prior row either. Resolve the
+      // owner from the explicit input, then any still-live stamped prior, then
+      // LoopState (which outlives the task). Truthiness treats "" as unmarked,
+      // matching fireTargetSessionId / findById / list.
+      const inheritedSessionId =
+        input.session_id ||
+        prior.find((p) => p.createdBySessionId)?.createdBySessionId ||
+        existing?.createdBySessionId ||
+        undefined
       if (prior.length > 0) {
         removeSessionCronTasks(prior.map((p) => p.id))
         if (rt) for (const p of prior) rt.nextFireAt.delete(p.id)
@@ -469,6 +475,7 @@ const makeImpl = (): Interface => {
         startedAt: existing?.startedAt ?? now,
         lastScheduledFor: target.getTime(),
         keepaliveStrikes: existing?.keepaliveStrikes ?? 0,
+        ...(inheritedSessionId ? { createdBySessionId: inheritedSessionId } : {}),
       })
 
       if (!input.viaKeepalive && rt?.opts.onArmLoop) rt.opts.onArmLoop(input.prompt)
