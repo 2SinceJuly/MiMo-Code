@@ -158,7 +158,7 @@ export const layer = Layer.effect(
           for (const c of folded) { chars.push(c); map.push(i) }
         }
         const hayN = chars.join("")
-        const qn = input.query.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+        const qn = input.query.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
         const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).filter(Boolean)
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
@@ -184,8 +184,10 @@ export const layer = Layer.effect(
           }
           return -1
         }
-        for (const seg of segments) {
-          const segWords = seg.match(/[\p{L}\p{N}]+/gu) ?? []
+        for (const rawSeg of segments) {
+          const seg = rawSeg.trim()
+          if (!seg) continue
+          const segWords = seg.match(/[\p{L}\p{N}_]+/gu) ?? []
           if (!segWords.length) continue
           // Mirror buildFtsQuery: punct segment or contiguous run = one phrase;
           // whitespace-separated multi-word = token AND.

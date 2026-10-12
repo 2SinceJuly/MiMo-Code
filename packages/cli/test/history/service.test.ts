@@ -239,3 +239,17 @@ describe("History.around", () => {
     ),
   )
 })
+
+  it.live("snippet window includes tail phrase hit (C15)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const project = Instance.project.id
+        const tail = "alpha unrelated " + "padding ".repeat(160) + "alpha beta"
+        seedFts([{ part_id: "p_tail", project_id: project, body: tail, body_idx: tail }])
+        const svc = yield* History.Service
+        const hits = yield* svc.search({ query: "alpha-beta", scope: "global", limit: 5 })
+        expect(hits).toHaveLength(1)
+        expect(hits[0]!.snippet).toContain("alpha beta")
+      }),
+    ),
+  )
