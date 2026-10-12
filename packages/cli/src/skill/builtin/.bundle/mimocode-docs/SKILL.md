@@ -15,13 +15,13 @@ MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built
 
 | Feature | What it is | How to reach it |
 |---------|-----------|-----------------|
-| **Agents / modes** | `build` (default, full tools), `plan` (read-only analysis), plus custom modes you define. Mode locks after the first message (Build↔Plan still switch freely). Only the user enters a mode — no tool lets the agent switch into plan, and the agent does not raise plan mode unasked; from inside plan the agent can call `plan_exit` to ask for approval and hand the plan back to build | `Tab` cycles primary agents, or pick one in the agent dialog; add your own via `.mimocode/agent/<name>.md` (see @reference/guide.md) |
+| **Agents / modes** | `build` (default, full tools), `plan` (read-only analysis), plus custom modes you define. Build and Plan can switch at any time; other custom or special modes lock once the first message is sent. Only the user enters a mode — no tool lets the agent switch into plan, and the agent does not raise plan mode unasked; from inside plan the agent can call `plan_exit` to ask for approval and hand the plan back to build | `Tab` cycles primary agents, or pick one in the agent dialog; add your own via `.mimocode/agent/<name>.md` (see @reference/guide.md) |
 | **Subagents** | Primary agent spawns `general`/`explore` helpers, parallel + background, with lifecycle/cancel | automatic; `actor` tooling |
 | **Persistent memory** | Markdown-backed memory with indexed search across `MEMORY.md`, `checkpoint.md`, `notes.md`, and `tasks/<id>/progress.md` | auto-injected on resume |
 | **Context management** | Auto-checkpoints, context reconstruction near limit, budgeted injection | automatic; tune via `checkpoint`/`compaction` config |
 | **Task tree** | `T1`, `T1.1`… tree, integrated with checkpoints | `task` tooling |
 | **Goal / stop condition** | Judge model verifies a stop condition before the agent halts | `/goal` |
-| **Compose mode** | Structured spec→ship lifecycle; entry is the `compose-next` skill on Build — clarify, spec, implement, verify, review, finish. The model may see and load it, but only after the user explicitly requests this workflow by slash command, name, or any other clear natural language | `/compose-next` or an explicit natural-language request (see @reference/guide.md) |
+| **Compose mode** | Structured spec→ship lifecycle; entry is the `compose-next` skill — clarify, spec, implement, verify, review, finish. The model may see and load it, but only after the user explicitly requests this workflow by slash command, name, or any other clear natural language. Do not combine it with plan mode | `/compose-next` or an explicit natural-language request (see @reference/guide.md) |
 | **Visual modes** | `vivid` (default: star field, meteors, logo effects, animated activity) and `minimal` (quiet visuals, stable activity indicators); independent from the animation override | `/vivid` or the visual-mode option in `ctrl+p` |
 | **Voice input** | Streaming ASR (TenVAD + MiMo ASR); needs `sox` | `/voice` |
 | **Dream** | Consolidates recent traces into project memory | `/dream` |

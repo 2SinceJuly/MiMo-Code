@@ -80,9 +80,9 @@ Rewrite every user-facing mention of the Compose agent / Compose workflow / `com
 
 | Surface | Change |
 | --- | --- |
-| `README.md` / `README.zh.md` | Agents table drops `compose`; Compose Mode section becomes compose-next as the orchestration workflow (no legacy path, no "weaker models" curriculum); workflow table drops the `compose` row; Tab lock wording drops Compose isolation |
+| `README.md` / `README.zh.md` | Agents table drops `compose`; Compose Mode section becomes a direct `/compose-next` usage intro (end-to-end delivery, no Fable/Sol tier framing, no "must use build", end with "do not combine with plan mode"); workflow table drops the `compose` row; mode-lock wording becomes "Build and Plan switch anytime; other modes lock after the first message" |
 | `README_npm.md` | Feature bullets: agents list and Compose Mode / Workflows rows |
-| `mimocode-docs` skill (`SKILL.md`, `reference/guide.md`, `reference/workflows.md`, `reference/commands.md`, `reference/config.md`) | Same retirement: no compose agent path, no compose workflow, no `compose` config row, no `MIMOCODE_DISABLE_COMPOSE_SKILLS`; compose-next described as the orchestration entry |
+| `mimocode-docs` skill (`SKILL.md`, `reference/guide.md`, `reference/workflows.md`, `reference/commands.md`, `reference/config.md`) | Same retirement: no compose agent path, no compose workflow, no `compose` config row, no `MIMOCODE_DISABLE_COMPOSE_SKILLS`; compose-next described as end-to-end delivery entry without model-tier definitions |
 | `docs/compose/spec/*` historical feature docs | Do not rewrite history |
 | `.agents/skills/drive-mimo/SKILL.md` | Drop `--agent compose` row if present |
 

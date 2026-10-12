@@ -133,9 +133,7 @@ mimo attach http://127.0.0.1:4096
 | **build** | 默认。完整工具权限，用于开发 |
 | **plan** | 只读分析模式，适合代码探索和方案设计 |
 
-按 `Tab` 在主智能体间切换。子智能体由系统按需生成。发送第一条消息后模式会锁定：Build 和 Plan 之间仍可互切。
-
-specs-driven 功能交付请在 **build** agent 中使用 `/compose-next` 技能——见 [Compose 编排模式](#compose-编排模式)。
+按 `Tab` 在主智能体间切换。子智能体由系统按需生成。Build 和 Plan 之间可以随时切换，其他自定义模式或特殊模式在发送消息后将会锁定。
 
 ### 持久化记忆
 
@@ -200,9 +198,7 @@ specs-driven 功能交付请在 **build** agent 中使用 `/compose-next` 技能
 
 ### Compose 编排模式
 
-Compose 是 MiMoCode 的 specs-driven 结构化开发流程，编排从 spec 到交付的完整开发生命周期。
-
-用法是在 **build** agent 中使用 **`/compose-next`** 技能：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`。它面向前沿模型（Fable/Sol 级）设计——这类模型已内化大部分流程，用一份紧凑契约效果最好。仅在用户明确要求该工作流时调用——斜杠命令、名称或清晰的自然语言请求均可。
+使用 **`/compose-next`** 技能即可跑通端到端功能交付：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`。仅在用户明确要求该工作流时调用——斜杠命令、名称或清晰的自然语言请求均可。不要和 plan 模式一起使用。
 
 ### Workflows
 
@@ -216,7 +212,7 @@ MiMoCode 内置三个 Workflow：
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | 对抗式事实验证。并行搜索网络、提取可验证事实、分组去重、用 3 人陪审投票交叉验证，只保留通过的结论。适合精确求证（"X 是否属实？"）。 |
 | `research-experiment` | Baseline → Loop → Audit → Report | 面向可机械验证指标的自主优化循环。建立基线后反复执行“提出假设 → 实现 → 评估 → 保留/回滚”，审计指标作弊风险，并生成可复现的结果日志。需要固定预算的评估命令和明确的可编辑文件范围。 |
 
-Workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**build** agent 配合 `/compose-next` 适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
+Workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**`/compose-next`** 适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
 
 **自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow。
 

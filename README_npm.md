@@ -49,7 +49,7 @@ The first launch guides you through configuration automatically. Supported optio
 - **Task Tracking** — tree-shaped task system integrated with the checkpoint system
 - **Subagent System** — parallel subagents with lifecycle tracking, cancellation, and background execution
 - **Goal / Stop Condition** — judge model prevents premature stops during autonomous work
-- **Compose Mode** — structured spec→ship orchestration via the `/compose-next` skill on the build agent
+- **Compose Mode** — end-to-end feature delivery via the `/compose-next` skill
 - **Builtin Skills** — 20+ reusable instruction sets (PDF/Office generation, research, design, and more), invoked via `/skill-name` or auto-matched by relevance
 - **Workflows** — deterministic multi-agent orchestration scripts, including built-in deep-research, fact-check, and research-experiment pipelines
 - **Voice Input** — real-time streaming voice input powered by TenVAD and MiMo ASR

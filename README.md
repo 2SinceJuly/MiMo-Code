@@ -136,9 +136,7 @@ Beyond MiMoCode, Xiaomi MiMo models also work in other agents and coding tools l
 | **build** | Default. Full tool permissions for development |
 | **plan** | Read-only analysis mode for code exploration and solution design |
 
-Press `Tab` to switch between primary agents. Subagents are created by the system as needed. After the first message the mode locks: Build and Plan can still switch between each other.
-
-For specs-driven feature delivery, use the **build** agent with the `/compose-next` skill — see [Compose Mode](#compose-mode).
+Press `Tab` to switch between primary agents. Subagents are created by the system as needed. Build and Plan can switch at any time; other custom or special modes lock once the first message is sent.
 
 ### Persistent Memory
 
@@ -209,9 +207,7 @@ The `/goal` command sets a stopping condition for a session. When the agent trie
 
 ### Compose Mode
 
-Compose is MiMoCode's structured workflow for specs-driven development, orchestrating the full lifecycle from spec to shipped code.
-
-Use the **`/compose-next`** skill on the **build** agent: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. It is designed for frontier models (Fable/Sol-class), which internalize most of the workflow and work best from one compact contract. Invoke it only when the user explicitly asks for this workflow — by slash command, name, or a clear natural-language request.
+Use the **`/compose-next`** skill to run an end-to-end feature delivery loop: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. It is invoked only when the user explicitly asks for this workflow — by slash command, name, or a clear natural-language request. Do not combine it with plan mode.
 
 ### Workflows
 
@@ -225,7 +221,7 @@ MiMoCode ships with three built-in workflows:
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | Adversarial fact verification. Runs parallel web searches, extracts checkable facts, groups duplicates, then cross-checks each with a 3-juror adversarial vote. Best for precise claims ("Is X true?"). |
 | `research-experiment` | Baseline → Loop → Audit → Report | Autonomous optimization loop for a mechanically verifiable metric. Establishes a baseline, iterates through hypothesize → implement → evaluate → keep/revert, audits for metric gaming, and produces a reproducible result log. Requires a fixed-budget evaluation command and an explicit editable-file scope. |
 
-Workflows complement the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use the **build** agent with `/compose-next` when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
+Workflows complement the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use `/compose-next` when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
 
 **Custom workflows:** Place a `.js` file in `.mimocode/workflows/` or `.claude/workflows/` to define your own, or override a built-in by using the same name.
 

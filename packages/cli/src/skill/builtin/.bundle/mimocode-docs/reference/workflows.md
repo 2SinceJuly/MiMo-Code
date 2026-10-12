@@ -106,7 +106,7 @@ Runnable by `name` without writing a file:
 Both drive multi-agent work, but choose by task shape:
 
 - **Workflow** (deterministic code) — best when requirements are **well-defined** and the task **decomposes into independent subtasks**. It fans out to parallel worktrees and runs **non-interactively to completion** — fire-and-forget.
-- **`/compose-next` skill on Build** — best for **exploratory or ambiguous** work where you want to redirect mid-flow, answer questions, or inject judgment between steps. Recommended for frontier (Fable/Sol-class) models. Invoke only on explicit user request.
+- **`/compose-next`** — best for **exploratory or ambiguous** work where you want to redirect mid-flow, answer questions, or inject judgment between steps. Invoke only on explicit user request. Do not combine it with plan mode.
 
 ## Semantics worth knowing
 
