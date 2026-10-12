@@ -3,7 +3,7 @@ feature: retire-compose-legacy
 status: delivered
 updated: 2026-10-12
 branch: feat/retire-compose-legacy
-commits: 4a5e2140..4a5e2140 # filled at delivery; see git log on the branch
+commits: 4a5e2140..0cbe0b50
 ---
 
 # Retire Compose Legacy
