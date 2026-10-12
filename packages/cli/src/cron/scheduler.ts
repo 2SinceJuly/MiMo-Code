@@ -75,6 +75,8 @@ export type ArmLoopInput = {
   prompt: string
   delay_seconds: number
   reason_length: number
+  /** Owner session for the armed loop task. Stamped as createdBySessionId. */
+  session_id?: string
   /**
    * Marks this arm as a bridge-driven keepalive auto-fire. When true the
    * scheduler skips invoking `StartOpts.onArmLoop` so the bridge does not
@@ -383,7 +385,11 @@ const makeImpl = (): Interface => {
         ...session.map((t) => ({ ...t, durable: false as const })),
       ]
       return all.filter((t) => {
-        if (filter.session_id && t.createdBySessionId !== filter.session_id) return false
+        // Same legacy tolerance as findById / fireTargetSessionId: a missing
+        // createdBySessionId is not "someone else's job" — hide only tasks
+        // explicitly stamped to another session.
+        if (filter.session_id && t.createdBySessionId && t.createdBySessionId !== filter.session_id)
+          return false
         if (filter.kind === "loop" && t.kind !== "loop") return false
         if (filter.kind === "cron" && t.kind === "loop") return false
         if (filter.durable_only && t.durable !== true) return false
@@ -442,6 +448,7 @@ const makeImpl = (): Interface => {
         createdAt: now,
         kind: "loop",
         recurring: false,
+        ...(input.session_id ? { createdBySessionId: input.session_id } : {}),
       })
 
       // PR #1479 finding #4: pin nextFireAt to the requested target so the
