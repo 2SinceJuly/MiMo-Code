@@ -302,7 +302,7 @@ export const dict = {
   "tui.skill.sales.description":
     "Подготовка встреч, исследование клиентов, планирование сделок и работа с системами продаж",
   "tui.skill.compose-next.description":
-    "Уточнить, описать, реализовать, проверить",
+    "Режим оркестрации: уточнить, описать, реализовать, проверить",
 
   // Language switching
   "tui.command.language.switch.title": "Сменить язык",

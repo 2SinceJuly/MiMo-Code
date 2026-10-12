@@ -208,7 +208,7 @@ export const dict = {
   "tui.skill.product-design.description": "调研、审计、制作原型并验证产品与用户体验设计",
   "tui.skill.sales.description": "准备客户会议、调研客户、规划交易并使用销售系统",
   "tui.skill.compose-next.description":
-    "澄清需求、规格、实现与评审",
+    "编排模式：澄清需求、规格、实现与评审",
   "tui.skill.docx-official.slash": "Word文档",
   "tui.skill.xlsx-official.slash": "Excel表格",
   "tui.skill.pdf-official.slash": "PDF文档",
@@ -229,7 +229,7 @@ export const dict = {
   "tui.skill.data-analytics.slash": "数据分析",
   "tui.skill.product-design.slash": "产品设计",
   "tui.skill.sales.slash": "销售助手",
-  "tui.skill.compose-next.slash": "compose-next",
+  "tui.skill.compose-next.slash": "新编排模式",
 
   // Language switching
   "tui.command.language.switch.title": "切换语言",

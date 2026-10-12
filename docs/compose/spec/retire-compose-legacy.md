@@ -57,12 +57,14 @@ Homepage tips now rotate `tui.tips.compose_next` as a normal weighted tip. Copy 
 
 - `tui.tips.compose_next` joins the normal weighted tip pool (`TIP_KEYS` / `buildTipKeys`) so it rotates on every homepage visit.
 - Delete the Compose lock override in `pickDisplayKey` (`COMPOSE_LOCK_TIP` / `agentName === "compose"`). The `/login` override stays.
-- Copy direction (aligned with mimo-desktop `composeDesc` / skill brief). Name is **`compose-next` in every language** — do not translate it to 「编排模式」 or "Compose mode". Body describes the capability positively; never "instead of Compose" / 「代替 Compose」.
+- **Tips** (`tui.tips.compose_next`): keep short and lead with the literal slash command so the user knows what to type. Never "instead of Compose" / 「代替 Compose」.
   - zh: `{highlight}/compose-next{/highlight} — 澄清需求、规格、实现与评审`
   - en: `{highlight}/compose-next{/highlight} — clarify, spec, implement, review`
-  - Other locales follow the same four-beat capability line (see mimo-desktop `composeDesc`).
-- `tui.skill.compose-next.slash` display names become `compose-next` (not 「新编排模式」 / "New orchestration mode").
-- `tui.skill.compose-next.description` drops "新一代编排模式" framing that implies a mode replacement; keep the four-beat capability description.
+- **Skill description** (`tui.skill.compose-next.description`): 「编排模式」 framing is allowed and the copy is not capped at tip length — keep the mode label plus the four-beat capability line.
+  - zh: `编排模式：澄清需求、规格、实现与评审`
+  - en: `Orchestration mode: clarify, spec, implement, review`
+- **Slash display name** (`tui.skill.compose-next.slash`): localized names are fine; not forced to the English id.
+  - zh: `新编排模式` · zht: `新編排模式`
 
 ### S2.6 Historical session compatibility
 
