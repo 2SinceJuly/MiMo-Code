@@ -1,29 +1,40 @@
 ---
 feature: cron-session-affinity
-status: in-progress
+status: delivered
 updated: 2026-10-12
 branch: fix/cron-session-affinity
-commits: 
+commits: 3c6e6bb0..082b8124
 ---
 
 # Cron Session Affinity
 
 ## Report
 
+**What was built** — Scheduled `cron` / `loop` prompts now fire into the session that created the job instead of whichever session first started the process-wide CronBridge. `onFire` resolves the inject target via `fireTargetSessionId(task, bridgeSession)`; `createdBySessionId` is stamped on `armLoop` and inherited across keepalive re-arms so a loop owned by session B keeps its stamp even when the bridge is mounted on A. `get` / `delete` / `rename` / `list` share one ownership rule: hide only tasks stamped to another session; legacy unmarked rows stay visible and fire into the current bridge session. Empty-string stamps count as unmarked everywhere.
+
+**Verification** — `bun test packages/cli/test/cron packages/cli/test/tool/cron.test.ts packages/cli/test/session/cron-bridge.integration.test.ts` → 78 pass / 0 fail. `bun run typecheck` → PASS. `bun run lint` → 0 errors (warnings pre-existing). Independent review of `3c6e6bb0..bfdb2b17` found one CRITICAL (keepalive `armLoop` dropped the owner stamp); fixed in `082b8124` and re-review confirmed no remaining criticals.
+
+**Journey log** —
+1. User guess "cron never marks the session" was only half-right: `createdBySessionId` existed on `schedule` but was ignored at fire time and never written by `armLoop`.
+2. `loop` is not a standalone tool: `/loop` is a skill wrapping `cron schedule`; `cron` also has a `loop` action (`armLoop`). Both shared the wrong-session fire path.
+3. Desktop EngineInstanceStore already accepts cron into non-active sessions by design (R2/R9); the bug was engine-side routing, not desktop mis-attribution. Sidebar lag for a never-listed session (30s poll) is a UI-discovery gap, out of scope.
+4. First review pass was necessary: keepalive re-arm looked like a caller-only gap but reintroduced the whole bug class. Inheriting the prior task's stamp in `armLoop` is more robust than fixing the single caller.
+5. e2e `fireToInject` mirrors production `onFire` rather than invoking it (AppRuntime dynamic-import seam); helper-level tests cover the contract, not the live callback wiring.
+
 ## [S1] Problem
 
 Users (notably from mimo-desktop multi-session hosts) report that scheduled
-`cron` / `loop` prompts fire into the wrong session. Code confirms this:
+`cron` / `loop` prompts fire into the wrong session. Code confirmed this:
 
-- `CronBridge.onFire` always injects into `handle.sessionID` (the first session
-  that called `start`) and never reads `task.createdBySessionId`.
+- `CronBridge.onFire` always injected into `handle.sessionID` (the first session
+  that called `start`) and never read `task.createdBySessionId`.
 - `CronBridge` is a single-slot singleton; a second session's `start` is a no-op,
-  so every fire in the process lands on the first session.
-- `scheduler.armLoop` never writes `createdBySessionId`, so loop tasks have no
-  owner stamp at all.
-- `get` / `delete` / `rename` only apply a session filter when the caller
-  explicitly passes `session_id`; the tool schema claims "defaults to current
-  session" but does not enforce it.
+  so every fire in the process landed on the first session.
+- `scheduler.armLoop` never wrote `createdBySessionId`, so loop tasks had no
+  owner stamp at all (and keepalive re-arm dropped any stamp).
+- `get` / `delete` / `rename` only applied a session filter when the caller
+  explicitly passed `session_id`; the tool schema claims "defaults to current
+  session" but did not enforce it.
 - `LoopState` is a process-global map keyed by prompt text only.
 
 ## [S2] Design
@@ -32,22 +43,22 @@ Users (notably from mimo-desktop multi-session hosts) report that scheduled
 
 When a task fires, inject into the task's owning session:
 
-1. Target session = `task.createdBySessionId` when present.
-2. Legacy / unmarked tasks (no `createdBySessionId`) fall back to the current
-   bridge session (previous behavior) so existing durable jobs keep firing.
+1. Target session = `task.createdBySessionId` when present (truthy).
+2. Legacy / unmarked tasks (no stamp, or empty-string stamp) fall back to the
+   current bridge session (previous behavior) so existing durable jobs keep firing.
 
-`injectScheduledPrompt` already accepts an explicit `sessionID`; `onFire` must
-pass the target session rather than `handle.sessionID`. Sentinel expansion
-(`resolveAtFireTime`) still uses the bridge's `workspaceRoot` and the
-**target** session id so the cache is keyed per receiving session.
+`injectScheduledPrompt` already accepts an explicit `sessionID`; `onFire` passes
+the target session rather than `handle.sessionID`. Sentinel expansion
+(`resolveAtFireTime`) uses the bridge's `workspaceRoot` and the **target**
+session id so the cache is keyed per receiving session.
 
 ### Session stamping
 
-- `scheduler.add` already stamps `createdBySessionId` when `input.session_id`
-  is set; keep that.
-- `armLoop` must accept and stamp `session_id` on the created loop task
-  (same `createdBySessionId` field). The cron tool's `loop` action passes
-  `sessionID` (resolved like `schedule`).
+- `scheduler.add` stamps `createdBySessionId` when `input.session_id` is set.
+- `armLoop` accepts and stamps `session_id`. When superseding prior same-prompt
+  loop tasks without an explicit `session_id` (keepalive path), it inherits the
+  first stamped prior's owner so re-arm never drops affinity.
+- The cron tool's `loop` action passes `sessionID` (resolved like `schedule`).
 
 ### Ownership on read/update/delete
 
@@ -61,6 +72,13 @@ pass the target session rather than `handle.sessionID`. Sentinel expansion
   unchanged.
 - `list` uses the same rule (hide only tasks stamped to another session) so
   legacy unmarked rows remain discoverable and cancellable.
+- Empty-string stamps are treated as unmarked across fire/list/findById.
+
+### Loop state
+
+`armLoop` stamps the task; `LoopState` remains keyed by prompt for this
+iteration (keepalive and max-age). Full per-session LoopState isolation is out
+of scope; see S3.
 
 ### Desktop (mimo-desktop) alignment
 
@@ -74,12 +92,6 @@ and correctly attributed after this fix — the creating conversation is the one
 that goes busy. Remaining desktop-side lag (a session not yet in `convos` may
 take up to 30s to appear in the sidebar) is a UI-discovery gap, not a
 correctness bug, and is out of scope here.
-
-### Loop state
-
-`armLoop` stamps the task; `LoopState` remains keyed by prompt for this
-iteration (keepalive and max-age). Full per-session LoopState isolation is out
-of scope; see S3.
 
 ### Error / edge behavior
 
@@ -96,10 +108,10 @@ of scope; see S3.
   tick).
 - Re-keying `LoopState` by (session, prompt).
 - Migrating or deleting legacy unmarked durable tasks.
-- Desktop UI / Automations page changes.
+- Desktop UI / Automations page changes; 30s sidebar discovery lag.
 
 ## Tasks
-- [ ] T1: Route `onFire` through `task.createdBySessionId` with fallback to bridge session — acceptance: a task stamped with session B injects into B while the bridge is mounted on A (covers: S2)
-- [ ] T2: Stamp `createdBySessionId` in `armLoop` and pass `session_id` from the cron tool `loop` action — acceptance: created loop task has `createdBySessionId` equal to the calling session (covers: S2; depends: T1)
-- [ ] T3: Always pass resolved `sessionID` into `get`/`delete`/`rename` in CronTool — acceptance: get/delete/rename from session A cannot act on a task stamped to session B (covers: S2; depends: T1)
-- [ ] T4: Regression tests for cross-session fire routing, loop stamping, and ownership filter — acceptance: tests fail before the fix and pass after (covers: S2; depends: T1, T2, T3)
+- [x] T1: Route `onFire` through `task.createdBySessionId` with fallback to bridge session — acceptance: a task stamped with session B injects into B while the bridge is mounted on A (covers: S2)
+- [x] T2: Stamp `createdBySessionId` in `armLoop` and pass `session_id` from the cron tool `loop` action — acceptance: created loop task has `createdBySessionId` equal to the calling session (covers: S2; depends: T1)
+- [x] T3: Always pass resolved `sessionID` into `get`/`delete`/`rename` in CronTool — acceptance: get/delete/rename from session A cannot act on a task stamped to session B (covers: S2; depends: T1)
+- [x] T4: Regression tests for cross-session fire routing, loop stamping, and ownership filter — acceptance: tests fail before the fix and pass after (covers: S2; depends: T1, T2, T3)
