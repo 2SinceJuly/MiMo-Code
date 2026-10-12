@@ -1573,6 +1573,40 @@ describe("session.message-v2.fromError", () => {
     })
   })
 
+  // [TP-R8-06] Desktop turn-execution: provider prose must reach the native
+  // overflow branch even when the HTTP 400 body has no context error code.
+  test("detects model's context window overflow without a structured overflow code", () => {
+    const message = "The prompt exceeds the model's context window of 393,216 tokens. Shorten or compact the conversation and retry."
+    const responseBody = JSON.stringify({ error: { message, type: "invalid_request_error", code: null } })
+    for (const providerID of [ProviderID.make("test"), ProviderID.make("xiaomi")]) {
+      for (const sdkMessage of [message, "Request failed"]) {
+        const result = MessageV2.fromError(new APICallError({
+          message: sdkMessage,
+          url: "https://example.com/v1/chat/completions",
+          requestBodyValues: {},
+          statusCode: 400,
+          responseBody,
+          isRetryable: false,
+        }), { providerID })
+        expect(MessageV2.ContextOverflowError.isInstance(result)).toBe(true)
+        expect(result).toMatchObject({ data: { responseBody } })
+      }
+    }
+  })
+
+  test("ordinary HTTP 400 mentioning a model context window remains an API error", () => {
+    for (const message of [
+      "Unable to determine the model's context window",
+      "The output exceeds the model's output token limit",
+      "Invalid model context window configuration",
+    ]) {
+      const result = MessageV2.fromError(new APICallError({
+        message, url: "https://example.com", requestBodyValues: {}, statusCode: 400, isRetryable: false,
+      }), { providerID })
+      expect(MessageV2.APIError.isInstance(result)).toBe(true)
+    }
+  })
+
   test("detects context overflow from context_length_exceeded code in response body", () => {
     const error = new APICallError({
       message: "Request failed",
