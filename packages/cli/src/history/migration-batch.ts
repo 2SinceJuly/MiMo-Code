@@ -12,8 +12,8 @@ import { indexImportedParts } from "./import"
 import { basePartId } from "./chunk"
 import { deleteHistoryRows } from "./chunk-write"
 
-/** v7: re-extract every part so kind is populated. */
-export const MIGRATION_VERSION = 7
+/** v8: re-extract parts so bodies are CJK-unigram segmented (short-word FTS). */
+export const MIGRATION_VERSION = 8
 const batch = 32
 const budgetMs = 8
 

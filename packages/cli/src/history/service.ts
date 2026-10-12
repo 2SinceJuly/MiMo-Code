@@ -85,8 +85,8 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const search = Effect.fn("History.search")(function* (input: Parameters<Interface["search"]>[0]) {
-      const ftsQuery = buildFtsQuery(input.query)
-      if (!ftsQuery) return []
+      const { fts: ftsQuery, shortTokens } = buildFtsQuery(input.query)
+      if (!ftsQuery && !shortTokens.length) return []
 
       const limit = Math.min(input.limit ?? 10, HARD_CAP)
       const conditions: string[] = []
@@ -115,7 +115,8 @@ export const layer = Layer.effect(
         params.push(input.time_before)
       }
 
-      const whereClause = conditions.length > 0 ? `AND ${conditions.join(" AND ")}` : ""
+      const shortClause = shortTokens.map(() => "AND instr(history_fts.body, ?) > 0").join(" ")
+      const whereClause = [conditions.length ? `AND ${conditions.join(" AND ")}` : "", shortClause].filter(Boolean).join(" ")
       // Debt history-search-overfetch-after-v6: legacy multi-row FTS bodies may remain
       // until migration v6 finishes. Over-fetch so one part cannot fill LIMIT before
       // dedupe. When v6 is done on a DB (or once fleet v6 coverage is complete), tighten
@@ -127,12 +128,13 @@ export const layer = Layer.effect(
         SELECT history_fts.part_id, history_fts.session_id, history_fts.message_id,
                history_fts.project_id, history_fts.tool_name,
                history_fts.time_created,
-               substr(snippet(history_fts_idx, 0, '<<', '>>', '...', 32), 1, 1001) AS snippet,
+               substr(history_fts.body, 1, 1000) AS snippet,
                bm25(history_fts_idx) AS score
         FROM history_fts_idx
         CROSS JOIN history_fts ON history_fts.rowid = history_fts_idx.rowid
-        WHERE history_fts_idx MATCH ?
-        ${whereClause}
+        WHERE 1=1
+          ${ftsQuery ? "AND history_fts_idx MATCH ?" : ""}
+          ${whereClause}
         ORDER BY score
         LIMIT ?
       `
@@ -141,7 +143,7 @@ export const layer = Layer.effect(
       // resolves to node:sqlite outside Bun). See the same note in memory/service.ts.
       const rows = Database.Client()
         .$client.prepare(sqlText)
-        .all(ftsQuery, ...params, fetchLimit) as Row[]
+        .all(...(ftsQuery ? [ftsQuery] : []), ...params, ...shortTokens, fetchLimit) as Row[]
       const seen = new Set<string>()
       const hits = []
       for (const r of rows) {

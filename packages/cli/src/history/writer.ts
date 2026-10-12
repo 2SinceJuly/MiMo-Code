@@ -79,6 +79,7 @@ function handle(job: Job, resolver: Resolver) {
         kind: extracted.kind,
         tool_name: extracted.tool_name,
         body: extracted.body,
+        body_idx: extracted.body_idx,
         time_created: job.time,
       }),
     )

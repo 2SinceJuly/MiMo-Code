@@ -61,8 +61,7 @@ describe("HistoryTool", () => {
       kind: "assistant_text",
 
               tool_name: null,
-              body: "JWT signing test",
-              time_created: 1000,
+              body: "JWT signing test", body_idx: "JWT signing test", time_created: 1000,
             })
             .run()
         })

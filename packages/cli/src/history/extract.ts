@@ -18,7 +18,21 @@ export type Kind =
   | "agent"
   | "retry"
 
-export type Extracted = { kind: Kind; body: string; tool_name: string | null }
+export type Extracted = { kind: Kind; body: string; body_idx: string; tool_name: string | null }
+
+/**
+ * Search representation (body_idx): isolate every Han char from Han/Latin/digit
+ * neighbors so unicode61 phrases match CJK in mixed text (npm打包脚本2).
+ * Only this column is rewritten — original `body` stays lossless (D5/D7).
+ */
+export function buildSearchIndexText(text: string): string {
+  return text
+    .replace(/([\p{Script=Han}])(?=\p{Script=Han})/gu, "$1 ")
+    .replace(/([\p{Script=Han}])(?=[\p{L}\p{N}])/gu, "$1 ")
+    .replace(/([\p{L}\p{N}])(?=\p{Script=Han})/gu, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
 
 /** Cap tool `input` so a huge argv/json cannot evict output / outputPath from the index body. */
 const INPUT_INDEX_BUDGET = {
@@ -29,22 +43,15 @@ const INPUT_INDEX_BUDGET = {
 /** Same phrasing as `formatToolTruncationHint` in `tool/truncate.ts`. */
 const OUTPUT_PATH_HINT = /Full output saved to:\s*\S+/
 
-/**
- * Preview tool output for FTS. When a stored result still carries the
- * `Full output saved to:` path (tool-result path), keep that hint inside the
- * budget even if a huge legacy payload would otherwise head-truncate it away.
- */
 function previewOutputForIndex(outputText: string): string {
   return clampIndexBody(keepPathHint(outputText, previewForIndex(outputText)))
 }
 
-/** Hard ceiling for index bodies; re-preview if a re-attach exceeded the budget. */
 function clampIndexBody(body: string): string {
   if (Buffer.byteLength(body, "utf-8") <= INDEX_MAX_BYTES) return body
   return previewForIndex(body)
 }
 
-/** Re-attach tool name and `Full output saved to:` if a preview would drop them; stay within budget. */
 function keepPathHint(source: string, previewed: string): string {
   const hint = OUTPUT_PATH_HINT.exec(source)?.[0]
   if (!hint || previewed.includes(hint)) return previewed
@@ -53,7 +60,6 @@ function keepPathHint(source: string, previewed: string): string {
   return `${head}\n${hint}`
 }
 
-/** Finalize tool FTS body so tool name + path hint survive large payloads. */
 function finalizeToolBody(tool: string, outputText: string, composed: string): string {
   const hint = OUTPUT_PATH_HINT.exec(outputText)?.[0]
   const previewed = previewForIndex(composed)
@@ -70,13 +76,26 @@ function finalizeToolBody(tool: string, outputText: string, composed: string): s
 }
 
 /**
- * Compose FTS body for a part. Length policy is the tool-call-result path:
- * `previewToolOutput` / `Truncate.output` (`tool/truncate.ts`) via `previewForIndex`.
- * Full text stays in PartTable (and tool-output files) for history get.
- *
- * `messageRole` classifies `text` parts as user_text vs assistant_text.
+ * Compose FTS body for a part. Preview budget applies to the **original** text;
+ * CJK ZWSP segmentation is applied afterwards and is reversible for display.
  */
-export function extract(part: MessageV2.Part, messageRole: "user" | "assistant"): Extracted | null {
+export function extract(
+  part: MessageV2.Part,
+  messageRole: "user" | "assistant",
+  opts?: { summary?: boolean },
+): Extracted | null {
+  // C10: hidden text is not user-visible — do not index synthetic parts or
+  // compaction summary messages (same isolation as engine projection).
+  const anyPart = part as { synthetic?: boolean };
+  if (anyPart.synthetic) return null
+  if (opts?.summary && messageRole === "assistant") return null
+  const raw = extractRaw(part, messageRole)
+  if (!raw) return null
+  // body = original preview (display); body_idx = search form (D5/D7).
+  return { ...raw, body_idx: buildSearchIndexText(raw.body) }
+}
+
+function extractRaw(part: MessageV2.Part, messageRole: "user" | "assistant"): Omit<Extracted, "body_idx"> | null {
   switch (part.type) {
     case "text": {
       if (!part.text) return null
@@ -98,26 +117,16 @@ export function extract(part: MessageV2.Part, messageRole: "user" | "assistant")
       if (state.status === "pending" || state.status === "running") return null
 
       const attachments = previewForIndex((state.attachments ?? []).map(fileText).join(" "))
-      // Prefer stored tool-result string; bound input separately so output keeps budget share.
       const inputPart = boundedJson(state.input ?? {}, INPUT_INDEX_BUDGET)
       if (state.status === "error") {
         const errorText = typeof state.error === "string" ? state.error : boundedJson(state.error)
         const composed = `${part.tool} ${inputPart} ${previewOutputForIndex(errorText)} ${attachments}`.trim()
-        return {
-          kind: "tool_error",
-          body: finalizeToolBody(part.tool, errorText, composed),
-          tool_name: part.tool,
-        }
+        return { kind: "tool_error", body: finalizeToolBody(part.tool, errorText, composed), tool_name: part.tool }
       }
       if (state.status === "completed") {
-        const outputText =
-          typeof state.output === "string" ? state.output : boundedJson(state.output ?? "")
+        const outputText = typeof state.output === "string" ? state.output : boundedJson(state.output ?? "")
         const composed = `${part.tool} ${inputPart} ${previewOutputForIndex(outputText)} ${attachments}`.trim()
-        return {
-          kind: "tool_output",
-          body: finalizeToolBody(part.tool, outputText, composed),
-          tool_name: part.tool,
-        }
+        return { kind: "tool_output", body: finalizeToolBody(part.tool, outputText, composed), tool_name: part.tool }
       }
       return null
     }
@@ -132,9 +141,7 @@ export function extract(part: MessageV2.Part, messageRole: "user" | "assistant")
       return body ? { kind: "compaction", body: previewForIndex(body), tool_name: null } : null
     }
     case "patch":
-      return part.files.length
-        ? { kind: "patch", body: previewForIndex(part.files.join(" ")), tool_name: null }
-        : null
+      return part.files.length ? { kind: "patch", body: previewForIndex(part.files.join(" ")), tool_name: null } : null
     case "agent":
       return {
         kind: "agent",
@@ -144,9 +151,7 @@ export function extract(part: MessageV2.Part, messageRole: "user" | "assistant")
     case "retry":
       return {
         kind: "retry",
-        body: previewForIndex(
-          [part.error.data.message, part.error.data.responseBody].filter(Boolean).join(" "),
-        ),
+        body: previewForIndex([part.error.data.message, part.error.data.responseBody].filter(Boolean).join(" ")),
         tool_name: null,
       }
     case "snapshot":

@@ -100,6 +100,7 @@ function writeBatch(
         part: p,
         // upsertHistoryBody applies tool-result truncation (single write gate).
         body: extracted.body,
+        body_idx: extracted.body_idx,
         tool_name: extracted.tool_name,
         time: p.time_created,
       })
@@ -114,7 +115,7 @@ function writeBatch(
           project_id: projectID,
         kind: "assistant_text",
           tool_name: w.tool_name,
-          body: w.body,
+          body: w.body, body_idx: w.body_idx ?? w.body,
           time_created: w.time,
         })
       }

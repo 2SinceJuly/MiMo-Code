@@ -46,6 +46,7 @@ describe("History.search chunked parts", () => {
       kind: "assistant_text",
                 tool_name: "bash",
                 body: `sharedtoken chunk ${i}`,
+                body_idx: `sharedtoken chunk ${i}`,
                 time_created: now,
               })
               .run()
@@ -60,6 +61,7 @@ describe("History.search chunked parts", () => {
       kind: "assistant_text",
                 tool_name: null,
                 body: `sharedtoken in ${id}`,
+                body_idx: `sharedtoken in ${id}`,
                 time_created: now,
               })
               .run()

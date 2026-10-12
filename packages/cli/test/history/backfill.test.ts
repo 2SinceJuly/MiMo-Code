@@ -193,10 +193,10 @@ async function prepareMigration() {
   // v7 kind column is already applied by Database.Client migrations; only seed rebuild state.
   db.$client.exec(
     `INSERT INTO history_index_migration
-     SELECT 7, 'clean', 0,
+     SELECT 8, 'clean', 0,
        COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
        COALESCE((SELECT MAX(rowid) FROM part), 0);
-     UPDATE history_index_migration SET phase='done' WHERE version < 7;`,
+     UPDATE history_index_migration SET phase='done' WHERE version < 8;`,
   )
   return db
 }
@@ -227,7 +227,7 @@ test.each(["clean", "repair"] as const)("%s yields at its time budget and resume
       db.insert(HistoryFtsTable).values({
         part_id: `${part.part_id}#${index}`, session_id: part.session_id,
         message_id: part.message_id, project_id: "proj_ses_compat",
-      kind: "assistant_text", body: "stalechunk", time_created: 1,
+      kind: "assistant_text", body: "stalechunk", body_idx: "stalechunk", time_created: 1,
       }).run()
     }
   }
@@ -342,8 +342,7 @@ test("repairs missing rows and replaces stale content from original parts", asyn
       project_id: "proj_ses_compat",
       kind: "assistant_text",
 
-      body: "keepword data:image/png;base64,aGVsbG8= tailword",
-      time_created: 1,
+      body: "keepword data:image/png;base64,aGVsbG8= tailword", body_idx: "keepword data:image/png;base64,aGVsbG8= tailword", time_created: 1,
     })
     .run()
   await prepareMigration()
@@ -470,8 +469,7 @@ test("upgrade removes search entries whose original parts were deleted", async (
       project_id: "proj_ses_compat",
       kind: "assistant_text",
 
-      body: "ghostneedle",
-      time_created: 1,
+      body: "ghostneedle", body_idx: "ghostneedle", time_created: 1,
     })
     .run()
   await prepareMigration()
@@ -525,12 +523,11 @@ test("completed version 3 indexes gain omitted content in version 4 only once", 
       project_id: "proj_ses_expand",
       kind: "assistant_text",
 
-      body: "read inputneedle",
-      time_created: 1,
+      body: "read inputneedle", body_idx: "read inputneedle", time_created: 1,
     })
     .run()
   db.$client.exec(
-    "UPDATE history_index_migration SET phase='done' WHERE version=3; DELETE FROM history_index_migration WHERE version=4 OR version=5 OR version=6 OR version=7",
+    "UPDATE history_index_migration SET phase='done' WHERE version=3; DELETE FROM history_index_migration WHERE version=4 OR version=5 OR version=6 OR version=7 OR version=8",
   )
   db.$client.exec(
     await Bun.file(
@@ -547,10 +544,10 @@ test("completed version 3 indexes gain omitted content in version 4 only once", 
   )
   db.$client.exec(
     `INSERT INTO history_index_migration
-     SELECT 7, 'clean', 0,
+     SELECT 8, 'clean', 0,
        COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
        COALESCE((SELECT MAX(rowid) FROM part), 0);
-     UPDATE history_index_migration SET phase='done' WHERE version < 7;`,
+     UPDATE history_index_migration SET phase='done' WHERE version < 8;`,
   )
   finish(db)
   for (const word of ["inputneedle", "outputneedle", "reasonneedle"]) {

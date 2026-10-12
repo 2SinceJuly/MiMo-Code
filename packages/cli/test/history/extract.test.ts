@@ -6,12 +6,12 @@ import { extract } from "../../src/history/extract"
 describe("history.extract", () => {
   test("user text is indexed", () => {
     const r = extract({ type: "text", text: "hello world" } as any, "user")
-    expect(r).toEqual({ kind: "user_text", body: "hello world", tool_name: null })
+    expect(r).toEqual({ kind: "user_text", body: "hello world", body_idx: "hello world", tool_name: null })
   })
 
   test("assistant text is indexed", () => {
     const r = extract({ type: "text", text: "sure" } as any, "assistant")
-    expect(r).toEqual({ kind: "assistant_text", body: "sure", tool_name: null })
+    expect(r).toEqual({ kind: "assistant_text", body: "sure", body_idx: "sure", tool_name: null })
   })
 
   test("empty text → null (streaming chunk filter)", () => {
@@ -21,7 +21,7 @@ describe("history.extract", () => {
 
   test("reasoning is indexed", () => {
     const r = extract({ type: "reasoning", text: "thinking" } as any, "assistant")
-    expect(r).toEqual({ kind: "reasoning", body: "thinking", tool_name: null })
+    expect(r).toEqual({ kind: "reasoning", body: "thinking", body_idx: "thinking", tool_name: null })
   })
 
   test("tool pending → null (streaming mid-state)", () => {
@@ -56,7 +56,7 @@ describe("history.extract", () => {
     }
     const r = extract(part as any, "assistant")
     expect(r).toEqual({
-      kind: "tool_error",
+      kind: "tool_error", body_idx: expect.any(String),
       body: 'Read {"file_path":"/tmp/x"} ENOENT',
       tool_name: "Read",
     })
@@ -80,7 +80,7 @@ test("image filename and MIME are searchable without binary payload", () => {
       mime: "image/png",
       url: "data:image/png;base64,YWJj",
     } as any, "assistant"),
-  ).toEqual({ kind: "file", body: "designneedle.png image/png", tool_name: null })
+  ).toEqual({ kind: "file", body: "designneedle.png image/png", body_idx: "designneedle.png image/png", tool_name: null })
   const r = extract({
     type: "tool",
     tool: "image",

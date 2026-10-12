@@ -21,6 +21,7 @@ export function indexImportedParts<T>(
         ...projection(),
         project: SessionTable.project_id,
         role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
+        summary: sql<number>`json_extract(${MessageTable.data}, '$.summary')`,
       })
       .from(PartTable)
       .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
@@ -36,6 +37,7 @@ export function indexImportedParts<T>(
           sessionID: row.session_id,
         } as MessageV2.Part,
         row.role === "user" ? "user" : "assistant",
+        { summary: Boolean(row.summary) },
       )
       if (!value) {
         deleteHistoryRows(db, row.id)
@@ -50,6 +52,7 @@ export function indexImportedParts<T>(
         kind: value.kind,
         tool_name: value.tool_name,
         body: value.body,
+        body_idx: value.body_idx,
         time_created: row.time_created,
       })
     }

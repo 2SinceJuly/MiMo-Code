@@ -36,8 +36,7 @@ function seedFts(rows: Array<Partial<typeof HistoryFtsTable.$inferInsert>>) {
       kind: "assistant_text",
 
           tool_name: r.tool_name ?? null,
-          body: r.body!,
-          time_created: r.time_created ?? Date.now(),
+          body: r.body!, body_idx: r.body!, time_created: r.time_created ?? Date.now(),
         })
         .run()
     }

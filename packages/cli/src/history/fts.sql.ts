@@ -9,8 +9,11 @@ export const HistoryFtsTable = sqliteTable(
     project_id: text().notNull(),
     /** Content classification (`extract` Kind). Consumers may filter; History.search does not accept kind. */
     kind: text().notNull(),
-    tool_name: text(),
+    /** Original preview text — display / highlight source (lossless). */
     body: text().notNull(),
+    /** Search representation: Han isolated for unicode61 phrases (D5/D7). */
+    body_idx: text().notNull(),
+    tool_name: text(),
     time_created: integer().notNull(),
   },
   (t) => [
