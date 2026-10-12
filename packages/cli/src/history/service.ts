@@ -150,15 +150,27 @@ export const layer = Layer.effect(
         if (seen.has(partId)) continue
         seen.add(partId)
         const bodyFull = String((r as { body_full?: string }).body_full ?? "")
-        // C15: locate first hit with the same phrase semantics as FTS (not whole-query indexOf).
-        const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
-        const hayN = norm(bodyFull)
-        const words = norm(input.query).match(/[\p{L}\p{N}]+/gu)?.filter(Boolean) ?? []
+        // C15: locate with FTS-like tokens (AND/punct phrases; Han isolated; NFD map).
+        const map: number[] = []
+        const chars: string[] = []
+        for (let i = 0; i < bodyFull.length; i++) {
+          const folded = (bodyFull[i] ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+          for (const c of folded) { chars.push(c); map.push(i) }
+        }
+        const hayN = chars.join("")
+        const qn = input.query.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+        const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).filter(Boolean)
         let hitAt = -1
-        if (words.length) {
-          const re = new RegExp(words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]+"), "iu")
+        const findSeq = (tokens: string[]) => {
+          const re = new RegExp(tokens.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]+"), "iu")
           const m = re.exec(hayN)
-          hitAt = m ? m.index : -1
+          return m ? map[m.index] ?? -1 : -1
+        }
+        for (const seg of segments) {
+          const words = seg.match(/[\p{L}\p{N}]+/gu)?.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
+          if (!words.length) continue
+          const at = findSeq(words)
+          if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
         }
         const winStart = Math.max(0, hitAt - 200)
         const snippet = bodyFull.slice(winStart, winStart + 1000)

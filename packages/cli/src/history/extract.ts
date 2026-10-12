@@ -8,6 +8,8 @@ import type { MessageV2 } from "../session/message-v2"
 export type Kind =
   | "user_text"
   | "assistant_text"
+  | "synthetic_text"
+  | "summary_text"
   | "reasoning"
   | "file"
   | "tool_output"
@@ -84,26 +86,28 @@ export function extract(
   messageRole: "user" | "assistant",
   opts?: { summary?: boolean },
 ): Extracted | null {
-  // C10: hidden text is not user-visible — do not index synthetic parts or
-  // compaction summary messages (same isolation as engine projection).
-  const anyPart = part as { synthetic?: boolean };
-  if (anyPart.synthetic) return null
-  if (opts?.summary && messageRole === "assistant") return null
-  const raw = extractRaw(part, messageRole)
+  // Index ALL content for History.search (shared tool contract). Desktop
+  // visibility is enforced at query time via kind + projection semantics (C10).
+  void opts
+  const raw = extractRaw(part, messageRole, opts)
   if (!raw) return null
   // body = original preview (display); body_idx = search form (D5/D7).
   return { ...raw, body_idx: buildSearchIndexText(raw.body) }
 }
 
-function extractRaw(part: MessageV2.Part, messageRole: "user" | "assistant"): Omit<Extracted, "body_idx"> | null {
+function extractRaw(part: MessageV2.Part, messageRole: "user" | "assistant", opts?: { summary?: boolean }): Omit<Extracted, "body_idx"> | null {
   switch (part.type) {
     case "text": {
       if (!part.text) return null
-      return {
-        kind: messageRole === "user" ? "user_text" : "assistant_text",
-        body: previewForIndex(part.text),
-        tool_name: null,
-      }
+      const anyPart = part as { synthetic?: boolean }
+      const kind = anyPart.synthetic
+        ? "synthetic_text"
+        : opts?.summary && messageRole === "assistant"
+          ? "summary_text"
+          : messageRole === "user"
+            ? "user_text"
+            : "assistant_text"
+      return { kind, body: previewForIndex(part.text), tool_name: null }
     }
     case "reasoning": {
       if (!part.text) return null
