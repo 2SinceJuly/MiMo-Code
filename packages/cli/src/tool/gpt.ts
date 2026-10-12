@@ -1,4 +1,5 @@
 import { Flag } from "@/flag/flag"
+import type { McpToolSearchMode } from "./mcp-tool-search"
 
 export type HarnessMode = "auto" | "codex" | "default"
 
@@ -21,12 +22,13 @@ export function isGPTModel(...values: Array<string | undefined>) {
   return ids.some((id) => id.includes("gpt"))
 }
 
-export function isMcpToolSearchEnabled(
-  enabled: boolean,
+export function mcpToolSearchMode(
+  configured: McpToolSearchMode,
   harness: HarnessMode | undefined,
   ...modelIDs: Array<string | undefined>
-) {
-  return enabled || usesCodexMode(harness, ...modelIDs)
+): McpToolSearchMode {
+  if (usesCodexMode(harness, ...modelIDs)) return { type: "always" }
+  return configured
 }
 
 export function usesGPTToolset(

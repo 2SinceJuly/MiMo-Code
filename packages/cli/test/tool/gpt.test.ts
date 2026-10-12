@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { isGPTModel, isMcpToolSearchEnabled, usesGPTToolset } from "../../src/tool/gpt"
+import { isGPTModel, mcpToolSearchMode, usesGPTToolset } from "../../src/tool/gpt"
 
 const codexMode = process.env.MIMOCODE_CODEX_MODE
 
@@ -27,49 +27,41 @@ describe("isGPTModel", () => {
   })
 })
 
-describe("isMcpToolSearchEnabled", () => {
-  test("defaults to GPT models and allows explicit non-GPT opt-in", () => {
-    expect(isMcpToolSearchEnabled(false, undefined, "claude-opus-4-6")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5-pro")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.5-pro-ultraspeed")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2-pro")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-ptc-test")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6-ptc")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, undefined, "gpt-5.2")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, undefined, "gpt-oss-120b")).toBe(false)
-    expect(isMcpToolSearchEnabled(true, undefined, "claude-opus-4-6")).toBe(true)
+describe("mcpToolSearchMode", () => {
+  const auto = { type: "auto", percent: 10 } as const
+  const never = { type: "never" } as const
+  const always = { type: "always" } as const
+
+  test("keeps the configured mode for non-GPT models and always defers for GPT models", () => {
+    expect(mcpToolSearchMode(auto, undefined, "claude-opus-4-6")).toEqual(auto)
+    expect(mcpToolSearchMode(auto, undefined, "mimo-v2.6")).toEqual(auto)
+    expect(mcpToolSearchMode(auto, undefined, "mimo-v2.6-ptc")).toEqual(auto)
+    expect(mcpToolSearchMode(auto, undefined, "gpt-oss-120b")).toEqual(auto)
+    expect(mcpToolSearchMode(never, undefined, "claude-opus-4-6")).toEqual(never)
+    expect(mcpToolSearchMode(always, undefined, "claude-opus-4-6")).toEqual(always)
+    expect(mcpToolSearchMode(never, undefined, "gpt-5.2")).toEqual(always)
   })
 
-  test("enables every non-GPT model when process Codex mode is enabled", () => {
+  test("always defers for every model when process Codex mode is enabled", () => {
     process.env.MIMOCODE_CODEX_MODE = "true"
-    expect(isMcpToolSearchEnabled(false, undefined, "claude-opus-4-6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, undefined, "mimo-v2.6-ptc")).toBe(true)
+    expect(mcpToolSearchMode(never, undefined, "claude-opus-4-6")).toEqual(always)
+    expect(mcpToolSearchMode(auto, undefined, "mimo-v2.6")).toEqual(always)
   })
 
-  test("does not force MCP tool search for GPT models when process Codex mode is disabled", () => {
+  test("does not force deferral for GPT models when process Codex mode is disabled", () => {
     process.env.MIMOCODE_CODEX_MODE = "false"
-    expect(isMcpToolSearchEnabled(false, undefined, "gpt-5.2")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, "codex", "claude-opus-4-6")).toBe(false)
-    expect(isMcpToolSearchEnabled(true, undefined, "gpt-5.2")).toBe(true)
+    expect(mcpToolSearchMode(auto, undefined, "gpt-5.2")).toEqual(auto)
+    expect(mcpToolSearchMode(auto, "codex", "claude-opus-4-6")).toEqual(auto)
   })
 
   test("allows the resolved session mode to override the process mode", () => {
-    expect(isMcpToolSearchEnabled(false, "codex", "claude-opus-4-6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "codex", "mimo-v2.6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "codex", "mimo-v2.6-ptc")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "auto", "gpt-5.2")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "auto", "claude-opus-4-6")).toBe(false)
+    expect(mcpToolSearchMode(auto, "codex", "claude-opus-4-6")).toEqual(always)
+    expect(mcpToolSearchMode(auto, "auto", "gpt-5.2")).toEqual(always)
+    expect(mcpToolSearchMode(auto, "auto", "claude-opus-4-6")).toEqual(auto)
     process.env.MIMOCODE_CODEX_MODE = "true"
-    expect(isMcpToolSearchEnabled(false, "auto", "claude-opus-4-6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "auto", "mimo-v2.6")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "auto", "mimo-v2.6-ptc")).toBe(true)
-    expect(isMcpToolSearchEnabled(false, "default", "claude-opus-4-6")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, "default", "mimo-v2.6")).toBe(false)
-    expect(isMcpToolSearchEnabled(false, "default", "gpt-5.2")).toBe(true)
-    expect(isMcpToolSearchEnabled(true, "default", "mimo-v2.6")).toBe(true)
+    expect(mcpToolSearchMode(auto, "auto", "mimo-v2.6")).toEqual(always)
+    expect(mcpToolSearchMode(auto, "default", "mimo-v2.6")).toEqual(auto)
+    expect(mcpToolSearchMode(auto, "default", "gpt-5.2")).toEqual(always)
   })
 })
 

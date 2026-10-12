@@ -98,7 +98,7 @@ describe("tool.registry", () => {
         expect(tools.find((tool) => tool.id === "example")?.description).toBe("example tool")
         const matches = tools.filter((tool) => tool.id === "mcp_tool_search")
         expect(matches).toHaveLength(1)
-        expect(matches[0].description).toContain("Search locally available MCP tools")
+        expect(matches[0].description).toContain("Fetches full schema definitions for deferred MCP tools")
         expect(matches[0].description).not.toContain("replacement")
       }),
     ),

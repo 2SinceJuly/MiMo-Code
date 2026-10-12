@@ -381,11 +381,12 @@ export const Flag = {
   // Defaults to OFF: exec (tool_script orchestration) is registered only for
   // GPT-toolset models. Opt in here to expose it to every model.
   MIMOCODE_ENABLE_EXEC_TOOL: truthy("MIMOCODE_ENABLE_EXEC_TOOL"),
-  // Defaults to OFF for non-GPT models. GPT models enable MCP Tool Search in
-  // SessionPrompt regardless of this flag. Opt in here to enable it for every
-  // function-calling model.
-  MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH:
-    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH"),
+  // MCP tool lazy-loading: `true` (default) always defers MCP tool schemas
+  // behind mcp_tool_search, `auto` defers once they exceed 10% of the context
+  // window, `auto:N` uses N%, `false` never defers. Codex-mode models always defer.
+  get MIMOCODE_MCP_TOOL_SEARCH() {
+    return process.env["MIMOCODE_MCP_TOOL_SEARCH"]
+  },
   // Defaults to OFF (opt-in): dynamic workflows and built-in workflows.
   // Enable with MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL=true (or the umbrella
   // MIMOCODE_EXPERIMENTAL flag).
