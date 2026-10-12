@@ -161,6 +161,8 @@ export const layer = Layer.effect(
         const qn = input.query.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
         const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).map((s) => s.trim()).filter(Boolean)
         let hitAt = -1
+        const tokenizePhrase = (w: string) =>
+          w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})|_/u).filter(Boolean)
         const findSeq = (tokens: string[]) => {
           const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
           const re = new RegExp(
@@ -184,20 +186,19 @@ export const layer = Layer.effect(
           }
           return -1
         }
-        for (const rawSeg of segments) {
-          const seg = rawSeg.trim()
-          if (!seg) continue
-          const segWords = seg.match(/[\p{L}\p{N}_]+/gu)?.flatMap((w) => w.split(/_/).filter(Boolean)) ?? []
-          if (!segWords.length) continue
-          // Mirror buildFtsQuery: punct segment or contiguous run = one phrase;
-          // whitespace-separated multi-word = token AND.
-          const flat = segWords.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean))
-          if (segments.length >= 2 || !/\s/.test(seg) || segWords.length === 1) {
-            const at = findSeq(flat)
+        // Structure matches buildFtsQuery: punct segments → AND; each space-separated
+        // word is one phrase; `_`/Han inside a word allow optional breaks (unicode61).
+        for (const seg of segments) {
+          const words = seg.match(/[\p{L}\p{N}_]+/gu) ?? []
+          if (!words.length) continue
+          if (segments.length >= 2 || words.length === 1 || !/\s/.test(seg)) {
+            // one phrase (punct segment or single/contiguous word group)
+            const at = findSeq(tokenizePhrase(words.join("_")))
             if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
           } else {
-            for (const w of segWords) {
-              const at = findSeq(w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean))
+            // space-separated multi-word AND: each word is its own phrase
+            for (const w of words) {
+              const at = findSeq(tokenizePhrase(w))
               if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
             }
           }
