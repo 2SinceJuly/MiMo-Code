@@ -99,8 +99,9 @@ function extractRaw(part: MessageV2.Part, messageRole: "user" | "assistant", opt
   switch (part.type) {
     case "text": {
       if (!part.text) return null
-      const anyPart = part as { synthetic?: boolean }
-      const kind = anyPart.synthetic
+      const anyPart = part as { synthetic?: boolean; metadata?: { mimo?: { kind?: string } } }
+      const hiddenMeta = anyPart.metadata?.mimo?.kind === "compose-next-slash"
+      const kind = anyPart.synthetic || hiddenMeta
         ? "synthetic_text"
         : opts?.summary && messageRole === "assistant"
           ? "summary_text"

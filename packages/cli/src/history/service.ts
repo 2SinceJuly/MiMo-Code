@@ -162,15 +162,23 @@ export const layer = Layer.effect(
         const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).filter(Boolean)
         let hitAt = -1
         const findSeq = (tokens: string[]) => {
-          const re = new RegExp(tokens.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]+"), "iu")
+          const re = new RegExp(tokens.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\p{L}\\p{N}]*"), "iu")
           const m = re.exec(hayN)
           return m ? map[m.index] ?? -1 : -1
         }
         for (const seg of segments) {
           const words = seg.match(/[\p{L}\p{N}]+/gu)?.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
           if (!words.length) continue
-          const at = findSeq(words)
-          if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+          if (/\s/.test(seg)) {
+            // token AND: earliest token position
+            for (const w of words) {
+              const at = findSeq([w])
+              if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+            }
+          } else {
+            const at = findSeq(words)
+            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+          }
         }
         const winStart = Math.max(0, hitAt - 200)
         const snippet = bodyFull.slice(winStart, winStart + 1000)
