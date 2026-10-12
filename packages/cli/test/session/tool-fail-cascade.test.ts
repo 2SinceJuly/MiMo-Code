@@ -111,13 +111,18 @@ for (const entry of cases)
       Effect.gen(function* () {
         const previous = {
           cascade: process.env.MIMOCODE_DISABLE_FAIL_CASCADE,
+          search: process.env.MIMOCODE_MCP_TOOL_SEARCH,
         }
         delete process.env.MIMOCODE_DISABLE_FAIL_CASCADE
         if ("disable" in entry) process.env.MIMOCODE_DISABLE_FAIL_CASCADE = entry.disable
+        // The scripted model calls the MCP tool directly, without loading it through mcp_tool_search first.
+        if ("mcp" in entry) process.env.MIMOCODE_MCP_TOOL_SEARCH = "false"
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             if (previous.cascade == null) delete process.env.MIMOCODE_DISABLE_FAIL_CASCADE
             else process.env.MIMOCODE_DISABLE_FAIL_CASCADE = previous.cascade
+            if (previous.search == null) delete process.env.MIMOCODE_MCP_TOOL_SEARCH
+            else process.env.MIMOCODE_MCP_TOOL_SEARCH = previous.search
           }),
         )
         const server = startScriptedLLMServer([
