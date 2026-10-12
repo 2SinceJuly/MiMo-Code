@@ -17,7 +17,7 @@ import {
 } from "@/util/media"
 import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
-import { Log, Token } from "../util"
+import { Log } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent, resolveStoredAgent } from "../agent/agent"
@@ -44,7 +44,7 @@ import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
 import { computeLastMessageInfo } from "./last-message-info"
-import { contextPressureLevel, usable, isOverflow as overflowCheck } from "./overflow"
+import { usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { Global } from "@/global"
@@ -162,15 +162,21 @@ import { errorMessage } from "../util/error"
 import { RecoverableError } from "../tool/recoverable"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
 import {
+  announcedDeferredMcpTools,
   createMcpToolSearchCatalog,
+  deferredMcpToolsDelta,
   mcpToolCatalogBudget,
+  MCP_DEFERRED_TOOLS_METADATA_KEY,
   MCP_TOOL_SEARCH_ID,
   MCP_TOOL_SEARCH_MAX_LOADED,
-  mcpToolSearchDescription,
+  neutralizeHarnessTags,
+  parseMcpToolSearchMode,
+  renderDeferredMcpToolsReminder,
+  shouldDeferMcpTools,
   type McpToolSearchEntry,
   type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
-import { isMcpToolSearchEnabled, usesGPTToolset } from "@/tool/gpt"
+import { mcpToolSearchMode, usesGPTToolset } from "@/tool/gpt"
 import { GPT_TOP_LEVEL_TOOLS } from "@/tool/tool-script-ref"
 import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
@@ -1717,13 +1723,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // same process would overwrite (request state must never live in a
       // global; see toolWhitelist/mcpToolSearch precedent).
       const execMcp: { current: Record<string, AITool> } = { current: {} }
-      const useMcpToolSearch = isMcpToolSearchEnabled(
-        Flag.MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH,
+      const searchMode = mcpToolSearchMode(
+        parseMcpToolSearchMode(Flag.MIMOCODE_MCP_TOOL_SEARCH),
         input.harness,
         input.model.id,
         input.model.api.id,
         input.model.family,
       )
+      // Decided once every request-authorized MCP schema is known (auto mode
+      // compares their size to the context window); read lazily by the MCP
+      // execute wrappers below, which only run after this pass finishes.
+      let deferMcpTools = false
       const run = yield* runner()
       const promptOps = yield* ops()
 
@@ -1990,15 +2000,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           !disabledMcpTools.has(key) &&
           (!agentToolAllowlist || agentToolAllowlist.has(key))
         const searchable = available && (!whitelist || whitelist.has(key))
-        if (searchable && useMcpToolSearch) {
+        if (searchable) {
           mcpSearchEntries.push({
             name: key,
             description: item.description ?? "",
             parameters: transformed as unknown as JSONObject,
           })
-        }
-        if (searchable && !useMcpToolSearch && input.model.capabilities.toolcall && !useGPTTools) {
-          activeTools.add(key)
         }
         const executeMcp = (
           args: Parameters<typeof execute>[0],
@@ -2015,12 +2022,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID: input.session.id,
               })
               const ctx = context(args, opts)
-              if (!useMcpToolSearch && (!available || !input.model.capabilities.toolcall)) {
+              if (!available || !input.model.capabilities.toolcall) {
                 return yield* Effect.fail(
                   new RecoverableError(`The MCP tool "${key}" is unavailable for this request.`),
                 )
               }
-              if (modelFacing && useMcpToolSearch && !loadedMcpTools.has(key)) {
+              if (modelFacing && deferMcpTools && !loadedMcpTools.has(key)) {
                 return yield* Effect.fail(
                   new RecoverableError(
                     `The MCP tool "${key}" is not loaded for this request. Call ${MCP_TOOL_SEARCH_ID} first, then retry on the next step.`,
@@ -2110,7 +2117,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               })
 
               const truncated = yield* truncate.output(
-                normalized.output,
+                neutralizeHarnessTags(normalized.output),
                 { outcome: normalized.isError ? "error" : "success" },
                 input.agent,
               )
@@ -2180,67 +2187,34 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       mcpCatalog.current = createMcpToolSearchCatalog(
         mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
       )
-      if (useMcpToolSearch && tools[MCP_TOOL_SEARCH_ID]) {
-        const cfg = yield* config.get()
-        const usableTokens = usable({ cfg, model: input.model })
-        const lastFinished = input.messages.findLast(
-          (message): message is MessageV2.WithParts & { info: MessageV2.Assistant } =>
-            message.info.role === "assistant" && !!message.info.finish,
-        )
-        const lastFinishedIndex = lastFinished
-          ? input.messages.findIndex((message) => message.info.id === lastFinished.info.id)
-          : -1
-        tools[MCP_TOOL_SEARCH_ID] = {
-          ...tools[MCP_TOOL_SEARCH_ID],
-          description: mcpToolSearchDescription(mcpCatalog.current.entries, {
-            rich:
-              contextPressureLevel({
-                cfg,
-                tokens: lastFinished?.info.tokens ?? {
-                  input: 0,
-                  output: 0,
-                  reasoning: 0,
-                  cache: { read: 0, write: 0 },
-                },
-                model: input.model,
-                additionalTokens: Token.estimate(
-                  JSON.stringify(input.messages.slice(lastFinishedIndex + 1)),
-                ),
-              }) < 2,
-            budget: mcpToolCatalogBudget({ usable: usableTokens, context: input.model.limit.context }),
-          }),
-        }
-      }
+      deferMcpTools = shouldDeferMcpTools(searchMode, mcpCatalog.current.entries, input.model.limit.context)
+      const searchExposed =
+        deferMcpTools && !useGPTTools && input.model.capabilities.toolcall && !!tools[MCP_TOOL_SEARCH_ID]
+      // A tool fetched by mcp_tool_search stays loaded for the rest of the
+      // conversation (newest searches win the cap) as long as it is still
+      // request-authorized; compaction drops older searches with their messages.
       const searchable = new Set(mcpCatalog.current.entries.map((entry) => entry.name))
-      const currentUser = input.messages.findLast((message) => message.info.role === "user")
-      if (currentUser && useMcpToolSearch) {
-        for (const message of input.messages) {
-          if (message.info.role !== "assistant" || message.info.parentID !== currentUser.info.id) continue
-          for (const part of message.parts) {
+      if (deferMcpTools) {
+        search: for (const message of input.messages.toReversed()) {
+          if (message.info.role !== "assistant") continue
+          for (const part of message.parts.toReversed()) {
             if (part.type !== "tool" || part.tool !== MCP_TOOL_SEARCH_ID || part.state.status !== "completed") continue
             const metadata = part.state.metadata as Partial<McpToolSearchMetadata>
-            if (metadata.catalogKey !== mcpCatalog.current.key || !Array.isArray(metadata.matchedTools)) continue
+            if (!Array.isArray(metadata.matchedTools)) continue
             for (const name of metadata.matchedTools) {
               if (typeof name !== "string" || !searchable.has(name)) continue
               loadedMcpTools.add(name)
-              if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
+              if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break search
             }
-            if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
           }
-          if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break
         }
       }
 
-      if (
-        !useGPTTools &&
-        useMcpToolSearch &&
-        input.model.capabilities.toolcall &&
-        mcpCatalog.current.entries.length > 0 &&
-        tools[MCP_TOOL_SEARCH_ID]
-      ) {
-        activeTools.add(MCP_TOOL_SEARCH_ID)
+      if (!useGPTTools && input.model.capabilities.toolcall) {
+        if (searchExposed) activeTools.add(MCP_TOOL_SEARCH_ID)
+        const direct = deferMcpTools ? loadedMcpTools : searchable
+        direct.forEach((name) => activeTools.add(name))
       }
-      if (!useGPTTools) loadedMcpTools.forEach((name) => activeTools.add(name))
 
       // MCP Tool Search keeps full schemas out of the outer model tool list;
       // it is a context-budget optimization, not an authorization boundary.
@@ -2253,7 +2227,49 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return {
         tools,
         activeTools: [...activeTools].filter((name) => tools[name]),
+        // What the model must be told is reachable through mcp_tool_search;
+        // empty when search is not exposed, so earlier announcements get retracted.
+        deferredMcpTools: searchExposed ? mcpCatalog.current.entries : [],
       }
+    })
+
+    // Announces deferred MCP tools as a persisted <system-reminder> on the last
+    // user message: tool definitions stay byte-stable (prefix cache) while the
+    // model still learns what exists. The first announcement lists everything;
+    // later ones carry only the delta against what earlier reminders announced
+    // (compaction drops those, so the full list is re-announced afterwards).
+    const announceDeferredMcpTools = Effect.fn("SessionPrompt.announceDeferredMcpTools")(function* (input: {
+      messages: MessageV2.WithParts[]
+      entries: McpToolSearchEntry[]
+      model: Provider.Model
+    }) {
+      const userMessage = input.messages.findLast((message) => message.info.role === "user")
+      if (!userMessage) return
+      const announced = announcedDeferredMcpTools(
+        input.messages.flatMap((message) =>
+          message.info.role !== "user"
+            ? []
+            : message.parts.flatMap((part) =>
+                part.type === "text" && part.synthetic && part.metadata
+                  ? [part.metadata[MCP_DEFERRED_TOOLS_METADATA_KEY]]
+                  : [],
+              ),
+        ),
+      )
+      const delta = deferredMcpToolsDelta(announced, input.entries)
+      if (!delta) return
+      const cfg = yield* config.get()
+      const budget = mcpToolCatalogBudget({ usable: usable({ cfg, model: input.model }), context: input.model.limit.context })
+      const part = yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: userMessage.info.id,
+        sessionID: userMessage.info.sessionID,
+        type: "text" as const,
+        synthetic: true,
+        text: renderDeferredMcpToolsReminder(delta, input.entries, budget),
+        metadata: { [MCP_DEFERRED_TOOLS_METADATA_KEY]: delta },
+      })
+      userMessage.parts.push(part)
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -5026,6 +5042,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 })
                 const tools = resolvedTools.tools
                 const activeTools = resolvedTools.activeTools
+                yield* announceDeferredMcpTools({ messages: msgs, entries: resolvedTools.deferredMcpTools, model })
 
                 if (lastUser.format?.type === "json_schema") {
                   const outputTool = createStructuredOutputTool({

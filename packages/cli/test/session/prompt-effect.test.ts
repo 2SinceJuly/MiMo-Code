@@ -150,6 +150,20 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   )
 }
 
+/** Scoped opt-out of MCP lazy loading, for tests exercising directly exposed MCP tools. */
+const directMcpTools = Effect.acquireRelease(
+  Effect.sync(() => {
+    const previous = process.env.MIMOCODE_MCP_TOOL_SEARCH
+    process.env.MIMOCODE_MCP_TOOL_SEARCH = "false"
+    return previous
+  }),
+  (previous) =>
+    Effect.sync(() => {
+      if (previous === undefined) delete process.env.MIMOCODE_MCP_TOOL_SEARCH
+      else process.env.MIMOCODE_MCP_TOOL_SEARCH = previous
+    }),
+)
+
 function dynamicSystemPrompt<A, E, R>(value: string | undefined, fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
     Effect.sync(() => {
@@ -2723,6 +2737,7 @@ for (const mode of ["throw", "reject", "short"] as const) {
     exceptionIt.live(`MCP exception ${mode} ${nested ? "exec" : "direct"} is bounded [TP-RUN-R12-36]`, () =>
       provideTmpdirServer(
         Effect.fnUntraced(function* ({ llm }) {
+          yield* directMcpTools
           const prompt = yield* SessionPrompt.Service
           const sessions = yield* Session.Service
           const session = yield* sessions.create({
@@ -3147,10 +3162,11 @@ mcpIt.live(
 )
 
 mcpIt.live(
-  "exposes MCP tools directly for non-GPT models by default",
+  "exposes MCP tools directly for non-GPT models when MCP tool search is disabled",
   () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
+        yield* directMcpTools
         const prompt = yield* SessionPrompt.Service
         const sessions = yield* Session.Service
         const session = yield* sessions.create({ title: "Direct non-GPT MCP tools" })
@@ -3188,9 +3204,92 @@ mcpIt.live(
   30_000,
 )
 
+mcpIt.live(
+  "defers MCP tools behind search for non-GPT models by default and keeps searched tools loaded across turns",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          title: "Deferred non-GPT MCP tools",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          noReply: true,
+          parts: [{ type: "text", text: "inspect the window" }],
+        })
+        yield* llm.tool("mcp_tool_search", { query: "select:mcp_success" })
+        yield* llm.tool("mcp_success", {})
+        yield* llm.text("done")
+        yield* prompt.loop({ sessionID: session.id })
+
+        yield* llm.text("still loaded")
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          parts: [{ type: "text", text: "inspect it again" }],
+        })
+
+        const requests = yield* llm.inputs
+        const names = (index: number) => (requests[index].tools as Array<Record<string, unknown>>).map(wireToolName)
+        expect(names(0)).toContain("mcp_tool_search")
+        expect(names(0)).not.toContain("mcp_success")
+        expect(names(0)).not.toContain("mcp_result")
+        expect(JSON.stringify(requests[0].tools)).not.toContain("mcp_success")
+        expect(JSON.stringify(requests[0].tools)).not.toContain("private_window_id")
+        const searchDefinition = (index: number) =>
+          JSON.stringify(
+            (requests[index].tools as Array<Record<string, unknown>>).find(
+              (tool) => wireToolName(tool) === "mcp_tool_search",
+            ),
+          )
+        expect(searchDefinition(3)).toBe(searchDefinition(0))
+        const firstUser = (requests[0].messages as Array<{ role: string; content: unknown }>).findLast(
+          (message) => message.role === "user",
+        )
+        const firstUserText = JSON.stringify(firstUser?.content)
+        expect(firstUserText).toContain("inspect the window")
+        expect(firstUserText).toContain("<system-reminder>")
+        expect(firstUserText).toContain("- mcp_result: Return a standard MCP tool execution error")
+        expect(firstUserText).toContain("- mcp_success: Return a standard structured MCP success result")
+        expect(firstUserText.indexOf("inspect the window")).toBeLessThan(firstUserText.indexOf("<system-reminder>"))
+        const secondUser = (requests[3].messages as Array<{ role: string; content: unknown }>).findLast(
+          (message) => message.role === "user",
+        )
+        expect(JSON.stringify(secondUser?.content)).toContain("inspect it again")
+        expect(JSON.stringify(secondUser?.content)).not.toContain("deferred MCP tools")
+        expect(names(1)).toContain("mcp_success")
+        expect(names(1)).not.toContain("mcp_result")
+        expect(names(3)).toContain("mcp_success")
+
+        const parts = (yield* MessageV2.filterCompactedEffect(session.id)).flatMap((message) => message.parts)
+        const search = parts.find(
+          (part): part is CompletedToolPart =>
+            part.type === "tool" && part.tool === "mcp_tool_search" && part.state.status === "completed",
+        )
+        expect(search?.state.output).toContain("<functions>")
+        expect(search?.state.output).toContain("private_window_id")
+        expect(
+          parts.some(
+            (part) => part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+          ),
+        ).toBe(true)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  30_000,
+)
+
 mcpIt.live("rejects direct MCP calls disabled for the request", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
+      yield* directMcpTools
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const session = yield* sessions.create({ title: "Request-disabled direct MCP tool" })
@@ -3226,6 +3325,7 @@ mcpIt.live("rejects direct MCP calls disabled for the request", () =>
 mcpIt.live("rejects direct MCP calls hidden by the agent allowlist", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
+      yield* directMcpTools
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const session = yield* sessions.create({ title: "Agent-hidden direct MCP tool" })
@@ -3313,6 +3413,7 @@ it.live(
 lifecycleMcpIt.live("MCP calls in one outer run share one turn and emit one terminal notification", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
+      yield* directMcpTools
       lifecycleContexts.length = 0
       lifecycleNotifications.length = 0
       lifecycleNotificationHangs = false
@@ -3354,6 +3455,7 @@ lifecycleMcpIt.live("MCP calls in one outer run share one turn and emit one term
 lifecycleMcpIt.live("MCP lifecycle waits for an in-flight tool call before notifying", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
+      yield* directMcpTools
       lifecycleContexts.length = 0
       lifecycleNotifications.length = 0
       lifecycleNotificationHangs = false
