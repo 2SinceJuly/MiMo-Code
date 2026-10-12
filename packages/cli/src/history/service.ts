@@ -173,19 +173,19 @@ export const layer = Layer.effect(
         for (const seg of segments) {
           const words = seg.match(/[\p{L}\p{N}]+/gu)?.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
           if (!words.length) continue
-          if (segments.length >= 2) {
-            // punct segment → one adjacent phrase
+          // Preserve phrase structure: space-separated words are each a phrase
+          // (Han isolated inside); punct segments are one phrase.
+          const segWords = seg.match(/[\p{L}\p{N}]+/gu) ?? []
+          if (segments.length >= 2 || segWords.length === 1) {
             const at = findSeq(words)
             if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
-          } else if (/\s/.test(seg)) {
-            // space multi-word → token AND (order-free)
-            for (const w of words) {
-              const at = findSeq([w])
+          } else {
+            // multi-word AND: each original word is its own adjacent phrase
+            for (const w of segWords) {
+              const ws = w.match(/[\p{L}\p{N}]+/gu)?.flatMap((x) => x.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)) ?? []
+              const at = findSeq(ws)
               if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
             }
-          } else {
-            const at = findSeq(words)
-            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
           }
         }
         const winStart = Math.max(0, hitAt - 200)

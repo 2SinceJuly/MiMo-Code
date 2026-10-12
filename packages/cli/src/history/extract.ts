@@ -79,7 +79,6 @@ function finalizeToolBody(tool: string, outputText: string, composed: string): s
 
 /**
  * Compose FTS body for a part. Preview budget applies to the **original** text;
- * CJK ZWSP segmentation is applied afterwards and is reversible for display.
  */
 export function extract(
   part: MessageV2.Part,
