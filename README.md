@@ -136,7 +136,7 @@ Beyond MiMoCode, Xiaomi MiMo models also work in other agents and coding tools l
 | **build** | Default. Full tool permissions for development |
 | **plan** | Read-only analysis mode for code exploration and solution design |
 
-Press `Tab` to switch between primary agents. Subagents are created by the system as needed. Build and Plan can switch at any time; other custom or special modes lock once the first message is sent.
+Press `Tab` to switch between primary agents. Build and Plan can switch at any time; other custom or special modes lock once the first message is sent.
 
 ### Persistent Memory
 
@@ -207,7 +207,7 @@ The `/goal` command sets a stopping condition for a session. When the agent trie
 
 ### Compose Mode
 
-Use the **`/compose-next`** skill to run an end-to-end feature delivery loop: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. It is invoked only when the user explicitly asks for this workflow — by slash command, name, or a clear natural-language request. Do not combine it with plan mode.
+Use the **`/compose-next`** skill to run an end-to-end feature delivery loop: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. Do not combine it with plan mode.
 
 ### Workflows
 
@@ -220,8 +220,6 @@ MiMoCode ships with three built-in workflows:
 | `deep-research` | Brief → Plan → Research → Reflect → Write → Review | Multi-source deep research report generator. Plans independent research angles, runs parallel sub-agents to collect cited findings, reflects on gaps, writes a single coherent Markdown report, then cold-reviews citations. Convergent: resumable via file checkpoints. |
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | Adversarial fact verification. Runs parallel web searches, extracts checkable facts, groups duplicates, then cross-checks each with a 3-juror adversarial vote. Best for precise claims ("Is X true?"). |
 | `research-experiment` | Baseline → Loop → Audit → Report | Autonomous optimization loop for a mechanically verifiable metric. Establishes a baseline, iterates through hypothesize → implement → evaluate → keep/revert, audits for metric gaming, and produces a reproducible result log. Requires a fixed-budget evaluation command and an explicit editable-file scope. |
-
-Workflows complement the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use `/compose-next` when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
 
 **Custom workflows:** Place a `.js` file in `.mimocode/workflows/` or `.claude/workflows/` to define your own, or override a built-in by using the same name.
 
@@ -236,7 +234,7 @@ MiMoCode bundles the following builtin skills:
 | `arxiv` | Search, read, cite, and analyze arXiv papers |
 | `claude-code` | Delegate coding, testing, review, and Git tasks to the Claude Code CLI |
 | `codex` | Run and troubleshoot the Codex CLI in headless automation, CI, containers, and remote environments |
-| `compose-next` | Spec→ship feature delivery orchestration — clarify, spec, implement, verify, review, finish; invoke only when explicitly requested by the user |
+| `compose-next` | Spec→ship feature delivery orchestration — clarify, spec, implement, verify, review, finish |
 | `data-analytics` | Analyze product and business data through reusable workflows for data quality, KPIs, dashboards, reports, notebooks, and market sizing |
 | `deep-research` | Produce cited, multi-source research reports with parallel subagents and built-in web tools |
 | `docx-official` | Produce, read, and transform Word (.docx) files |
@@ -542,7 +540,7 @@ bun run typecheck          # Type check
 
 ## Relationship to OpenCode
 
-MiMoCode is built as a fork of [OpenCode](https://github.com/anomalyco/opencode). It keeps all core OpenCode capabilities (multiple providers, TUI, LSP, MCP, plugins) and adds persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, dynamic workflows, and self-improvement via dream/distill.
+MiMoCode is built as a fork of [OpenCode](https://github.com/anomalyco/opencode). It keeps all core OpenCode capabilities (multiple providers, TUI, LSP, MCP, plugins) and adds persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, compose-next end-to-end delivery, Dynamic Workflows, and self-improvement via dream/distill.
 
 ---
 

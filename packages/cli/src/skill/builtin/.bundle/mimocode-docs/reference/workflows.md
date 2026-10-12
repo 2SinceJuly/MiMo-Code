@@ -1,6 +1,6 @@
 # MiMoCode Dynamic Workflows Reference
 
-Dynamic workflows let you orchestrate many subagents **deterministically** from a small JavaScript script — fan-out, pipelines, nested workflows — instead of driving each subagent by hand. The script runs in a sandbox; you call `agent()` to spawn work and combine results with plain JS.
+Dynamic Workflow scripts let you orchestrate many subagents **deterministically** from a small JavaScript script — fan-out, pipelines, nested workflows — instead of driving each subagent by hand. The script runs in a sandbox; you call `agent()` to spawn work and combine results with plain JS.
 
 ## Where to write workflow files
 
@@ -100,13 +100,6 @@ Runnable by `name` without writing a file:
 - **`deep-research`** — comprehensive research report generator (brief → plan → parallel sub-agent research → reflect gap-check → single-writer cited Markdown report → cold review). Pass `args: { dir, question, today, depth?, context? }`. Convergent: file checkpoints enable resume after interruption.
 - **`fact-check`** — adversarial fact verification (plan → parallel web search → source extraction → group duplicates → 3-juror crosscheck → structured JSON findings). Pass the question as `args`. Best for verifying specific claims.
 - **`research-experiment`** — autonomous loop for improving a mechanically verifiable metric. Pass `args: { dir, goal, metric, evalCmd, editable, guardCmd?, lowerIsBetter?, maxIters?, targetValue? }` and use the same `dir` as the workflow workspace. It records a baseline, runs guarded hypothesis/implementation/evaluation iterations, audits metric gaming, and writes a traceable report. Do not use it when success cannot be reduced to one numeric metric.
-
-### Workflow vs `/compose-next`
-
-Both drive multi-agent work, but choose by task shape:
-
-- **Workflow** (deterministic code) — best when requirements are **well-defined** and the task **decomposes into independent subtasks**. It fans out to parallel worktrees and runs **non-interactively to completion** — fire-and-forget.
-- **`/compose-next`** — best for **exploratory or ambiguous** work where you want to redirect mid-flow, answer questions, or inject judgment between steps. Invoke only on explicit user request. Do not combine it with plan mode.
 
 ## Semantics worth knowing
 

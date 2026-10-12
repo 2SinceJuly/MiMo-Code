@@ -133,7 +133,7 @@ Inspect/manage with `mimo mcp`. Request timeout defaults to 5000ms (`timeout` pe
 
 Use the `compose-next` skill for end-to-end feature delivery:
 
-- **`compose-next`** — one self-contained skill covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. The model may invoke it after the user explicitly requests this workflow by slash command, name, or any other clear natural language; it must not infer that request from task complexity. Do not combine it with plan mode.
+- **`compose-next`** — one self-contained skill covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. Do not combine it with plan mode.
 
 Artifacts land under `docs/compose/spec/` by default.
 

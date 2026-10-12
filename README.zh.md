@@ -133,7 +133,7 @@ mimo attach http://127.0.0.1:4096
 | **build** | 默认。完整工具权限，用于开发 |
 | **plan** | 只读分析模式，适合代码探索和方案设计 |
 
-按 `Tab` 在主智能体间切换。子智能体由系统按需生成。Build 和 Plan 之间可以随时切换，其他自定义模式或特殊模式在发送消息后将会锁定。
+按 `Tab` 在主智能体间切换。Build 和 Plan 之间可以随时切换，其他自定义模式或特殊模式在发送消息后将会锁定。
 
 ### 持久化记忆
 
@@ -198,7 +198,7 @@ mimo attach http://127.0.0.1:4096
 
 ### Compose 编排模式
 
-使用 **`/compose-next`** 技能即可跑通端到端功能交付：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`。仅在用户明确要求该工作流时调用——斜杠命令、名称或清晰的自然语言请求均可。不要和 plan 模式一起使用。
+使用 **`/compose-next`** 技能即可跑通端到端功能交付：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`，不要和 plan 模式一起使用。
 
 ### Workflows
 
@@ -211,8 +211,6 @@ MiMoCode 内置三个 Workflow：
 | `deep-research` | Brief → Plan → Research → Reflect → Write → Review | 多源深度调研报告生成器。规划独立研究角度，并行派发子代理搜集带引用的 findings，反思补缺，单点写完整 Markdown 报告，最后冷审引用。支持断点续跑。 |
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | 对抗式事实验证。并行搜索网络、提取可验证事实、分组去重、用 3 人陪审投票交叉验证，只保留通过的结论。适合精确求证（"X 是否属实？"）。 |
 | `research-experiment` | Baseline → Loop → Audit → Report | 面向可机械验证指标的自主优化循环。建立基线后反复执行“提出假设 → 实现 → 评估 → 保留/回滚”，审计指标作弊风险，并生成可复现的结果日志。需要固定预算的评估命令和明确的可编辑文件范围。 |
-
-Workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**`/compose-next`** 适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
 
 **自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow。
 
@@ -227,7 +225,7 @@ MiMoCode 打包了以下内置技能：
 | `arxiv` | 搜索、阅读、引用和分析 arXiv 论文 |
 | `claude-code` | 将编码、测试、审查和 Git 任务委派给 Claude Code CLI |
 | `codex` | 在无头自动化、CI、容器和远程环境中运行及排查 Codex CLI |
-| `compose-next` | spec→ship 功能交付编排——澄清需求、规格、实现、验证、评审、收尾；仅在用户明确授意时调用 |
+| `compose-next` | spec→ship 功能交付编排——澄清需求、规格、实现、验证、评审、收尾 |
 | `data-analytics` | 通过数据质量、KPI、仪表盘、报告、Notebook 和市场规模测算等工作流分析产品与业务数据 |
 | `deep-research` | 使用并行子智能体和内置 Web 工具生成带引用的多源深度调研报告 |
 | `docx-official` | 生成、读取和转换 Word (.docx) 文件 |
@@ -523,7 +521,7 @@ bun run typecheck          # 类型检查
 
 ## 与 OpenCode 的关系
 
-MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、动态 Workflow，以及通过 dream/distill 实现的自我进化。
+MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、compose-next 端到端交付、Dynamic Workflow，以及通过 dream/distill 实现的自我进化。
 
 ---
 

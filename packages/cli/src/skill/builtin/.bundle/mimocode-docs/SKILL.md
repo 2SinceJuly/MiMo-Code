@@ -9,7 +9,7 @@ You are MiMoCode. This skill lets you explain your own features, tell users how 
 
 ## Identity
 
-MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built as a fork of OpenCode. Beyond OpenCode's core (multi-provider, TUI, LSP, MCP, plugins) it adds: persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, dynamic workflows, and self-improvement via dream/distill.
+MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built as a fork of OpenCode. Beyond OpenCode's core (multi-provider, TUI, LSP, MCP, plugins) it adds: persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, compose-next end-to-end delivery, Dynamic Workflows, and self-improvement via dream/distill.
 
 ## Feature Map
 
@@ -21,13 +21,13 @@ MiMoCode (CLI binary `mimo`) is an agentic coding tool with a terminal UI, built
 | **Context management** | Auto-checkpoints, context reconstruction near limit, budgeted injection | automatic; tune via `checkpoint`/`compaction` config |
 | **Task tree** | `T1`, `T1.1`… tree, integrated with checkpoints | `task` tooling |
 | **Goal / stop condition** | Judge model verifies a stop condition before the agent halts | `/goal` |
-| **Compose mode** | Structured spec→ship lifecycle; entry is the `compose-next` skill — clarify, spec, implement, verify, review, finish. The model may see and load it, but only after the user explicitly requests this workflow by slash command, name, or any other clear natural language. Do not combine it with plan mode | `/compose-next` or an explicit natural-language request (see @reference/guide.md) |
+| **Compose mode** | Structured spec→ship lifecycle; entry is the `compose-next` skill — clarify, spec, implement, verify, review, finish. Do not combine it with plan mode | `/compose-next` (see @reference/guide.md) |
 | **Visual modes** | `vivid` (default: star field, meteors, logo effects, animated activity) and `minimal` (quiet visuals, stable activity indicators); independent from the animation override | `/vivid` or the visual-mode option in `ctrl+p` |
 | **Voice input** | Streaming ASR (TenVAD + MiMo ASR); needs `sox` | `/voice` |
 | **Dream** | Consolidates recent traces into project memory | `/dream` |
 | **Distill** | Packages repeated manual workflows into skills/subagents/commands | `/distill` |
 | **Scheduled prompts** | Cron/loop: inject a prompt on a schedule or repeating loop (UTC, 5-field) | `cron` tool · `/loop` · `/loops` |
-| **Dynamic workflows** | JS scripts that orchestrate many subagents deterministically (fan-out, pipelines, nesting); built-ins include `deep-research`, `fact-check`, and `research-experiment` | `.mimocode/workflows/*.js` + `workflow` tool |
+| **Dynamic Workflow** | JS scripts that orchestrate many subagents deterministically (fan-out, pipelines, nesting); built-ins include `deep-research`, `fact-check`, and `research-experiment` | `.mimocode/workflows/*.js` + `workflow` tool |
 | **Custom skills** | Add reusable task instructions under `.mimocode/skills/` | see the `skill-creator` skill |
 | **Skill discovery** | `/skill-name` slash invocation (2+ in one message auto-load with an orchestration plan); `skill_search` tool matches by exact name/alias + BM25 and auto-loads high-confidence hits; some builtins (`claude-code`, `codex`) only appear when their CLI is installed | `/` autocomplete · automatic |
 | **MCP** | Local & remote Model Context Protocol servers | `mcp` config + `mimo mcp` |
@@ -61,11 +61,11 @@ Read only the reference needed for the request, but read it before changing file
 - Permission rules: @reference/permissions.md
 - MCP client-side sampling (servers borrowing your model, audio transcription): @reference/mcp-sampling.md
 - Lending this instance's chat models to a skill, task, or subprocess — the OpenAI-compatible `/v1` endpoints and the `mimo llm-server` tokens that reach them: @reference/capability-api.md
-- Dynamic workflows: @reference/workflows.md
+- Dynamic Workflow: @reference/workflows.md
 
 ## How-To Guide
 
-For task-oriented walkthroughs — signing in & choosing a model, troubleshooting TUI rendering or lag, using MiMoCode over SSH, making memory remember project rules, writing custom slash commands, remapping keybinds, adding MCP servers, scheduling prompts (cron/loop), and using compose-next orchestration — see @reference/guide.md. For authoring and running **dynamic workflows** (the in-script API, where to save `.js` workflow files, and the `workflow` tool) see @reference/workflows.md.
+For task-oriented walkthroughs — signing in & choosing a model, troubleshooting TUI rendering or lag, using MiMoCode over SSH, making memory remember project rules, writing custom slash commands, remapping keybinds, adding MCP servers, scheduling prompts (cron/loop), and using compose-next end-to-end delivery — see @reference/guide.md. For authoring and running **Dynamic Workflow** scripts (the in-script API, where to save `.js` workflow files, and the `workflow` tool) see @reference/workflows.md.
 
 **Built-in workflows** (runnable by name via the `workflow` tool, no file needed):
 - **`deep-research`** — comprehensive research report generator (brief → plan → parallel research → reflect → write → cold review). Pass `args: { dir, question, today, depth?, context? }`. Convergent/resumable.
