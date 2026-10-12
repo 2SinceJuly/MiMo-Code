@@ -187,8 +187,11 @@ export const layer = Layer.effect(
         for (const seg of segments) {
           const segWords = seg.match(/[\p{L}\p{N}]+/gu) ?? []
           if (!segWords.length) continue
-          if (segments.length >= 2 || segWords.length === 1) {
-            const at = findSeq(segWords.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean)))
+          // Mirror buildFtsQuery: punct segment or contiguous run = one phrase;
+          // whitespace-separated multi-word = token AND.
+          const flat = segWords.flatMap((w) => w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})/u).filter(Boolean))
+          if (segments.length >= 2 || !/\s/.test(seg) || segWords.length === 1) {
+            const at = findSeq(flat)
             if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
           } else {
             for (const w of segWords) {
