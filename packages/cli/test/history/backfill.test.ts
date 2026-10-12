@@ -151,6 +151,7 @@ describe("History.backfill", () => {
     ),
   )
 
+  // [TP-SE-R5-01] 重复扫描幂等：已索引 part 不重复写。
   it.live("is idempotent (NOT EXISTS skips already-indexed parts)", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

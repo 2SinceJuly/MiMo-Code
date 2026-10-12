@@ -106,6 +106,7 @@ describe("history upsert truncation 兜底", () => {
     expect(Database.use((db) => db.select().from(HistoryFtsTable).all().length)).toBe(0)
   })
 
+  // [TP-SE-R5-01] 同 part 重复 upsert 替换不叠加（写路径幂等）。
   it("shrinking body replaces prior rows", () => {
     seedProject()
     Database.use((db) => {
