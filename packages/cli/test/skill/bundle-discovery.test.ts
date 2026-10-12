@@ -4,7 +4,6 @@ import { Effect, Layer } from "effect"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Skill } from "../../src/skill"
 import { builtinSkillRoot } from "../../src/skill/builtin/extract"
-import { loadComposeBundle } from "../../src/skill/compose/bundle.macro"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { withEnv } from "../lib/env"
@@ -15,13 +14,12 @@ withEnv({
   MIMOCODE_ENABLE_CODEX_SKILLS: undefined,
   MIMOCODE_ENABLE_OPENCODE_SKILLS: undefined,
   MIMOCODE_DISABLE_BUILTIN_SKILLS: undefined,
-  MIMOCODE_DISABLE_COMPOSE_SKILLS: undefined,
 })
 
 const it = testEffect(Layer.mergeAll(Skill.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 describe("bundled skill discovery", () => {
-  it.live("registers top-level builtins without exposing their workflows or affecting compose skills", () =>
+  it.live("registers top-level builtins without exposing their workflows", () =>
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
@@ -59,12 +57,8 @@ describe("bundled skill discovery", () => {
             ),
           ).toBe(true)
 
-          expect(
-            list
-              .filter((item) => item.name.startsWith("compose:"))
-              .map((item) => item.name)
-              .toSorted(),
-          ).toEqual(Object.keys(loadComposeBundle()).map((name) => `compose:${name}`).toSorted())
+          // compose:* skills and their bundle are retired.
+          expect(list.filter((item) => item.name.startsWith("compose:"))).toEqual([])
         }),
       { git: true },
     ),

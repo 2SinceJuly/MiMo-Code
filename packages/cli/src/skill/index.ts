@@ -16,7 +16,6 @@ import { ConfigMarkdown } from "../config"
 import { Glob } from "@mimo-ai/shared/util/glob"
 import { Log } from "../util"
 import { Discovery } from "./discovery"
-import { extractComposeBundle } from "./compose/extract"
 import { extractBuiltinBundle, OFFICIAL_SKILL_NAMES } from "./builtin/extract"
 
 const log = Log.create({ service: "skill" })
@@ -213,17 +212,6 @@ const discoverStableSkills = Effect.fnUntraced(function* (
           }
         }
       }
-    }
-  }
-
-  // Extract compose skills to disk (user skills with same name override)
-  if (!Flag.MIMOCODE_DISABLE_COMPOSE_SKILLS) {
-    const composeSkillRoot = yield* extractComposeBundle(fsys).pipe(
-      Effect.catch(() => Effect.succeed(undefined)),
-    )
-    if (composeSkillRoot && (yield* fsys.isDir(composeSkillRoot))) {
-      bundledRoots.push(composeSkillRoot)
-      yield* scan(state, composeSkillRoot, SKILL_PATTERN, { scope: "compose" })
     }
   }
 

@@ -122,7 +122,7 @@ These commands submit a predefined prompt to the agent and may accept trailing a
 
 The slash menu also includes commands discovered at runtime:
 
-- `/<skill-name>` invokes an available skill; `/loop [interval] <prompt>` schedules a repeating prompt, and `/compose-next` starts the recommended spec-to-ship workflow.
+- `/<skill-name>` invokes an available skill; `/loop [interval] <prompt>` schedules a repeating prompt, and `/compose-next` starts the spec→ship orchestration workflow.
 - Project and global Markdown commands from `command/**/*.md` and `commands/**/*.md` use their relative filename as the slash name.
 - MCP prompts become slash commands and are marked `:mcp` in autocomplete.
 - A custom command or MCP prompt with the same name overrides a built-in prompt command. Skills do not override an existing command.
@@ -130,7 +130,7 @@ The slash menu also includes commands discovered at runtime:
 
 ## Keybindings
 
-- `Tab` — cycle primary agents (build → plan → compose). After the first message the mode locks: Build and Plan can still switch between each other, but Compose is isolated — it can't be entered mid-session, and a session started in Compose stays there. (Many models ignore tools injected mid-conversation; a fixed skill/tool set from session start improves tool-call reliability.)
+- `Tab` — cycle primary agents (build → plan). After the first message the mode locks: Build and Plan can still switch between each other. (Many models ignore tools injected mid-conversation; a fixed skill/tool set from session start improves tool-call reliability.)
 - Entering plan mode is a user gesture: `Tab` (or the agent dialog) — there is no `plan_enter` tool, so the agent cannot put you in plan mode and will not offer to unless you raise it. Leaving works either way: `Tab` back, or the agent calls `plan_exit` to ask you to approve the finished plan and return to build.
 - Other keybinds are configurable; the keybinds config module governs them.
 

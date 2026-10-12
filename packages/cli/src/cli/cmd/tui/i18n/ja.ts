@@ -61,7 +61,7 @@ export const dict = {
   "tui.tips.background": "{highlight}/background{/highlight} を実行してホーム背景にお好みの画像を設定できます",
   "tui.tips.vivid": "{highlight}/vivid{/highlight} で必要に応じてリッチ表示とミニマル表示を切り替えます",
   "tui.tips.compose_next":
-    "{highlight}/compose-next{/highlight} を推奨（強力なモデル向け・Compose 代替）",
+    "{highlight}/compose-next{/highlight} — 要件整理、仕様、実装、レビュー",
   "tui.tips.undo": "{highlight}/undo{/highlight} で直前のメッセージとファイル変更を取り消します",
   "tui.tips.redo": "{highlight}/redo{/highlight} で取り消したメッセージとファイル変更を復元します",
   "tui.tips.drag_drop": "画像や PDF をターミナルにドラッグ＆ドロップしてコンテキストに追加できます",
@@ -230,22 +230,8 @@ export const dict = {
   "tui.skill.data-analytics.description": "製品・事業データの分析、KPI 設計、ダッシュボードとレポートの作成",
   "tui.skill.product-design.description": "製品・UX デザインの調査、監査、プロトタイプ作成、検証",
   "tui.skill.sales.description": "商談準備、アカウント調査、案件計画、営業システムの活用",
-  "tui.skill.compose:ask.description": "ユーザーに判断や確認を求める",
-  "tui.skill.compose:brainstorm.description": "実装前に要件と設計を探索する",
-  "tui.skill.compose:debug.description": "修正提案前に体系的にデバッグ",
-  "tui.skill.compose:execute.description": "レビューチェックポイント付きで実装計画を実行",
-  "tui.skill.compose:feedback.description": "コードレビューのフィードバックを厳密に処理",
-  "tui.skill.compose:merge.description": "完了した作業を統合 — マージ、PR、またはクリーンアップ",
-  "tui.skill.compose:parallel.description": "独立したタスクを並行実行",
-  "tui.skill.compose:plan.description": "仕様からステップバイステップの実装計画を作成",
-  "tui.skill.compose:report.description": "実装成果を最終状態レポートに統合",
-  "tui.skill.compose:review.description": "マージ前に成果物が要件を満たすか検証",
-  "tui.skill.compose:subagent.description": "独立タスクをサブエージェントに委譲",
-  "tui.skill.compose:tdd.description": "テスト駆動開発 — コードの前にテストを書く",
-  "tui.skill.compose:verify.description": "検証コマンドを実行し合格を確認",
-  "tui.skill.compose:worktree.description": "機能開発用の隔離ワークスペースを作成",
   "tui.skill.compose-next.description":
-    "新世代編成モード：強力なモデル向けにエンドツーエンドで機能開発を進める（grill・spec・実装・検証・レビュー・完了）",
+    "要件整理、仕様、実装、レビュー",
 
   // Language switching
   "tui.command.language.switch.title": "言語を切り替え",

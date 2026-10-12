@@ -5,7 +5,6 @@ describe("BuiltinWorkflow registry", () => {
   test("registers every script in the built-in directory", () => {
     // The directory is the registry, so losing a script is otherwise silent.
     expect(BuiltinWorkflow.list().map((w) => w.name)).toEqual([
-      "compose",
       "deep-research",
       "fact-check",
       "research-experiment",
@@ -28,19 +27,6 @@ describe("BuiltinWorkflow registry", () => {
 
   test("get returns undefined for an unknown name", () => {
     expect(BuiltinWorkflow.get("nope")).toBeUndefined()
-  })
-
-  test("lists compose with parsed meta", () => {
-    const list = BuiltinWorkflow.list()
-    const c = list.find((w) => w.name === "compose")
-    expect(c).toBeDefined()
-    expect(c!.description).toContain("compose")
-    expect(c!.phases?.length).toBeGreaterThanOrEqual(6)
-  })
-
-  test("get('compose') returns the script body starting with export const meta", () => {
-    const c = BuiltinWorkflow.get("compose")
-    expect(c).toBeDefined()
-    expect(c!.script.startsWith("export const meta")).toBe(true)
+    expect(BuiltinWorkflow.get("compose")).toBeUndefined()
   })
 })

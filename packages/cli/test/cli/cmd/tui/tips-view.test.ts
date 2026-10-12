@@ -39,24 +39,38 @@ describe("buildTipKeys", () => {
     expect(buildTipKeys("linux")).toContain("tui.tips.login")
     Array.of(en, es, fr, ja, ru, zh, zht).forEach((dict) => expect(dict["tui.tips.login"]).toBeTruthy())
   })
+
+  test("includes compose-next as a normal rotating tip with positive capability copy", () => {
+    const key = "tui.tips.compose_next"
+    expect(buildTipKeys("linux")).toContain(key)
+    Array.of(en, es, fr, ja, ru, zh, zht).forEach((dict) => {
+      expect(dict[key]).toBeTruthy()
+      expect(dict[key]).toContain("/compose-next")
+      // Never frame compose-next as a replacement for a Compose agent.
+      expect(dict[key]).not.toMatch(/instead of|代替|替代|instead of the Compose/i)
+    })
+  })
 })
 
 describe("pickDisplayKey", () => {
   test("forces the login tip when no provider is authenticated", () => {
     expect(
-      pickDisplayKey({ agentName: "build", authenticatedCount: 0, rotationKey: "tui.tips.theme" }),
+      pickDisplayKey({ authenticatedCount: 0, rotationKey: "tui.tips.theme" }),
     ).toBe("tui.tips.login")
   })
 
   test("keeps the rotation tip once any provider is authenticated", () => {
     expect(
-      pickDisplayKey({ agentName: "build", authenticatedCount: 1, rotationKey: "tui.tips.theme" }),
+      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.theme" }),
     ).toBe("tui.tips.theme")
   })
 
-  test("compose deprecation outranks the login tip", () => {
+  test("does not lock compose-next over the rotation", () => {
     expect(
-      pickDisplayKey({ agentName: "compose", authenticatedCount: 0, rotationKey: "tui.tips.theme" }),
+      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.compose_next" }),
     ).toBe("tui.tips.compose_next")
+    expect(
+      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.theme" }),
+    ).toBe("tui.tips.theme")
   })
 })

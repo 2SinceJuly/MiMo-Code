@@ -97,18 +97,16 @@ Use the `workflow` tool (or ask the agent to run one):
 
 Runnable by `name` without writing a file:
 
-- **`compose`** — full spec→ship pipeline (brainstorm → design → implement (TDD) → verify → review → merge). Pass `args.task`. Auto-parallelizes independent subtasks into per-task worktrees and chains each phase's structured output to the next. Re-running on existing docs reuses them and scopes the fan-out to the actual diff (incremental amend).
 - **`deep-research`** — comprehensive research report generator (brief → plan → parallel sub-agent research → reflect gap-check → single-writer cited Markdown report → cold review). Pass `args: { dir, question, today, depth?, context? }`. Convergent: file checkpoints enable resume after interruption.
 - **`fact-check`** — adversarial fact verification (plan → parallel web search → source extraction → group duplicates → 3-juror crosscheck → structured JSON findings). Pass the question as `args`. Best for verifying specific claims.
 - **`research-experiment`** — autonomous loop for improving a mechanically verifiable metric. Pass `args: { dir, goal, metric, evalCmd, editable, guardCmd?, lowerIsBetter?, maxIters?, targetValue? }` and use the same `dir` as the workflow workspace. It records a baseline, runs guarded hypothesis/implementation/evaluation iterations, audits metric gaming, and writes a traceable report. Do not use it when success cannot be reduced to one numeric metric.
 
-### `compose` workflow vs interactive compose
+### Workflow vs `/compose-next`
 
-Both drive the same spec→ship lifecycle, but choose by task shape:
+Both drive multi-agent work, but choose by task shape:
 
-- **`compose` workflow** (this, deterministic code) — best when requirements are **well-defined** and the task **decomposes into independent subtasks**. It fans out to parallel worktrees and runs **non-interactively to completion** — fire-and-forget.
-- **`/compose-next` skill on Build** — best for **exploratory or ambiguous** work where you want to redirect mid-flow, answer questions, or inject judgment between steps. Recommended for frontier (Fable/Sol-class) models.
-- **`compose` agent** (legacy, switch with `Tab`) — the legacy interactive path; prefer `/compose-next` on frontier models.
+- **Workflow** (deterministic code) — best when requirements are **well-defined** and the task **decomposes into independent subtasks**. It fans out to parallel worktrees and runs **non-interactively to completion** — fire-and-forget.
+- **`/compose-next` skill on Build** — best for **exploratory or ambiguous** work where you want to redirect mid-flow, answer questions, or inject judgment between steps. Recommended for frontier (Fable/Sol-class) models. Invoke only on explicit user request.
 
 ## Semantics worth knowing
 

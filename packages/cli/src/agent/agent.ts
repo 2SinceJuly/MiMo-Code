@@ -90,6 +90,25 @@ export function runtimePermission(agent: Info, permission?: Permission.Ruleset) 
   return Permission.merge(agent.permission, permission ?? [], agent.hardPermission ?? [])
 }
 
+/**
+ * Resolve an agent name that was stored on a historical message. Unrecognized
+ * names (including the retired `compose` agent) fall back to the default agent
+ * so legacy sessions remain readable. Live/explicit agent selection still goes
+ * through `Agent.get` and errors on a missing name.
+ */
+export function resolveStoredAgent(
+  agents: { get: (name: string) => Effect.Effect<Info>; defaultAgent: () => Effect.Effect<string> },
+  name: string,
+): Effect.Effect<Info> {
+  return Effect.gen(function* () {
+    // Agent.get is typed Effect<Info> but resolves to undefined for a missing
+    // name; annotate rather than cast so the compiler tracks the real shape.
+    const found: Info | undefined = yield* agents.get(name)
+    if (found) return found
+    return yield* agents.get(yield* agents.defaultAgent())
+  })
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -110,7 +129,6 @@ export const layer = Layer.effect(
           doom_loop: "ask",
           skill: {
             "*": "allow",
-            "compose:*": "deny",
           },
           plan_exit: "deny",
           external_directory: {
@@ -148,7 +166,7 @@ export const layer = Layer.effect(
           },
           // Max mode is experimental and opt-in: only registered when
           // `experimental.maxMode` is configured. This keeps the default agent
-          // set as {build, plan, compose} when the feature is off.
+          // set as {build, plan} when the feature is off.
           ...(cfg.experimental?.maxMode
             ? {
                 max: {
@@ -204,23 +222,6 @@ export const layer = Layer.effect(
                 [path.relative(Instance.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
               },
             }),
-            mode: "primary",
-            native: true,
-          },
-          compose: {
-            name: "compose",
-            color: "#a7a3d8",
-            description:
-              "Compose mode (deprecated). Orchestrates workflows with built-in compose skills. For Fable/Sol-class models, use Build and run /compose-next instead.",
-            options: {},
-            permission: Permission.merge(
-              defaults,
-              Permission.fromConfig({
-                question: "allow",
-                skill: { "compose:*": "allow" },
-              }),
-              user,
-            ),
             mode: "primary",
             native: true,
           },
@@ -489,7 +490,6 @@ export const layer = Layer.effect(
               [(x) => cfg.default_agent !== undefined && x.name === cfg.default_agent, "desc"],
               [(x) => x.name === "build", "desc"],
               [(x) => x.name === "plan", "desc"],
-              [(x) => x.name === "compose", "desc"],
               [(x) => x.name === "max", "desc"],
               [(x) => x.name, "asc"],
             ),

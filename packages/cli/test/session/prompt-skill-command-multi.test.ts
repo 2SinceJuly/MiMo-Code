@@ -13,7 +13,7 @@ import { testEffect } from "../lib/effect"
 import { withEnv } from "../lib/env"
 import { makeLayer, providerCfg, ref } from "../workflow/lib"
 
-withEnv({ MIMOCODE_DISABLE_BUILTIN_SKILLS: "true", MIMOCODE_DISABLE_COMPOSE_SKILLS: "true" })
+withEnv({ MIMOCODE_DISABLE_BUILTIN_SKILLS: "true" })
 
 void Log.init({ print: false })
 

@@ -113,7 +113,6 @@ EXIT=$?
 | `--format json` | Structured JSONL events to stdout |
 | `--dangerously-skip-permissions` | Auto-approve all permissions |
 | `--model provider/model` | Override model |
-| `--agent compose` | Use compose agent |
 | `--session SID` | Continue existing session |
 | `--continue` | Continue last session |
 | `--file path` | Attach file to message |

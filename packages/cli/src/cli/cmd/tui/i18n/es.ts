@@ -65,7 +65,7 @@ export const dict = {
   "tui.tips.vivid":
     "Ejecuta {highlight}/vivid{/highlight} para alternar entre las vistas enriquecida y mínima según sea necesario",
   "tui.tips.compose_next":
-    "Prueba {highlight}/compose-next{/highlight} en vez del agente Compose para modelos avanzados",
+    "{highlight}/compose-next{/highlight} — aclarar, especificar, implementar, revisar",
   "tui.tips.undo":
     "Usa {highlight}/undo{/highlight} para revertir el último mensaje y los cambios en archivos",
   "tui.tips.redo":
@@ -298,22 +298,8 @@ export const dict = {
   "tui.skill.product-design.description": "Investigar, auditar, prototipar y validar diseños de producto y UX",
   "tui.skill.sales.description":
     "Preparar reuniones, investigar cuentas, planificar ventas y usar sistemas comerciales",
-  "tui.skill.compose:ask.description": "Solicitar decisiones o aclaraciones al usuario",
-  "tui.skill.compose:brainstorm.description": "Explorar requisitos y diseño antes de implementar",
-  "tui.skill.compose:debug.description": "Depuración sistemática antes de proponer correcciones",
-  "tui.skill.compose:execute.description": "Ejecutar un plan de implementación con puntos de revisión",
-  "tui.skill.compose:feedback.description": "Manejar feedback de revisión de código con rigor técnico",
-  "tui.skill.compose:merge.description": "Integrar trabajo completado — merge, PR o limpieza",
-  "tui.skill.compose:parallel.description": "Ejecutar tareas independientes en paralelo",
-  "tui.skill.compose:plan.description": "Crear un plan de implementación paso a paso",
-  "tui.skill.compose:report.description": "Consolidar la implementación en un informe final",
-  "tui.skill.compose:review.description": "Verificar que el trabajo cumple los requisitos antes de merge",
-  "tui.skill.compose:subagent.description": "Delegar tareas independientes a sub-agentes",
-  "tui.skill.compose:tdd.description": "Desarrollo guiado por tests — tests antes que código",
-  "tui.skill.compose:verify.description": "Ejecutar verificación y confirmar resultado exitoso",
-  "tui.skill.compose:worktree.description": "Crear un espacio de trabajo aislado para desarrollo",
   "tui.skill.compose-next.description":
-    "Nueva orquestación: trabajo de función de extremo a extremo (grill, spec, implementar, verificar, revisar, finalizar) para modelos avanzados",
+    "Aclarar, especificar, implementar, revisar",
 
   // Language switching
   "tui.command.language.switch.title": "Cambiar idioma",

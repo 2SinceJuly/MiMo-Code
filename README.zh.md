@@ -132,11 +132,10 @@ mimo attach http://127.0.0.1:4096
 |--------|------|
 | **build** | 默认。完整工具权限，用于开发 |
 | **plan** | 只读分析模式，适合代码探索和方案设计 |
-| **compose** | 编排模式，适合 specs-driven 开发和 Skill 驱动流程 |
 
-按 `Tab` 在主智能体间切换。子智能体由系统按需生成。发送第一条消息后模式会锁定：Build 和 Plan 之间仍可互切，但 Compose 一旦进入即被隔离——skill/tool 集合从会话开始就保持固定，可显著提升工具调用成功率。
+按 `Tab` 在主智能体间切换。子智能体由系统按需生成。发送第一条消息后模式会锁定：Build 和 Plan 之间仍可互切。
 
-对于前沿模型（Fable/Sol 级），推荐用 **build** agent 配合 `/compose-next` 技能来完成 compose 类工作——见 [Compose 编排模式](#compose-编排模式)。
+specs-driven 功能交付请在 **build** agent 中使用 `/compose-next` 技能——见 [Compose 编排模式](#compose-编排模式)。
 
 ### 持久化记忆
 
@@ -203,30 +202,27 @@ mimo attach http://127.0.0.1:4096
 
 Compose 是 MiMoCode 的 specs-driven 结构化开发流程，编排从 spec 到交付的完整开发生命周期。
 
-推荐用法是在 **build** agent 中使用 **`/compose-next`** 技能：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`。它面向前沿模型（Fable/Sol 级）设计——这类模型已内化大部分流程，用一份紧凑契约效果最好。
-
-Legacy 路径是专用的 **compose agent**（按 `Tab` 切换），它编排规划、执行、代码审查、TDD、调试、验证、合并等十四个内置技能——这套分步技能课程对较弱模型依然适用。
+用法是在 **build** agent 中使用 **`/compose-next`** 技能：一份独立完整的契约，覆盖 grill → workspace → spec → implement → verify → review → finalize → finish，功能文档落在 workspace root 下的 `docs/compose/spec/<feature>.md`。它面向前沿模型（Fable/Sol 级）设计——这类模型已内化大部分流程，用一份紧凑契约效果最好。仅在用户明确要求该工作流时调用——斜杠命令、名称或清晰的自然语言请求均可。
 
 ### Workflows
 
 Workflow 是在沙箱运行时中执行的确定性 JavaScript 脚本，可编排多个 Agent 协作。与 Agent 对话不同，Workflow 编码了固定的阶段序列、有界重试和自动并行化——全程非交互，丢出去跑完即可。
 
-MiMoCode 内置四个 Workflow：
+MiMoCode 内置三个 Workflow：
 
 | Workflow | 阶段 | 说明 |
 |----------|------|------|
-| `compose` | Brainstorm → Design → Implement → Verify → Review → Report → Merge | 完整开发流水线。自动将独立任务并行分发到隔离的 git worktree，每个任务应用 TDD，阶段之间传递结构化输出。适合需求明确且可拆分为独立子任务的场景。 |
 | `deep-research` | Brief → Plan → Research → Reflect → Write → Review | 多源深度调研报告生成器。规划独立研究角度，并行派发子代理搜集带引用的 findings，反思补缺，单点写完整 Markdown 报告，最后冷审引用。支持断点续跑。 |
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | 对抗式事实验证。并行搜索网络、提取可验证事实、分组去重、用 3 人陪审投票交叉验证，只保留通过的结论。适合精确求证（"X 是否属实？"）。 |
 | `research-experiment` | Baseline → Loop → Audit → Report | 面向可机械验证指标的自主优化循环。建立基线后反复执行“提出假设 → 实现 → 评估 → 保留/回滚”，审计指标作弊风险，并生成可复现的结果日志。需要固定预算的评估命令和明确的可编辑文件范围。 |
 
-compose workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**build** agent 配合 `/compose-next`（或 legacy 的 compose agent）适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
+Workflow 与交互式路径互补：**workflow** 适合需求清晰、任务可独立拆解的场景（确定性、并行、非交互）；**build** agent 配合 `/compose-next` 适合需要中途改方向或在步骤间注入人工判断的场景（对话式、交互式）。
 
-**自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow（如 `.mimocode/workflows/compose.js`）。
+**自定义 Workflow：** 在 `.mimocode/workflows/` 或 `.claude/workflows/` 下放置 `.js` 文件即可定义自己的 Workflow，也可用同名文件覆盖内置 Workflow。
 
 ### 内置技能（Builtin Skills）
 
-技能（Skill）是可复用的指令集，教会 Agent 如何处理特定任务（如生成 PDF、写学术论文、搜索 arXiv）。面对新任务时，MiMoCode 会按准确名称、本地化别名和 BM25 相关性搜索可用的非 Compose Skill；高置信度结果会自动加载，不确定的候选则交由 Agent 判断。在 TUI 中输入 `/` 可以浏览自动补全列表，也可以通过 `/<skill-name>` 直接调用 Skill——一条消息里提到两个及以上技能时会自动加载它们并注入多技能编排计划。
+技能（Skill）是可复用的指令集，教会 Agent 如何处理特定任务（如生成 PDF、写学术论文、搜索 arXiv）。面对新任务时，MiMoCode 会按准确名称、本地化别名和 BM25 相关性搜索可用技能；高置信度结果会自动加载，不确定的候选则交由 Agent 判断。在 TUI 中输入 `/` 可以浏览自动补全列表，也可以通过 `/<skill-name>` 直接调用 Skill——一条消息里提到两个及以上技能时会自动加载它们并注入多技能编排计划。
 
 MiMoCode 打包了以下内置技能：
 
@@ -235,7 +231,7 @@ MiMoCode 打包了以下内置技能：
 | `arxiv` | 搜索、阅读、引用和分析 arXiv 论文 |
 | `claude-code` | 将编码、测试、审查和 Git 任务委派给 Claude Code CLI |
 | `codex` | 在无头自动化、CI、容器和远程环境中运行及排查 Codex CLI |
-| `compose-next` | 推荐的 spec→ship 功能交付工作流；仅在用户明确授意时调用 |
+| `compose-next` | spec→ship 功能交付编排——澄清需求、规格、实现、验证、评审、收尾；仅在用户明确授意时调用 |
 | `data-analytics` | 通过数据质量、KPI、仪表盘、报告、Notebook 和市场规模测算等工作流分析产品与业务数据 |
 | `deep-research` | 使用并行子智能体和内置 Web 工具生成带引用的多源深度调研报告 |
 | `docx-official` | 生成、读取和转换 Word (.docx) 文件 |
@@ -531,7 +527,7 @@ bun run typecheck          # 类型检查
 
 ## 与 OpenCode 的关系
 
-MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、Compose 工作流，以及通过 dream/distill 实现的自我进化。
+MiMoCode 基于 [OpenCode](https://github.com/anomalyco/opencode) fork 构建，保留其全部核心能力（多 Provider、TUI、LSP、MCP、插件），并在此基础上构建了持久化记忆、智能上下文管理、子智能体编排、目标驱动的自主循环、动态 Workflow，以及通过 dream/distill 实现的自我进化。
 
 ---
 

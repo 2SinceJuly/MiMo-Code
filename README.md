@@ -135,11 +135,10 @@ Beyond MiMoCode, Xiaomi MiMo models also work in other agents and coding tools l
 |--------|------|
 | **build** | Default. Full tool permissions for development |
 | **plan** | Read-only analysis mode for code exploration and solution design |
-| **compose** | Orchestration mode for specs-driven development and skill-driven workflows |
 
-Press `Tab` to switch between primary agents. Subagents are created by the system as needed. After the first message the mode locks: Build and Plan can still switch between each other, but Compose is isolated once entered — keeping the skill/tool set fixed from session start significantly improves tool-call reliability.
+Press `Tab` to switch between primary agents. Subagents are created by the system as needed. After the first message the mode locks: Build and Plan can still switch between each other.
 
-For frontier models (Fable/Sol-class), the recommended way to run compose-style work is the **build** agent with the `/compose-next` skill — see [Compose Mode](#compose-mode).
+For specs-driven feature delivery, use the **build** agent with the `/compose-next` skill — see [Compose Mode](#compose-mode).
 
 ### Persistent Memory
 
@@ -212,30 +211,27 @@ The `/goal` command sets a stopping condition for a session. When the agent trie
 
 Compose is MiMoCode's structured workflow for specs-driven development, orchestrating the full lifecycle from spec to shipped code.
 
-The recommended way to use it is the **`/compose-next`** skill on the **build** agent: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. It is designed for frontier models (Fable/Sol-class), which internalize most of the workflow and work best from one compact contract.
-
-The legacy path is the dedicated **compose agent** (switch with `Tab`), which orchestrates fourteen built-in skills for planning, execution, code review, TDD, debugging, verification, and merging — a step-by-step curriculum that remains useful for weaker models.
+Use the **`/compose-next`** skill on the **build** agent: a single self-contained contract covering grill → workspace → spec → implement → verify → review → finalize → finish, with feature documents at `docs/compose/spec/<feature>.md` under the workspace root. It is designed for frontier models (Fable/Sol-class), which internalize most of the workflow and work best from one compact contract. Invoke it only when the user explicitly asks for this workflow — by slash command, name, or a clear natural-language request.
 
 ### Workflows
 
 Workflows are deterministic JavaScript scripts that orchestrate multiple agents in a sandboxed runtime. Unlike agent conversations, workflows encode fixed phase sequences with bounded retries and automatic parallelization — fire-and-forget execution with no user interaction required.
 
-MiMoCode ships with four built-in workflows:
+MiMoCode ships with three built-in workflows:
 
 | Workflow | Phases | Description |
 |----------|--------|-------------|
-| `compose` | Brainstorm → Design → Implement → Verify → Review → Report → Merge | Full development pipeline. Auto-parallelizes independent tasks into isolated git worktrees, applies TDD per task, chains structured output between phases. Best for well-defined tasks that decompose into independent subtasks. |
 | `deep-research` | Brief → Plan → Research → Reflect → Write → Review | Multi-source deep research report generator. Plans independent research angles, runs parallel sub-agents to collect cited findings, reflects on gaps, writes a single coherent Markdown report, then cold-reviews citations. Convergent: resumable via file checkpoints. |
 | `fact-check` | Plan → Search → Extract → Group → Crosscheck → Report | Adversarial fact verification. Runs parallel web searches, extracts checkable facts, groups duplicates, then cross-checks each with a 3-juror adversarial vote. Best for precise claims ("Is X true?"). |
 | `research-experiment` | Baseline → Loop → Audit → Report | Autonomous optimization loop for a mechanically verifiable metric. Establishes a baseline, iterates through hypothesize → implement → evaluate → keep/revert, audits for metric gaming, and produces a reproducible result log. Requires a fixed-budget evaluation command and an explicit editable-file scope. |
 
-The compose workflow complements the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use the **build** agent with `/compose-next` (or the legacy compose agent) when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
+Workflows complement the interactive path: use the **workflow** when requirements are clear and tasks split cleanly (deterministic, parallel, non-interactive); use the **build** agent with `/compose-next` when you need to redirect mid-flow or inject judgment between steps (conversational, interactive).
 
-**Custom workflows:** Place a `.js` file in `.mimocode/workflows/` or `.claude/workflows/` to define your own, or override a built-in by using the same name (e.g. `.mimocode/workflows/compose.js`).
+**Custom workflows:** Place a `.js` file in `.mimocode/workflows/` or `.claude/workflows/` to define your own, or override a built-in by using the same name.
 
 ### Builtin Skills
 
-Skills are reusable instruction sets that teach agents how to handle specific tasks (e.g. generating PDFs, writing academic papers, searching arXiv). For a new task, MiMoCode searches available non-Compose skills by exact name, localized alias, and BM25 relevance. High-confidence matches are loaded automatically; uncertain matches are ranked for the agent to assess. In the TUI, type `/` to browse the autocomplete list or invoke a skill directly with `/<skill-name>` — mentioning two or more skills in a single message auto-loads them and injects a multi-skill orchestration plan.
+Skills are reusable instruction sets that teach agents how to handle specific tasks (e.g. generating PDFs, writing academic papers, searching arXiv). For a new task, MiMoCode searches available skills by exact name, localized alias, and BM25 relevance. High-confidence matches are loaded automatically; uncertain matches are ranked for the agent to assess. In the TUI, type `/` to browse the autocomplete list or invoke a skill directly with `/<skill-name>` — mentioning two or more skills in a single message auto-loads them and injects a multi-skill orchestration plan.
 
 MiMoCode bundles the following builtin skills:
 
@@ -244,7 +240,7 @@ MiMoCode bundles the following builtin skills:
 | `arxiv` | Search, read, cite, and analyze arXiv papers |
 | `claude-code` | Delegate coding, testing, review, and Git tasks to the Claude Code CLI |
 | `codex` | Run and troubleshoot the Codex CLI in headless automation, CI, containers, and remote environments |
-| `compose-next` | Recommended spec→ship feature delivery workflow; invoke only when explicitly requested by the user |
+| `compose-next` | Spec→ship feature delivery orchestration — clarify, spec, implement, verify, review, finish; invoke only when explicitly requested by the user |
 | `data-analytics` | Analyze product and business data through reusable workflows for data quality, KPIs, dashboards, reports, notebooks, and market sizing |
 | `deep-research` | Produce cited, multi-source research reports with parallel subagents and built-in web tools |
 | `docx-official` | Produce, read, and transform Word (.docx) files |
@@ -550,7 +546,7 @@ bun run typecheck          # Type check
 
 ## Relationship to OpenCode
 
-MiMoCode is built as a fork of [OpenCode](https://github.com/anomalyco/opencode). It keeps all core OpenCode capabilities (multiple providers, TUI, LSP, MCP, plugins) and adds persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, compose workflows, and self-improvement via dream/distill.
+MiMoCode is built as a fork of [OpenCode](https://github.com/anomalyco/opencode). It keeps all core OpenCode capabilities (multiple providers, TUI, LSP, MCP, plugins) and adds persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, dynamic workflows, and self-improvement via dream/distill.
 
 ---
 

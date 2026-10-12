@@ -64,7 +64,6 @@ function sessionRow(id: string, directory: string, updated: number) {
 const AGENTS = [
   { name: "build", mode: "primary", hidden: false, permission: [], options: {}, color: "#fff" },
   { name: "plan", mode: "primary", hidden: false, permission: [], options: {}, color: "#fff" },
-  { name: "compose", mode: "primary", hidden: false, permission: [], options: {}, color: "#fff" },
   { name: "orchestrator", mode: "primary", hidden: false, permission: [], options: {}, color: "#fff" },
 ]
 
@@ -444,7 +443,7 @@ describe("orchestrator removal TUI receipt (production paths)", () => {
     expect(TuiPluginRuntime.init).toBe(original)
   })
 
-  test("mode cycle actually switches among build/plan/compose only — no orchestrator", async () => {
+  test("mode cycle actually switches among build/plan only — no orchestrator", async () => {
     // Backend /agent no longer returns orchestrator (feature deleted). Cycle the
     // production local.agent.move. With history present the free-switch lock
     // only allows build↔plan — assert a real transition inside that rule.
@@ -455,7 +454,7 @@ describe("orchestrator removal TUI receipt (production paths)", () => {
       await wait(() => h.local.agent.current() !== undefined)
       await wait(() => h.app.captureCharFrame().includes(HIST))
       const start = h.local.agent.current()!.name
-      expect(["build", "plan", "compose"]).toContain(start)
+      expect(["build", "plan"]).toContain(start)
       const seen = new Set<string>([start])
       for (let i = 0; i < 4; i++) {
         h.local.agent.move(1)
@@ -464,7 +463,7 @@ describe("orchestrator removal TUI receipt (production paths)", () => {
         if (cur) seen.add(cur)
       }
       expect(seen.has("orchestrator")).toBe(false)
-      expect([...seen].every((n) => ["build", "plan", "compose"].includes(n))).toBe(true)
+      expect([...seen].every((n) => ["build", "plan"].includes(n))).toBe(true)
       // Real state change: at least one successful switch away from start.
       expect(seen.size).toBeGreaterThan(1)
       expect(h.route.data.type).toBe("session")
