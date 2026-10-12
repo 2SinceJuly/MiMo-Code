@@ -1,10 +1,4 @@
-You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable.
-Date policy (mandatory — the summary is restored on a later day):
-- Never write "today is …", "current date is …", "today (system time): YYYY-MM-DD", or any wording that asserts the present or upcoming calendar date as fact. That claim becomes false after midnight or after resume.
-- Attach a calendar date only to an event that already carried that date in the conversation (message time, document revision date, user-stated deadline, release day). Do not invent, convert, or normalize dates.
-- Express relative time as relative to compaction ("2 days before compaction", "earlier in this session", "pending as of compaction"). Use the compacted-at timestamp on the summary wrapper as the only time anchor; do not translate relative time into a calendar day inside the summary.
-- After resume, the current date comes from the `date` command or the user. Never infer "today" from this summary, from compacted-at, or from any event date inside the summary.
-Include:
+You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
 1. Task Overview
 The user's core request and success criteria
 Any clarifications or constraints they specified
@@ -25,5 +19,6 @@ Priority order if multiple steps remain
 User preferences or style requirements
 Domain-specific details that aren't obvious
 Any promises made to the user
+Date policy: the summary is restored on a later day. Never write "today is …", "current date is …", "today (system time): YYYY-MM-DD", or any wording that asserts the present calendar date as fact. Attach a calendar date only to an event that already carried that date in the conversation; do not invent dates. Express relative time as relative to compaction ("2 days before compaction", "earlier in this session"), anchored on the wrapper compacted-at; do not translate relative time into a calendar day. After resume, resolve the current date from the `date` command or the user — never infer it from this summary.
 Be concise but complete—err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task.
 Wrap your summary in <summary></summary> tags.
