@@ -177,7 +177,7 @@ export function isRetryableNetworkError(input: unknown): boolean {
 const OVERFLOW_PATTERNS = [
   /prompt is too long/i, // Anthropic
   /input is too long for requested model/i, // Amazon Bedrock
-  /exceeds the context window/i, // OpenAI (Completions + Responses API message text)
+  /exceeds the (?:model['’]s )?context window/i, // OpenAI-compatible provider overflow prose
   /input token count.*exceeds the maximum/i, // Google (Gemini)
   /maximum prompt length is \d+/i, // xAI (Grok)
   /reduce the length of the messages/i, // Groq
@@ -403,6 +403,7 @@ export function parseAPICallError(input: { providerID: ProviderID; error: APICal
   const body = json(input.error.responseBody)
   if (
     isOverflow(m) ||
+    (typeof body?.error?.message === "string" && isOverflow(body.error.message)) ||
     input.error.statusCode === 413 ||
     body?.error?.code === "context_length_exceeded" ||
     body?.error?.code === "context_window_exceeded" ||
