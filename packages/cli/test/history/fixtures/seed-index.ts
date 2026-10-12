@@ -94,7 +94,7 @@ function writeBatch(
         messageID: p.message_id,
         ...(p.data as object),
       } as MessageV2.Part
-      const extracted = extract(fullPart)
+      const extracted = extract(fullPart, "assistant")
       if (!extracted) continue
       writes.push({
         part: p,
@@ -112,6 +112,7 @@ function writeBatch(
           session_id: w.part.session_id,
           message_id: w.part.message_id,
           project_id: projectID,
+        kind: "assistant_text",
           tool_name: w.tool_name,
           body: w.body,
           time_created: w.time,

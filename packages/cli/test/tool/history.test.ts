@@ -58,6 +58,7 @@ describe("HistoryTool", () => {
               session_id: "ses_a",
               message_id: "msg_a",
               project_id: "proj_a",
+      kind: "assistant_text",
 
               tool_name: null,
               body: "JWT signing test",

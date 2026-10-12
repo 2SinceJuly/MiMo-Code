@@ -31,6 +31,7 @@ export function upsertHistoryBody(
     session_id: string
     message_id: string
     project_id: string
+    kind: string
     tool_name: string | null
     body: string
     time_created: number

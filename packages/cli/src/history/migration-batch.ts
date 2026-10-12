@@ -1,5 +1,6 @@
 /**
- * v6 index rebuild batch — pure DB path, no Log/Global side effects.
+ * v7 index rebuild batch — pure DB path, no Log/Global side effects.
+ * Re-extracts parts so `history_fts.kind` is classified (v6 already cleaned orphans).
  * Scheduler (startIndexMigration) lives in `./migration`.
  */
 import { and, asc, eq, gt, lte, sql } from "drizzle-orm"
@@ -11,8 +12,8 @@ import { indexImportedParts } from "./import"
 import { basePartId } from "./chunk"
 import { deleteHistoryRows } from "./chunk-write"
 
-/** v6: drop legacy chunks/orphans; rebuild one truncated index row per part. */
-export const MIGRATION_VERSION = 6
+/** v7: re-extract every part so kind is populated. */
+export const MIGRATION_VERSION = 7
 const batch = 32
 const budgetMs = 8
 

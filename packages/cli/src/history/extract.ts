@@ -1,7 +1,24 @@
 import { boundedJson, INDEX_MAX_BYTES, INDEX_MAX_LINES, previewForIndex, previewToolOutput } from "./index-preview"
 import type { MessageV2 } from "../session/message-v2"
 
-export type Extracted = { body: string; tool_name: string | null }
+/**
+ * Content classification for `history_fts.kind`.
+ * Consumers (desktop search) filter on this column; History.search does not accept kind.
+ */
+export type Kind =
+  | "user_text"
+  | "assistant_text"
+  | "reasoning"
+  | "file"
+  | "tool_output"
+  | "tool_error"
+  | "subtask"
+  | "compaction"
+  | "patch"
+  | "agent"
+  | "retry"
+
+export type Extracted = { kind: Kind; body: string; tool_name: string | null }
 
 /** Cap tool `input` so a huge argv/json cannot evict output / outputPath from the index body. */
 const INPUT_INDEX_BUDGET = {
@@ -56,19 +73,25 @@ function finalizeToolBody(tool: string, outputText: string, composed: string): s
  * Compose FTS body for a part. Length policy is the tool-call-result path:
  * `previewToolOutput` / `Truncate.output` (`tool/truncate.ts`) via `previewForIndex`.
  * Full text stays in PartTable (and tool-output files) for history get.
+ *
+ * `messageRole` classifies `text` parts as user_text vs assistant_text.
  */
-export function extract(part: MessageV2.Part): Extracted | null {
+export function extract(part: MessageV2.Part, messageRole: "user" | "assistant"): Extracted | null {
   switch (part.type) {
     case "text": {
       if (!part.text) return null
-      return { body: previewForIndex(part.text), tool_name: null }
+      return {
+        kind: messageRole === "user" ? "user_text" : "assistant_text",
+        body: previewForIndex(part.text),
+        tool_name: null,
+      }
     }
     case "reasoning": {
       if (!part.text) return null
-      return { body: previewForIndex(part.text), tool_name: null }
+      return { kind: "reasoning", body: previewForIndex(part.text), tool_name: null }
     }
     case "file": {
-      return { body: previewForIndex(fileText(part)), tool_name: null }
+      return { kind: "file", body: previewForIndex(fileText(part)), tool_name: null }
     }
     case "tool": {
       const state = part.state
@@ -80,34 +103,47 @@ export function extract(part: MessageV2.Part): Extracted | null {
       if (state.status === "error") {
         const errorText = typeof state.error === "string" ? state.error : boundedJson(state.error)
         const composed = `${part.tool} ${inputPart} ${previewOutputForIndex(errorText)} ${attachments}`.trim()
-        return { body: finalizeToolBody(part.tool, errorText, composed), tool_name: part.tool }
+        return {
+          kind: "tool_error",
+          body: finalizeToolBody(part.tool, errorText, composed),
+          tool_name: part.tool,
+        }
       }
       if (state.status === "completed") {
         const outputText =
           typeof state.output === "string" ? state.output : boundedJson(state.output ?? "")
         const composed = `${part.tool} ${inputPart} ${previewOutputForIndex(outputText)} ${attachments}`.trim()
-        return { body: finalizeToolBody(part.tool, outputText, composed), tool_name: part.tool }
+        return {
+          kind: "tool_output",
+          body: finalizeToolBody(part.tool, outputText, composed),
+          tool_name: part.tool,
+        }
       }
       return null
     }
     case "subtask":
       return {
+        kind: "subtask",
         body: previewForIndex([part.prompt, part.description, part.agent, part.command].filter(Boolean).join(" ")),
         tool_name: null,
       }
     case "compaction": {
       const body = [part.projection?.summary, part.projection?.manifest].filter(Boolean).join(" ")
-      return body ? { body: previewForIndex(body), tool_name: null } : null
+      return body ? { kind: "compaction", body: previewForIndex(body), tool_name: null } : null
     }
     case "patch":
-      return part.files.length ? { body: previewForIndex(part.files.join(" ")), tool_name: null } : null
+      return part.files.length
+        ? { kind: "patch", body: previewForIndex(part.files.join(" ")), tool_name: null }
+        : null
     case "agent":
       return {
+        kind: "agent",
         body: previewForIndex([part.name, part.source?.value].filter(Boolean).join(" ")),
         tool_name: null,
       }
     case "retry":
       return {
+        kind: "retry",
         body: previewForIndex(
           [part.error.data.message, part.error.data.responseBody].filter(Boolean).join(" "),
         ),

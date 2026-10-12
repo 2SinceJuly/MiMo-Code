@@ -1,4 +1,4 @@
-import { eq, inArray } from "drizzle-orm"
+import { eq, inArray, sql } from "drizzle-orm"
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core"
 import type { MessageV2 } from "../session/message-v2"
 import { MessageTable, PartTable, SessionTable } from "../session/session.sql"
@@ -20,6 +20,7 @@ export function indexImportedParts<T>(
       .select({
         ...projection(),
         project: SessionTable.project_id,
+        role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
       })
       .from(PartTable)
       .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
@@ -27,12 +28,15 @@ export function indexImportedParts<T>(
       .where(inArray(PartTable.id, batch))
       .all()
     for (const row of rows) {
-      const value = extract({
-        ...row.data,
-        id: row.id,
-        messageID: row.message_id,
-        sessionID: row.session_id,
-      } as MessageV2.Part)
+      const value = extract(
+        {
+          ...row.data,
+          id: row.id,
+          messageID: row.message_id,
+          sessionID: row.session_id,
+        } as MessageV2.Part,
+        row.role === "user" ? "user" : "assistant",
+      )
       if (!value) {
         deleteHistoryRows(db, row.id)
         continue
@@ -43,6 +47,7 @@ export function indexImportedParts<T>(
         session_id: row.session_id,
         message_id: row.message_id,
         project_id: row.project,
+        kind: value.kind,
         tool_name: value.tool_name,
         body: value.body,
         time_created: row.time_created,

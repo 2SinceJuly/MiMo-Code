@@ -46,6 +46,7 @@ sqlite.exec(`
     session_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
     tool_name TEXT,
     body TEXT NOT NULL,
     time_created INTEGER NOT NULL
@@ -79,8 +80,8 @@ const insertPart = sqlite.prepare(
 insertPart.run("prt_ok", JSON.stringify({ type: "text", text: "nodesqlitehit" }))
 insertPart.run("prt_big", JSON.stringify({ type: "text", text: bigText }))
 const insertFts = sqlite.prepare(
-  `INSERT INTO history_fts (part_id, session_id, message_id, project_id, tool_name, body, time_created)
-   VALUES (?, 'ses_n', 'msg_n', 'proj_n', NULL, ?, 1)`,
+  `INSERT INTO history_fts (part_id, session_id, message_id, project_id, kind, tool_name, body, time_created)
+   VALUES (?, 'ses_n', 'msg_n', 'proj_n', 'assistant_text', NULL, ?, 1)`,
 )
 insertFts.run("prt_ok#0", "stalechunk")
 insertFts.run("prt_ok#1", "stalechunk")

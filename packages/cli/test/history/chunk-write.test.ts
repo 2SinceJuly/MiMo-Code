@@ -35,7 +35,8 @@ describe("history upsert truncation 兜底", () => {
     const db = Database.Client()
     upsertHistoryBody(db, {
       part_id: "prt_single", session_id: "ses_a", message_id: "msg_1",
-      project_id: "p", tool_name: null, body: "x".repeat(length), time_created: 1,
+      project_id: "p",
+        kind: "assistant_text", tool_name: null, body: "x".repeat(length), time_created: 1,
     })
     const rows = db.select().from(HistoryFtsTable).all()
     expect(rows).toHaveLength(1)
@@ -49,7 +50,7 @@ describe("history upsert truncation 兜底", () => {
     const keep = [base + "0", base + "$", "prt_under_Xscore#0", "prt_under_%scor#0"]
     for (const id of [base, base + "#0", base + "#12", ...keep]) {
       db.insert(HistoryFtsTable).values({
-        part_id: id, session_id: "ses_a", message_id: "msg_1", project_id: "p",
+        part_id: id, session_id: "ses_a", message_id: "msg_1", project_id: "p", kind: "assistant_text",
         body: "legacy", time_created: 1,
       }).run()
     }
@@ -70,6 +71,7 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: "bash",
         body: huge,
         time_created: 1,
@@ -91,6 +93,7 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
         body: "short body",
         time_created: 2,
@@ -109,6 +112,7 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
         body: "y".repeat(80_000),
         time_created: 1,
@@ -120,6 +124,7 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
         body: "tiny",
         time_created: 2,
@@ -141,7 +146,7 @@ describe("history extract + budgeted index", () => {
       tool: "bash",
       state: { status: "completed", input: { command: "ls" }, output: "line\n".repeat(20_000) },
     } as never
-    const extracted = extract(part)
+    const extracted = extract(part, "assistant")
     expect(extracted).not.toBeNull()
     expect(Buffer.byteLength(extracted!.body, "utf-8")).toBeLessThanOrEqual(MAX_BYTES)
     seedProject()
@@ -151,6 +156,7 @@ describe("history extract + budgeted index", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: extracted!.tool_name,
         body: extracted!.body,
         time_created: Date.now(),

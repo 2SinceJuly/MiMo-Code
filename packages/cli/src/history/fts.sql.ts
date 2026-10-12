@@ -7,6 +7,8 @@ export const HistoryFtsTable = sqliteTable(
     session_id: text().notNull(),
     message_id: text().notNull(),
     project_id: text().notNull(),
+    /** Content classification (`extract` Kind). Consumers may filter; History.search does not accept kind. */
+    kind: text().notNull(),
     tool_name: text(),
     body: text().notNull(),
     time_created: integer().notNull(),
@@ -15,6 +17,7 @@ export const HistoryFtsTable = sqliteTable(
     index("history_fts_session_idx").on(t.session_id, t.time_created),
     index("history_fts_project_idx").on(t.project_id, t.time_created),
     index("history_fts_message_idx").on(t.message_id),
+    index("history_fts_kind_idx").on(t.kind),
   ],
 )
 
