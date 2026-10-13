@@ -81,6 +81,7 @@ function writeBatch(
     type ToWrite = {
       part: (typeof parts)[number]
       body: string
+      body_idx: string
       tool_name: string | null
       time: number
     }
@@ -94,12 +95,13 @@ function writeBatch(
         messageID: p.message_id,
         ...(p.data as object),
       } as MessageV2.Part
-      const extracted = extract(fullPart)
+      const extracted = extract(fullPart, "assistant")
       if (!extracted) continue
       writes.push({
         part: p,
         // upsertHistoryBody applies tool-result truncation (single write gate).
         body: extracted.body,
+        body_idx: extracted.body_idx,
         tool_name: extracted.tool_name,
         time: p.time_created,
       })
@@ -112,8 +114,9 @@ function writeBatch(
           session_id: w.part.session_id,
           message_id: w.part.message_id,
           project_id: projectID,
+        kind: "assistant_text",
           tool_name: w.tool_name,
-          body: w.body,
+          body: w.body, body_idx: w.body_idx ?? w.body,
           time_created: w.time,
         })
       }

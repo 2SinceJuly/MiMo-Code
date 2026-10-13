@@ -2,7 +2,6 @@ import { and, eq, gte, lt, or } from "drizzle-orm"
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core"
 import { HistoryFtsTable } from "./fts.sql"
 import { basePartId } from "./chunk"
-import { previewForIndex } from "./index-preview"
 
 type DbLike = Pick<BaseSQLiteDatabase<"sync", unknown>, "select" | "insert" | "delete">
 
@@ -31,18 +30,22 @@ export function upsertHistoryBody(
     session_id: string
     message_id: string
     project_id: string
+    kind: string
     tool_name: string | null
     body: string
+    body_idx?: string
     time_created: number
   },
 ) {
   const base = basePartId(input.part_id)
   deleteHistoryRows(db, base)
-  // Single gate: clean + tool-result preview (shared with extract).
+  // extract() already applied preview on the **original** text then CJK-segmented
+  // for the index. Do not preview again here — that would truncate the expanded
+  // segmented form and drop tail content that was inside the original cap (D7).
   const data = {
     ...input,
     part_id: base,
-    body: previewForIndex(input.body),
+    body_idx: input.body_idx ?? input.body,
   }
   db.insert(HistoryFtsTable).values(data).onConflictDoUpdate({ target: HistoryFtsTable.part_id, set: data }).run()
 }

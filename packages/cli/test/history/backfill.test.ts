@@ -151,6 +151,7 @@ describe("History.backfill", () => {
     ),
   )
 
+  // [TP-SE-R5-01] 重复扫描幂等：已索引 part 不重复写。
   it.live("is idempotent (NOT EXISTS skips already-indexed parts)", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
@@ -190,6 +191,14 @@ async function prepareMigration() {
   db.$client.exec(
     await Bun.file(new URL("../../migration/20260916000000_history_single_row_index/migration.sql", import.meta.url)).text(),
   )
+  // v7 kind column is already applied by Database.Client migrations; only seed rebuild state.
+  db.$client.exec(
+    `INSERT INTO history_index_migration
+     SELECT 8, 'clean', 0,
+       COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
+       COALESCE((SELECT MAX(rowid) FROM part), 0);
+     UPDATE history_index_migration SET phase='done' WHERE version < 8;`,
+  )
   return db
 }
 function finish(db: ReturnType<typeof Database.Client>) {
@@ -218,7 +227,8 @@ test.each(["clean", "repair"] as const)("%s yields at its time budget and resume
     for (let index = 0; index < 2; index++) {
       db.insert(HistoryFtsTable).values({
         part_id: `${part.part_id}#${index}`, session_id: part.session_id,
-        message_id: part.message_id, project_id: "proj_ses_compat", body: "stalechunk", time_created: 1,
+        message_id: part.message_id, project_id: "proj_ses_compat",
+      kind: "assistant_text", body: "stalechunk", body_idx: "stalechunk", time_created: 1,
       }).run()
     }
   }
@@ -278,8 +288,8 @@ test("background migration delays startup, rests after expensive work and cancel
   }
 })
 
-// R6/N1: error path — 5 failed attempts clear the jobs slot so startIndexMigration can re-arm.
-test("index migration clears jobs slot after five failed attempts and allows restart", () => {
+// R6/N1: 失败退避后**慢速续试**，不永久清空 job（否则「索引整理中」卡到下次进程启动）。
+test("index migration keeps slow-retrying after five failed attempts", () => {
   process.env.MIMOCODE_SKIP_MIGRATIONS = "1"
   Database.close()
   const scheduled: { run: () => void; delay: number }[] = []
@@ -290,7 +300,6 @@ test("index migration clears jobs slot after five failed attempts and allows res
   try {
     const db = Database.Client()
     stopIndexMigration(db)
-    // Drop auto-start timers captured before stop; boom path starts clean.
     scheduled.length = 0
     seed(textParts(3))
     db.update(HistoryIndexMigrationTable).set({ phase: "repair", cursor: 0, part_end: 3 })
@@ -302,19 +311,20 @@ test("index migration clears jobs slot after five failed attempts and allows res
     }
     startIndexMigration(db, { migrate: boom })
     expect(scheduled).toHaveLength(1)
-    // attempt 0..5: each failure schedules the next backoff until attempt>=5 clears the slot
+    // attempt 0..5：快速退避；attempt>=5 转慢速重试，job 不丢
     for (let i = 0; i < 6; i++) {
       const next = scheduled[scheduled.length - 1]
       expect(next).toBeDefined()
       next!.run()
     }
     expect(attempts).toBe(6)
-    const afterGiveUp = scheduled.length
-    expect(afterGiveUp).toBe(6) // 1 start + 5 retries; attempt 5 clears without reschedule
-    // Slot cleared — a later startIndexMigration must re-arm the 1s startup timer
-    startIndexMigration(db, { migrate: boom })
-    expect(scheduled.length).toBe(afterGiveUp + 1)
-    expect(scheduled[scheduled.length - 1]!.delay).toBeGreaterThanOrEqual(1000)
+    const afterQuick = scheduled.length
+    expect(afterQuick).toBe(7) // 1 start + 5 quick retries + 1 slow retry
+    expect(scheduled[scheduled.length - 1]!.delay).toBeGreaterThanOrEqual(120_000)
+    // 慢速重试仍会继续调度
+    scheduled[scheduled.length - 1]!.run()
+    expect(attempts).toBe(7)
+    expect(scheduled.length).toBe(afterQuick + 1)
   } finally {
     delete process.env.MIMOCODE_SKIP_MIGRATIONS
     timeout.mockRestore()
@@ -331,9 +341,9 @@ test("repairs missing rows and replaces stale content from original parts", asyn
       session_id: "ses_compat",
       message_id: "msg_compat",
       project_id: "proj_ses_compat",
+      kind: "assistant_text",
 
-      body: "keepword data:image/png;base64,aGVsbG8= tailword",
-      time_created: 1,
+      body: "keepword data:image/png;base64,aGVsbG8= tailword", body_idx: "keepword data:image/png;base64,aGVsbG8= tailword", time_created: 1,
     })
     .run()
   await prepareMigration()
@@ -458,9 +468,9 @@ test("upgrade removes search entries whose original parts were deleted", async (
       session_id: "ses_compat",
       message_id: "msg_compat",
       project_id: "proj_ses_compat",
+      kind: "assistant_text",
 
-      body: "ghostneedle",
-      time_created: 1,
+      body: "ghostneedle", body_idx: "ghostneedle", time_created: 1,
     })
     .run()
   await prepareMigration()
@@ -512,13 +522,13 @@ test("completed version 3 indexes gain omitted content in version 4 only once", 
       session_id: "ses_expand",
       message_id: "msg_expand",
       project_id: "proj_ses_expand",
+      kind: "assistant_text",
 
-      body: "read inputneedle",
-      time_created: 1,
+      body: "read inputneedle", body_idx: "read inputneedle", time_created: 1,
     })
     .run()
   db.$client.exec(
-    "UPDATE history_index_migration SET phase='done' WHERE version=3; DELETE FROM history_index_migration WHERE version=4 OR version=5 OR version=6",
+    "UPDATE history_index_migration SET phase='done' WHERE version=3; DELETE FROM history_index_migration WHERE version=4 OR version=5 OR version=6 OR version=7 OR version=8",
   )
   db.$client.exec(
     await Bun.file(
@@ -532,6 +542,13 @@ test("completed version 3 indexes gain omitted content in version 4 only once", 
   )
   db.$client.exec(
     await Bun.file(new URL("../../migration/20260916000000_history_single_row_index/migration.sql", import.meta.url)).text(),
+  )
+  db.$client.exec(
+    `INSERT INTO history_index_migration
+     SELECT 8, 'clean', 0,
+       COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
+       COALESCE((SELECT MAX(rowid) FROM part), 0);
+     UPDATE history_index_migration SET phase='done' WHERE version < 8;`,
   )
   finish(db)
   for (const word of ["inputneedle", "outputneedle", "reasonneedle"]) {

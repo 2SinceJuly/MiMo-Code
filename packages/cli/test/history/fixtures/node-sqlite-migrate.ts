@@ -46,8 +46,10 @@ sqlite.exec(`
     session_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
     tool_name TEXT,
     body TEXT NOT NULL,
+    body_idx TEXT NOT NULL DEFAULT '',
     time_created INTEGER NOT NULL
   );
   CREATE TABLE history_index_migration (
@@ -56,6 +58,12 @@ sqlite.exec(`
     cursor INTEGER NOT NULL,
     fts_end INTEGER NOT NULL,
     part_end INTEGER NOT NULL
+  );
+  CREATE VIRTUAL TABLE history_fts_idx USING fts5(
+    body_idx,
+    content='history_fts',
+    content_rowid='rowid',
+    tokenize='unicode61'
   );
 `)
 
@@ -79,13 +87,13 @@ const insertPart = sqlite.prepare(
 insertPart.run("prt_ok", JSON.stringify({ type: "text", text: "nodesqlitehit" }))
 insertPart.run("prt_big", JSON.stringify({ type: "text", text: bigText }))
 const insertFts = sqlite.prepare(
-  `INSERT INTO history_fts (part_id, session_id, message_id, project_id, tool_name, body, time_created)
-   VALUES (?, 'ses_n', 'msg_n', 'proj_n', NULL, ?, 1)`,
+  `INSERT INTO history_fts (part_id, session_id, message_id, project_id, kind, tool_name, body, body_idx, time_created)
+   VALUES (?, 'ses_n', 'msg_n', 'proj_n', 'assistant_text', NULL, ?, ?, 1)`,
 )
-insertFts.run("prt_ok#0", "stalechunk")
-insertFts.run("prt_ok#1", "stalechunk")
-insertFts.run("ghost#0", "orphan")
-insertFts.run("prt_big", "y".repeat(200_000))
+insertFts.run("prt_ok#0", "stalechunk", "stalechunk")
+insertFts.run("prt_ok#1", "stalechunk", "stalechunk")
+insertFts.run("ghost#0", "orphan", "orphan")
+insertFts.run("prt_big", "y".repeat(200_000), "y".repeat(200_000))
 const ftsEnd = (sqlite.prepare("SELECT MAX(rowid) AS n FROM history_fts").get() as { n: number }).n
 const partEnd = (sqlite.prepare("SELECT MAX(rowid) AS n FROM part").get() as { n: number }).n
 sqlite

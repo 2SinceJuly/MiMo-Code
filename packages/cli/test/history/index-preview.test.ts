@@ -40,7 +40,7 @@ test("extract tool output stays within tool-result budget", () => {
       output: "line\n".repeat(30_000),
     },
   } as never
-  const r = extract(part)
+  const r = extract(part, "assistant")
   expect(r).not.toBeNull()
   expect(Buffer.byteLength(r!.body, "utf-8")).toBeLessThanOrEqual(INDEX_MAX_BYTES)
 })
@@ -52,7 +52,7 @@ test("extract uses stored tool result string when present", () => {
     type: "tool",
     tool: "bash",
     state: { status: "completed", input: { command: "ls" }, output: stored },
-  } as never)
+  } as never, "assistant")
   expect(r?.body).toContain("/tmp/tool_abc")
 })
 
@@ -68,7 +68,7 @@ test("huge tool input does not evict output path hint", () => {
     type: "tool",
     tool: "Bash",
     state: { status: "completed", input: hugeInput, output },
-  } as never)
+  } as never, "assistant")
   expect(r).not.toBeNull()
   expect(r!.body).toContain(path)
   expect(r!.body).toContain("Bash")
@@ -77,7 +77,7 @@ test("huge tool input does not evict output path hint", () => {
 
 test("extract patch file list is budgeted", () => {
   const files = Array.from({ length: 20_000 }, (_, i) => `/path/to/file_${i}.ts`)
-  const r = extract({ type: "patch", hash: "h", files } as never)
+  const r = extract({ type: "patch", hash: "h", files } as never, "assistant")
   expect(r).not.toBeNull()
   expect(Buffer.byteLength(r!.body, "utf-8")).toBeLessThanOrEqual(INDEX_MAX_BYTES)
 })

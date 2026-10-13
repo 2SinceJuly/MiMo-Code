@@ -1,30 +1,30 @@
 import { describe, expect, test } from "bun:test"
-import { buildFtsQuery } from "../../src/history/fts-query"
+import { buildFtsQuery, buildFtsMatch } from "../../src/history/fts-query"
 
 describe("history.buildFtsQuery", () => {
-  test("returns null for empty / whitespace input", () => {
-    expect(buildFtsQuery("")).toBeNull()
-    expect(buildFtsQuery("   ")).toBeNull()
-    expect(buildFtsQuery("!!!")).toBeNull()
+  test("empty input", () => {
+    expect(buildFtsQuery("")).toEqual({ fts: null })
+    expect(buildFtsQuery("!!!")).toEqual({ fts: null })
   })
 
-  test("wraps single token in phrase quotes", () => {
-    expect(buildFtsQuery("hello")).toBe('"hello"')
+  test("latin tokens AND-join", () => {
+    expect(buildFtsQuery("git log")).toEqual({ fts: '"git" AND "log"' })
+    expect(buildFtsQuery("hello")).toEqual({ fts: '"hello"' })
   })
 
-  test("AND-joins multiple tokens", () => {
-    expect(buildFtsQuery("git log")).toBe('"git" AND "log"')
+  test("CJK unigram: short words become adjacent phrases", () => {
+    expect(buildFtsQuery("打包")).toEqual({ fts: '"打 包"' })
+    expect(buildFtsQuery("打包脚本")).toEqual({ fts: '"打 包 脚 本"' })
+    expect(buildFtsQuery("打包 脚本")).toEqual({ fts: '"打 包" AND "脚 本"' })
   })
 
-  test("splits on punctuation", () => {
-    expect(buildFtsQuery("foo.bar/baz")).toBe('"foo" AND "bar" AND "baz"')
+  test("mixed CJK and latin", () => {
+    expect(buildFtsQuery("go 打包").fts).toBe('"go" AND "打 包"')
+    expect(buildFtsMatch("deploy")).toBe('"deploy"')
   })
 
-  test("keeps CJK tokens", () => {
-    expect(buildFtsQuery("搜索 测试")).toBe('"搜索" AND "测试"')
-  })
-
-  test("strips embedded quotes within tokens", () => {
-    expect(buildFtsQuery('he"llo')).toBe('"he" AND "llo"')
+  test("punctuation splits phrases; each phrase is adjacent", () => {
+    expect(buildFtsQuery("foo bar、baz").fts).toBe('"foo bar" AND "baz"')
+    expect(buildFtsQuery("打包、脚本").fts).toBe('"打 包" AND "脚 本"')
   })
 })

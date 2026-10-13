@@ -33,10 +33,10 @@ function seedFts(rows: Array<Partial<typeof HistoryFtsTable.$inferInsert>>) {
           session_id: r.session_id ?? "ses_a",
           message_id: r.message_id ?? "msg_x",
           project_id: r.project_id ?? "proj_a",
+      kind: "assistant_text",
 
           tool_name: r.tool_name ?? null,
-          body: r.body!,
-          time_created: r.time_created ?? Date.now(),
+          body: r.body!, body_idx: r.body!, time_created: r.time_created ?? Date.now(),
         })
         .run()
     }
@@ -239,3 +239,31 @@ describe("History.around", () => {
     ),
   )
 })
+
+  it.live("snippet keeps AND groups with underscore phrase (C15)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const project = Instance.project.id
+        const tail = "alpha unrelated " + "padding ".repeat(160) + "alpha beta gamma"
+        seedFts([{ part_id: "p_ug", project_id: project, body: tail, body_idx: tail }])
+        const svc = yield* History.Service
+        const hits = yield* svc.search({ query: "alpha_beta gamma", scope: "global", limit: 5 })
+        expect(hits).toHaveLength(1)
+        expect(hits[0]!.snippet).toContain("alpha beta gamma")
+      }),
+    ),
+  )
+
+  it.live("snippet window includes tail phrase hit (C15)", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const project = Instance.project.id
+        const tail = "alpha unrelated " + "padding ".repeat(160) + "alpha beta"
+        seedFts([{ part_id: "p_tail", project_id: project, body: tail, body_idx: tail }])
+        const svc = yield* History.Service
+        const hits = yield* svc.search({ query: "alpha-beta", scope: "global", limit: 5 })
+        expect(hits).toHaveLength(1)
+        expect(hits[0]!.snippet).toContain("alpha beta")
+      }),
+    ),
+  )

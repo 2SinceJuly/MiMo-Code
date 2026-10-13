@@ -31,11 +31,14 @@ function seedProject() {
 }
 
 describe("history upsert truncation 兜底", () => {
-  it.each([48_001, 51_200, 980_000])("writes exactly one truncated row for %i characters", (length) => {
+  it.each([48_001, 51_200, 980_000])("extract preview + upsert writes one row within budget for %i chars", (length) => {
     const db = Database.Client()
+    const extracted = extract({ type: "text", text: "x".repeat(length) } as any, "assistant")
+    expect(extracted).not.toBeNull()
     upsertHistoryBody(db, {
       part_id: "prt_single", session_id: "ses_a", message_id: "msg_1",
-      project_id: "p", tool_name: null, body: "x".repeat(length), time_created: 1,
+      project_id: "p",
+        kind: extracted!.kind, tool_name: null, body: extracted!.body, body_idx: extracted!.body_idx, time_created: 1,
     })
     const rows = db.select().from(HistoryFtsTable).all()
     expect(rows).toHaveLength(1)
@@ -49,8 +52,8 @@ describe("history upsert truncation 兜底", () => {
     const keep = [base + "0", base + "$", "prt_under_Xscore#0", "prt_under_%scor#0"]
     for (const id of [base, base + "#0", base + "#12", ...keep]) {
       db.insert(HistoryFtsTable).values({
-        part_id: id, session_id: "ses_a", message_id: "msg_1", project_id: "p",
-        body: "legacy", time_created: 1,
+        part_id: id, session_id: "ses_a", message_id: "msg_1", project_id: "p", kind: "assistant_text",
+        body: "legacy", body_idx: "legacy", time_created: 1,
       }).run()
     }
     const query = db.delete(HistoryFtsTable).where(chunkRowFilter(base)).toSQL()
@@ -61,26 +64,28 @@ describe("history upsert truncation 兜底", () => {
     expect(db.select().from(HistoryFtsTable).all().map((row) => row.part_id).sort()).toEqual(keep.sort())
   })
 
-  it("upsertHistoryBody truncates oversized body via tool-result preview path", () => {
+  it("upsertHistoryBody does NOT re-truncate (extract owns preview budget, D7)", () => {
     seedProject()
-    const huge = "find-result\n".repeat(20_000) + "END_MARKER"
+    // CJK segmentation expands body; re-truncating here would drop tail content
+    // that was inside the original preview cap. extract() applies preview on the
+    // original text first. upsert stores what extract produced.
+    const body = "x".repeat(60_000) + "END_MARKER"
     Database.use((db) => {
       upsertHistoryBody(db, {
         part_id: "prt_huge",
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: "bash",
-        body: huge,
+        body,
         time_created: 1,
       })
     })
     const rows = Database.use((db) => db.select().from(HistoryFtsTable).all())
-    expect(rows.length).toBeGreaterThanOrEqual(1)
-    const total = rows.reduce((n, r) => n + Buffer.byteLength(r.body, "utf-8"), 0)
-    expect(total).toBeLessThanOrEqual(MAX_BYTES)
-    // Full payload must not be persisted — only the tool-result preview.
-    expect(total).toBeLessThan(Buffer.byteLength(huge, "utf-8") / 2)
+    expect(rows.length).toBe(1)
+    expect(rows[0]!.body).toContain("END_MARKER")
+    expect(rows[0]!.body.length).toBe(body.length)
   })
 
   it("delete removes base rows after budgeted upsert", () => {
@@ -91,9 +96,9 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
-        body: "short body",
-        time_created: 2,
+        body: "short body", body_idx: "short body", time_created: 2,
       })
     })
     expect(Database.use((db) => db.select().from(HistoryFtsTable).all().length)).toBe(1)
@@ -101,6 +106,7 @@ describe("history upsert truncation 兜底", () => {
     expect(Database.use((db) => db.select().from(HistoryFtsTable).all().length)).toBe(0)
   })
 
+  // [TP-SE-R5-01] 同 part 重复 upsert 替换不叠加（写路径幂等）。
   it("shrinking body replaces prior rows", () => {
     seedProject()
     Database.use((db) => {
@@ -109,9 +115,10 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
         body: "y".repeat(80_000),
-        time_created: 1,
+        body_idx: "x", time_created: 1,
       })
     })
     Database.use((db) => {
@@ -120,9 +127,10 @@ describe("history upsert truncation 兜底", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: null,
         body: "tiny",
-        time_created: 2,
+        body_idx: "x", time_created: 2,
       })
     })
     const rows = Database.use((db) => db.select().from(HistoryFtsTable).all())
@@ -141,7 +149,7 @@ describe("history extract + budgeted index", () => {
       tool: "bash",
       state: { status: "completed", input: { command: "ls" }, output: "line\n".repeat(20_000) },
     } as never
-    const extracted = extract(part)
+    const extracted = extract(part, "assistant")
     expect(extracted).not.toBeNull()
     expect(Buffer.byteLength(extracted!.body, "utf-8")).toBeLessThanOrEqual(MAX_BYTES)
     seedProject()
@@ -151,9 +159,10 @@ describe("history extract + budgeted index", () => {
         session_id: "ses_a",
         message_id: "msg_1",
         project_id: "p",
+        kind: "assistant_text",
         tool_name: extracted!.tool_name,
         body: extracted!.body,
-        time_created: Date.now(),
+        body_idx: "x", time_created: Date.now(),
       })
     })
     const rows = Database.use((db) => db.select().from(HistoryFtsTable).all())

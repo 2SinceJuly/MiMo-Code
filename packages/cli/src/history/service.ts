@@ -85,7 +85,7 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const search = Effect.fn("History.search")(function* (input: Parameters<Interface["search"]>[0]) {
-      const ftsQuery = buildFtsQuery(input.query)
+      const { fts: ftsQuery } = buildFtsQuery(input.query)
       if (!ftsQuery) return []
 
       const limit = Math.min(input.limit ?? 10, HARD_CAP)
@@ -115,7 +115,7 @@ export const layer = Layer.effect(
         params.push(input.time_before)
       }
 
-      const whereClause = conditions.length > 0 ? `AND ${conditions.join(" AND ")}` : ""
+      const whereClause = conditions.length ? `AND ${conditions.join(" AND ")}` : ""
       // Debt history-search-overfetch-after-v6: legacy multi-row FTS bodies may remain
       // until migration v6 finishes. Over-fetch so one part cannot fill LIMIT before
       // dedupe. When v6 is done on a DB (or once fleet v6 coverage is complete), tighten
@@ -127,12 +127,13 @@ export const layer = Layer.effect(
         SELECT history_fts.part_id, history_fts.session_id, history_fts.message_id,
                history_fts.project_id, history_fts.tool_name,
                history_fts.time_created,
-               substr(snippet(history_fts_idx, 0, '<<', '>>', '...', 32), 1, 1001) AS snippet,
+               history_fts.body AS body_full,
                bm25(history_fts_idx) AS score
         FROM history_fts_idx
         CROSS JOIN history_fts ON history_fts.rowid = history_fts_idx.rowid
-        WHERE history_fts_idx MATCH ?
-        ${whereClause}
+        WHERE 1=1
+          ${ftsQuery ? "AND history_fts_idx MATCH ?" : ""}
+          ${whereClause}
         ORDER BY score
         LIMIT ?
       `
@@ -148,13 +149,69 @@ export const layer = Layer.effect(
         const partId = basePartId(r.part_id)
         if (seen.has(partId)) continue
         seen.add(partId)
+        const bodyFull = String((r as { body_full?: string }).body_full ?? "")
+        // C15: locate with FTS-like tokens (AND/punct phrases; Han isolated; NFD map).
+        const map: number[] = []
+        const chars: string[] = []
+        for (let i = 0; i < bodyFull.length; i++) {
+          const folded = (bodyFull[i] ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+          for (const c of folded) { chars.push(c); map.push(i) }
+        }
+        const hayN = chars.join("")
+        const qn = input.query.trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+        const segments = qn.split(/[、，,。.；;：:！!？?（）()【】\[\]「」“”"'|/\\]+/).map((s) => s.trim()).filter(Boolean)
+        let hitAt = -1
+        const tokenizePhrase = (w: string) =>
+          w.split(/(?<=\p{Script=Han})|(?=\p{Script=Han})|_/u).filter(Boolean)
+        const findSeq = (tokens: string[]) => {
+          const isHan = (s: string) => s.length === 1 && /\p{Script=Han}/u.test(s)
+          const re = new RegExp(
+            tokens.map((w, i) => {
+              const body = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+              const sep = i === 0 ? "" : isHan(tokens[i - 1]!) || isHan(w) ? "[^\\p{L}\\p{N}]*" : "[^\\p{L}\\p{N}]+"
+              return sep + body
+            }).join(""),
+            "giu",
+          )
+          const badEdge = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c) && !/\p{Script=Han}/u.test(c)
+          let m: RegExpExecArray | null
+          while ((m = re.exec(hayN))) {
+            const s = m.index
+            const e = s + m[0].length
+            const first = tokens[0]!
+            const last = tokens[tokens.length - 1]!
+            if (!isHan(first) && badEdge(hayN[s - 1])) continue
+            if (!isHan(last) && badEdge(hayN[e])) continue
+            return map[s] ?? -1
+          }
+          return -1
+        }
+        // Structure matches buildFtsQuery: punct segments → AND; each space-separated
+        // word is one phrase. Han–Han may run together; Latin tokens need a real break.
+        for (const seg of segments) {
+          const words = seg.match(/[\p{L}\p{N}_]+/gu) ?? []
+          if (!words.length) continue
+          if (segments.length >= 2 || words.length === 1 || !/\s/.test(seg)) {
+            // one phrase (punct segment or single/contiguous word group)
+            const at = findSeq(tokenizePhrase(words.join("_")))
+            if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+          } else {
+            // space-separated multi-word AND: each word is its own phrase
+            for (const w of words) {
+              const at = findSeq(tokenizePhrase(w))
+              if (at >= 0 && (hitAt < 0 || at < hitAt)) hitAt = at
+            }
+          }
+        }
+        const winStart = Math.max(0, hitAt - 200)
+        const snippet = bodyFull.slice(winStart, winStart + 1000)
         hits.push({
           part_id: partId,
           session_id: r.session_id,
           message_id: r.message_id,
           project_id: r.project_id,
           tool_name: r.tool_name,
-          snippet: summary(r.snippet),
+          snippet: summary(snippet),
           score: -r.score,
           time_created: r.time_created,
         })

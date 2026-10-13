@@ -11,7 +11,7 @@ test("extract strips data-URLs before tool-result preview budget", () => {
       output: "data:text/plain;base64,AAAA",
     },
   } as never
-  const r = extract(part)
+  const r = extract(part, "assistant")
   expect(r).not.toBeNull()
   expect(r!.body).not.toContain("AAAA")
   expect(r!.body).toContain("bash")
