@@ -226,6 +226,8 @@ interface ProcessorContext extends Input {
   textNgramRepeat: boolean
   textPartPersisted: boolean
   retrySafe: boolean
+  /** First provider frame of this process() already marked busy; later retry frames must not clobber session.status{retry}. */
+  startedBusy: boolean
 }
 
 type StreamEvent = Event
@@ -301,6 +303,7 @@ export const layer: Layer.Layer<
         textNgramRepeat: false,
         textPartPersisted: false,
         retrySafe: true,
+        startedBusy: false,
       }
       let aborted = false
       // Only the main agent owns session-level status. Subagents (explore,
@@ -488,10 +491,17 @@ export const layer: Layer.Layer<
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
         switch (value.type) {
           case "start":
-            if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
+            // First provider frame of this process() marks busy. Later frames belong
+            // to request-ladder retries of the same attempt and must not clobber
+            // session.status{retry} (the reconnect row is the only user-visible wait).
+            if (isMain && !ctx.startedBusy) {
+              ctx.startedBusy = true
+              yield* status.set(ctx.sessionID, { type: "busy" })
+            }
             return
 
           case "reasoning-start":
+            if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             if (value.id in ctx.reasoningMap) return
             ctx.reasoningMap[value.id] = {
               id: PartID.ascending(),
@@ -535,6 +545,7 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-start":
+            if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
@@ -740,6 +751,7 @@ export const layer: Layer.Layer<
           }
 
           case "text-start":
+            if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             ctx.currentText = {
               id: PartID.ascending(),
               messageID: ctx.assistantMessage.id,
@@ -917,9 +929,28 @@ export const layer: Layer.Layer<
               ready.clear()
             }
             ctx.retrySafe = true
+            ctx.startedBusy = false
             ctx.textNgramRepeat = false
             ctx.textNgramMonitor = createTextNgramMonitor()
-            const stream = llm.stream({ ...streamInput, assistantMessageID: ctx.assistantMessage.id })
+            const stream = llm.stream({
+              ...streamInput,
+              assistantMessageID: ctx.assistantMessage.id,
+              // Request-ladder retries must write SessionStatus (not just bus events):
+              // GET /session/status serves the same map after renderer reload.
+              onRetryStatus: (info) =>
+                isMain
+                  ? status.setRetry(ctx.sessionID, {
+                      type: "retry",
+                      attempt: info.attempt,
+                      phaseAttempt: info.attempt,
+                      message: info.message,
+                      next: info.next,
+                      phase: info.phase,
+                      scope: info.scope,
+                      hostCode: info.hostCode,
+                    }).pipe(Effect.asVoid)
+                  : Effect.void,
+            })
 
             yield* stream.pipe(
               Stream.tap(handleEvent),

@@ -100,7 +100,14 @@ export const layer = Layer.effect(
         // (Cancelling-wait is agent-agnostic in Runner.ensureRunning).
         // Session idle status is main-only (actors do not publish session idle).
         onIdle: isMain ? status.set(sessionID, { type: "idle" }) : Effect.void,
-        onBusy: isMain ? status.set(sessionID, { type: "busy" }) : Effect.void,
+        // Do not clobber session.status{retry} with busy: request-ladder retries
+        // re-enter the runner and would wipe the reconnect row mid-wait.
+        onBusy: isMain
+          ? Effect.gen(function* () {
+              const current = yield* status.get(sessionID)
+              if (current.type !== "retry") yield* status.set(sessionID, { type: "busy" })
+            })
+          : Effect.void,
         // Child executors must observe cancellation, not a stale assistant.
         onInterrupt: isMain ? onInterrupt : Effect.interrupt,
         busy: () => new Session.BusyError(sessionID),

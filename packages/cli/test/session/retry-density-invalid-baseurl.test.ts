@@ -275,10 +275,13 @@ describe("retry density instrumentation (upstream transport failure)", () => {
                 expect(upstream.hits[i]!.t - upstream.hits[i - 1]!.t).toBeGreaterThanOrEqual(waits[i - 1]! - 2)
               }
             }
-            expect(states).toHaveLength(phase === "request" ? 0 : 6)
+            // Request-phase ladders now publish session.status{retry} so Desktop can
+            // show the reconnect row instead of a dead spinner while the persistent
+            // server/network budget waits. Stream-phase ownership is unchanged.
+            expect(states).toHaveLength(6)
             for (const [i, state] of states.entries()) {
               expect(state.status).toMatchObject({
-                attempt: i + 1, phaseAttempt: i + 1, phase: "stream", scope: "live-step",
+                attempt: i + 1, phaseAttempt: i + 1, phase, scope: phase === "request" ? "request" : "live-step",
                 message: retries[i]!.reason,
               })
               expect(state.status.next - upstream.hits[i]!.t).toBeGreaterThanOrEqual(waits[i]!)

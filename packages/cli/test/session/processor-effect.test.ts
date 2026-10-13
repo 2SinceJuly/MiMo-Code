@@ -642,51 +642,55 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
-it.live("session.processor effect tests reset reasoning state across retries", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
+it.live(
+  "session.processor effect tests reset reasoning state across retries",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
 
-        yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+          yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
 
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "reason")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "reason")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
             sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies MessageV2.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "reason" }],
-          tools: {},
-        })
+            model: mdl,
+          })
 
-        const parts = MessageV2.parts(msg.id)
-        const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+          const value = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "reason" }],
+            tools: {},
+          })
 
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(reasoning.some((part) => part.text === "two")).toBe(true)
-        expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
-      }),
-    { git: true, config: (url) => providerCfg(url) },
-  ),
+          const parts = MessageV2.parts(msg.id)
+          const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+
+          expect(value).toBe("continue")
+          expect(yield* llm.calls).toBe(2)
+          expect(reasoning.some((part) => part.text === "two")).toBe(true)
+          expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
+        }),
+      { git: true, config: (url) => providerCfg(url) },
+    ),
+  // Connection-reset stream retry waits the network/stream backoff (~2–5s) before the second call.
+  15_000,
 )
 
 it.live("session.processor effect tests do not retry unknown json errors", () =>
@@ -843,10 +847,9 @@ it.live(
         expect(yield* llm.calls).toBe(3)
         // Recoverable kinds (network/rate_limit/server) use persistent budgets and
         // ignore phase=request / request.maxRetries. Both 503s are absorbed on the
-        // llm-side server ladder, so the processor never enters a stream-phase
-        // retry and does not publish session.status{retry} here. That is the
-        // intended density outcome: fewer UI frames, not more.
-        expect(states).toStrictEqual([])
+        // llm-side server ladder. Request-phase now publishes session.status{retry}
+        // so Desktop can show the reconnect row instead of a dead spinner.
+        expect(states).toStrictEqual([1, 2])
       }),
       {
         git: true,

@@ -4453,9 +4453,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           loopStreakCropped = false
           // F55: only main agent sets session status to busy; subagent runners
           // must not touch session-level status (Runner.onBusy is Effect.void
-          // for non-main actors per F47).
+          // for non-main actors per F47). Do not clobber an in-flight retry row.
           if (!agentID || agentID === "main") {
-            yield* status.set(sessionID, { type: "busy" })
+            const current = yield* status.get(sessionID)
+            if (current.type !== "retry") yield* status.set(sessionID, { type: "busy" })
           }
           if (!deferInbox) yield* inbox.drain(sessionID, agentID ?? "main").pipe(Effect.ignore)
           yield* slog.info("loop", { step })
