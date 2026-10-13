@@ -92,6 +92,19 @@ export type EventInboxArrived = {
   }
 }
 
+export type EventSessionReceiptUpdated = {
+  type: "session.receipt.updated"
+  properties: {
+    sessionID: string
+    receiptId: string
+    agentID: string
+    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
+    messageId?: string
+    epoch: number
+  }
+}
+
 export type EventTaskCreated = {
   type: "task.created"
   properties: {
@@ -423,6 +436,44 @@ export type EventMessagePartDelta = {
   }
 }
 
+export type SessionStatus =
+  | {
+      type: "idle"
+    }
+  | {
+      type: "retry"
+      attempt: number
+      phaseAttempt?: number
+      message: string
+      next: number
+      phase?: "request" | "stream"
+      scope?: "request" | "live-step" | "max-candidate" | "max-judge"
+      hostCode?: string
+    }
+  | {
+      type: "notice"
+      message: string
+    }
+  | {
+      type: "busy"
+      message?: string
+    }
+
+export type EventSessionStatus = {
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  type: "session.idle"
+  properties: {
+    sessionID: string
+  }
+}
+
 export type PermissionRequest = {
   id: string
   sessionID: string
@@ -473,6 +524,11 @@ export type ProviderAuthError = {
   data: {
     providerID: string
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -480,13 +536,22 @@ export type UnknownError = {
   name: "UnknownError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
 export type MessageOutputLengthError = {
   name: "MessageOutputLengthError"
   data: {
-    [key: string]: unknown
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -494,6 +559,11 @@ export type MessageAbortedError = {
   name: "MessageAbortedError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -502,6 +572,11 @@ export type StructuredOutputError = {
   data: {
     message: string
     retries: number
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -510,6 +585,11 @@ export type ContextOverflowError = {
   data: {
     message: string
     responseBody?: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -517,6 +597,11 @@ export type InvalidOutputError = {
   name: "InvalidOutputError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -524,6 +609,11 @@ export type TextToolCallError = {
   name: "TextToolCallError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -531,6 +621,11 @@ export type ContentFilterError = {
   name: "ContentFilterError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -538,6 +633,11 @@ export type ModelError = {
   name: "ModelError"
   data: {
     message: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
+    metadata?: {
+      [key: string]: string
+    }
   }
 }
 
@@ -551,6 +651,8 @@ export type ApiError = {
       [key: string]: string
     }
     responseBody?: string
+    hostCode?: string
+    hostRetryClass?: "terminal" | "persistent" | "bounded"
     metadata?: {
       [key: string]: string
     }
@@ -589,6 +691,7 @@ export type EventSessionRetryAttempt = {
     scope: "request" | "live-step" | "max-candidate" | "max-judge"
     reason: string
     nextDelayMs: number
+    hostCode?: string
   }
 }
 
@@ -767,43 +870,6 @@ export type EventBashInteractiveReplied = {
   }
 }
 
-export type SessionStatus =
-  | {
-      type: "idle"
-    }
-  | {
-      type: "retry"
-      attempt: number
-      phaseAttempt?: number
-      message: string
-      next: number
-      phase?: "request" | "stream"
-      scope?: "request" | "live-step" | "max-candidate" | "max-judge"
-    }
-  | {
-      type: "notice"
-      message: string
-    }
-  | {
-      type: "busy"
-      message?: string
-    }
-
-export type EventSessionStatus = {
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
 export type EventVcsBranchUpdated = {
   type: "vcs.branch.updated"
   properties: {
@@ -967,6 +1033,136 @@ export type EventWorkspaceStatus = {
   }
 }
 
+export type EventSessionTurnQueueDelta = {
+  type: "session.turn_queue.delta"
+  properties: {
+    sessionID: string
+    receipts?: Array<{
+      id: string
+      session_id: string
+      agent_id: string
+      state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+      intent:
+        | {
+            kind: "prompt"
+            messageID: string
+          }
+        | {
+            kind: "resume"
+            assistantID: string
+            plan: "user-resume" | "tool-resume"
+            expectedAssistantStatus?: string
+          }
+        | {
+            kind: "wake"
+            receiverActorID: string
+            inboxWatermark: string
+          }
+        | {
+            kind: "shell"
+            command: string
+            cwd?: string
+          }
+      epoch: number
+      run_id: number | null
+      claim_frontier: string | null
+      consumed: boolean
+      suspended: boolean
+      outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
+      message_id: string | null
+      delivery_message_id: string | null
+      error: string | null
+      idempotency_key: string
+      time_created: number
+      time_updated: number
+    }>
+    deletedReceiptIDs?: Array<string>
+    lanes?: Array<{
+      session_id: string
+      agent_id: string
+      consumed_frontier: string | null
+      input_revision: number
+      time_updated: number
+    }>
+    epoch?: {
+      session_id: string
+      epoch: number
+      time_updated: number
+    }
+    bootstrap?: {
+      session_id: string
+      message_ids: Array<string>
+      completed: boolean
+      time_updated: number
+    }
+  }
+}
+
+export type EventSessionTurnQueueSnapshot = {
+  type: "session.turn_queue.snapshot"
+  properties: {
+    version: 1
+    sessionID: string
+    receipts: Array<{
+      id: string
+      session_id: string
+      agent_id: string
+      state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+      intent:
+        | {
+            kind: "prompt"
+            messageID: string
+          }
+        | {
+            kind: "resume"
+            assistantID: string
+            plan: "user-resume" | "tool-resume"
+            expectedAssistantStatus?: string
+          }
+        | {
+            kind: "wake"
+            receiverActorID: string
+            inboxWatermark: string
+          }
+        | {
+            kind: "shell"
+            command: string
+            cwd?: string
+          }
+      epoch: number
+      run_id: number | null
+      claim_frontier: string | null
+      consumed: boolean
+      suspended: boolean
+      outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
+      message_id: string | null
+      delivery_message_id: string | null
+      error: string | null
+      idempotency_key: string
+      time_created: number
+      time_updated: number
+    }>
+    lanes: Array<{
+      session_id: string
+      agent_id: string
+      consumed_frontier: string | null
+      input_revision: number
+      time_updated: number
+    }>
+    epoch: {
+      session_id: string
+      epoch: number
+      time_updated: number
+    } | null
+    bootstrap: {
+      session_id: string
+      message_ids: Array<string>
+      completed: boolean
+      time_updated: number
+    } | null
+  }
+}
+
 export type OutputFormatText = {
   type: "text"
 }
@@ -1023,6 +1219,11 @@ export type UserMessage = {
     [key: string]: boolean
   }
   provenance?: Provenance
+  queueAdmission?: {
+    epoch: number
+    ready: true
+    dispatch: boolean
+  }
 }
 
 export type AssistantMessage = {
@@ -1486,6 +1687,144 @@ export type EventSessionDeleted = {
   }
 }
 
+export type SyncEventSessionTurnQueueDelta = {
+  type: "sync"
+  name: "session.turn_queue.delta.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    sessionID: string
+    receipts?: Array<{
+      id: string
+      session_id: string
+      agent_id: string
+      state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+      intent:
+        | {
+            kind: "prompt"
+            messageID: string
+          }
+        | {
+            kind: "resume"
+            assistantID: string
+            plan: "user-resume" | "tool-resume"
+            expectedAssistantStatus?: string
+          }
+        | {
+            kind: "wake"
+            receiverActorID: string
+            inboxWatermark: string
+          }
+        | {
+            kind: "shell"
+            command: string
+            cwd?: string
+          }
+      epoch: number
+      run_id: number | null
+      claim_frontier: string | null
+      consumed: boolean
+      suspended: boolean
+      outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
+      message_id: string | null
+      delivery_message_id: string | null
+      error: string | null
+      idempotency_key: string
+      time_created: number
+      time_updated: number
+    }>
+    deletedReceiptIDs?: Array<string>
+    lanes?: Array<{
+      session_id: string
+      agent_id: string
+      consumed_frontier: string | null
+      input_revision: number
+      time_updated: number
+    }>
+    epoch?: {
+      session_id: string
+      epoch: number
+      time_updated: number
+    }
+    bootstrap?: {
+      session_id: string
+      message_ids: Array<string>
+      completed: boolean
+      time_updated: number
+    }
+  }
+}
+
+export type SyncEventSessionTurnQueueSnapshot = {
+  type: "sync"
+  name: "session.turn_queue.snapshot.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    version: 1
+    sessionID: string
+    receipts: Array<{
+      id: string
+      session_id: string
+      agent_id: string
+      state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+      intent:
+        | {
+            kind: "prompt"
+            messageID: string
+          }
+        | {
+            kind: "resume"
+            assistantID: string
+            plan: "user-resume" | "tool-resume"
+            expectedAssistantStatus?: string
+          }
+        | {
+            kind: "wake"
+            receiverActorID: string
+            inboxWatermark: string
+          }
+        | {
+            kind: "shell"
+            command: string
+            cwd?: string
+          }
+      epoch: number
+      run_id: number | null
+      claim_frontier: string | null
+      consumed: boolean
+      suspended: boolean
+      outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
+      message_id: string | null
+      delivery_message_id: string | null
+      error: string | null
+      idempotency_key: string
+      time_created: number
+      time_updated: number
+    }>
+    lanes: Array<{
+      session_id: string
+      agent_id: string
+      consumed_frontier: string | null
+      input_revision: number
+      time_updated: number
+    }>
+    epoch: {
+      session_id: string
+      epoch: number
+      time_updated: number
+    } | null
+    bootstrap: {
+      session_id: string
+      message_ids: Array<string>
+      completed: boolean
+      time_updated: number
+    } | null
+  }
+}
+
 export type SyncEventMessageUpdated = {
   type: "sync"
   name: "message.updated.1"
@@ -1546,40 +1885,40 @@ export type SyncEventSessionUpdated = {
     sessionID: string
     previousRevision?: number
     info: {
-      id: string | null
-      slug: string | null
-      projectID: string | null
-      workspaceID: string | null
-      directory: string | null
-      parentID: string | null
-      contextFrom: string | null
-      contextWatermark: string | null
-      summary: {
+      id?: string | null
+      slug?: string | null
+      projectID?: string | null
+      workspaceID?: string | null
+      directory?: string | null
+      parentID?: string | null
+      contextFrom?: string | null
+      contextWatermark?: string | null
+      summary?: {
         additions: number
         deletions: number
         files: number
         diffs?: Array<SnapshotFileDiff>
       } | null
       share?: {
-        url: string | null
+        url?: string | null
       }
-      title: string | null
-      titleSource: "fallback" | "generated" | "user" | null
-      titleRevision: number | null
-      version: string | null
+      title?: string | null
+      titleSource?: "fallback" | "generated" | "user" | null
+      titleRevision?: number | null
+      version?: string | null
       time?: {
-        created: number | null
-        updated: number | null
-        compacting: number | null
-        archived: number | null
+        created?: number | null
+        updated?: number | null
+        compacting?: number | null
+        archived?: number | null
       }
-      permission: PermissionRuleset | null
-      prompt: {
+      permission?: PermissionRuleset | null
+      prompt?: {
         system?: string
         systemMode?: "append" | "replace-agent"
         harness: "auto" | "codex" | "default"
       } | null
-      revert: {
+      revert?: {
         messageID: string
         partID?: string
         snapshot?: string
@@ -1626,6 +1965,7 @@ export type GlobalEvent = {
     | EventActorStalled
     | EventWriterCachePerf
     | EventInboxArrived
+    | EventSessionReceiptUpdated
     | EventTaskCreated
     | EventTaskUpdated
     | EventTuiPromptAppend
@@ -1654,6 +1994,8 @@ export type GlobalEvent = {
     | EventInstallationUpdated
     | EventInstallationUpdateAvailable
     | EventMessagePartDelta
+    | EventSessionStatus
+    | EventSessionIdle
     | EventPermissionAsked
     | EventPermissionReplied
     | EventSessionDiff
@@ -1669,8 +2011,6 @@ export type GlobalEvent = {
     | EventSessionCwd
     | EventBashInteractiveAsked
     | EventBashInteractiveReplied
-    | EventSessionStatus
-    | EventSessionIdle
     | EventVcsBranchUpdated
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
@@ -1688,6 +2028,8 @@ export type GlobalEvent = {
     | EventWorkspaceFailed
     | EventWorkspaceRestore
     | EventWorkspaceStatus
+    | EventSessionTurnQueueDelta
+    | EventSessionTurnQueueSnapshot
     | EventMessageUpdated
     | EventMessageRemoved
     | EventMessagePartUpdated
@@ -1695,6 +2037,8 @@ export type GlobalEvent = {
     | EventSessionUpdated
     | EventSessionCreated
     | EventSessionDeleted
+    | SyncEventSessionTurnQueueDelta
+    | SyncEventSessionTurnQueueSnapshot
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
@@ -1977,6 +2321,9 @@ export type ProviderConfig = {
       maxDelayMs?: number
       jitterRatio?: number
     }
+    /**
+     * Session network recovery is always persistent with no retry count or elapsed-time limit; only delay and jitter fields are configurable. Max-mode uses its own scope budgets.
+     */
     network?: {
       /**
        * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
@@ -2435,6 +2782,9 @@ export type Config = {
       maxDelayMs?: number
       jitterRatio?: number
     }
+    /**
+     * Session network recovery is always persistent with no retry count or elapsed-time limit; only delay and jitter fields are configurable. Max-mode uses its own scope budgets.
+     */
     network?: {
       /**
        * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
@@ -3229,6 +3579,7 @@ export type Event =
   | EventActorStalled
   | EventWriterCachePerf
   | EventInboxArrived
+  | EventSessionReceiptUpdated
   | EventTaskCreated
   | EventTaskUpdated
   | EventTuiPromptAppend
@@ -3257,6 +3608,8 @@ export type Event =
   | EventInstallationUpdated
   | EventInstallationUpdateAvailable
   | EventMessagePartDelta
+  | EventSessionStatus
+  | EventSessionIdle
   | EventPermissionAsked
   | EventPermissionReplied
   | EventSessionDiff
@@ -3272,8 +3625,6 @@ export type Event =
   | EventSessionCwd
   | EventBashInteractiveAsked
   | EventBashInteractiveReplied
-  | EventSessionStatus
-  | EventSessionIdle
   | EventVcsBranchUpdated
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
@@ -3291,6 +3642,8 @@ export type Event =
   | EventWorkspaceFailed
   | EventWorkspaceRestore
   | EventWorkspaceStatus
+  | EventSessionTurnQueueDelta
+  | EventSessionTurnQueueSnapshot
   | EventMessageUpdated
   | EventMessageRemoved
   | EventMessagePartUpdated
@@ -3439,6 +3792,28 @@ export type GlobalEventResponses = {
 }
 
 export type GlobalEventResponse = GlobalEventResponses[keyof GlobalEventResponses]
+
+export type GlobalConfigStatusData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+  }
+  url: "/global/config/status"
+}
+
+export type GlobalConfigStatusResponses = {
+  /**
+   * Directory configuration generation
+   */
+  200: {
+    state: "pending" | "applied"
+    requested: number
+    applied: number
+  }
+}
+
+export type GlobalConfigStatusResponse = GlobalConfigStatusResponses[keyof GlobalConfigStatusResponses]
 
 export type GlobalConfigGetData = {
   body?: never
@@ -5024,7 +5399,9 @@ export type SessionForkResponses = {
 export type SessionForkResponse = SessionForkResponses[keyof SessionForkResponses]
 
 export type SessionAbortData = {
-  body?: never
+  body?: {
+    queuedPolicy?: "drop" | "keep-suspended"
+  }
   path: {
     sessionID: string
   }
@@ -5052,7 +5429,10 @@ export type SessionAbortResponses = {
   /**
    * Aborted session
    */
-  200: boolean
+  200: {
+    ok: boolean
+    epoch: number
+  }
 }
 
 export type SessionAbortResponse = SessionAbortResponses[keyof SessionAbortResponses]
@@ -5336,10 +5716,6 @@ export type SessionPromptErrors = {
    * Not found
    */
   404: NotFoundError
-  /**
-   * Conflict — session resource is busy
-   */
-  409: ConflictError
 }
 
 export type SessionPromptError = SessionPromptErrors[keyof SessionPromptErrors]
@@ -5352,6 +5728,18 @@ export type SessionPromptResponses = {
     info: AssistantMessage
     parts: Array<Part>
   }
+  /**
+   * Queued (busy) — durable receipt; poll GET /receipt/:id
+   */
+  202: {
+    info: UserMessage
+    parts: Array<Part>
+    receiptId: string
+  }
+  /**
+   * No user turn admitted
+   */
+  204: void
 }
 
 export type SessionPromptResponse = SessionPromptResponses[keyof SessionPromptResponses]
@@ -5709,12 +6097,59 @@ export type SessionPromptAsyncError = SessionPromptAsyncErrors[keyof SessionProm
 
 export type SessionPromptAsyncResponses = {
   /**
-   * Prompt accepted
+   * Accepted — durable receipt
+   */
+  202: {
+    receiptId: string
+  }
+  /**
+   * No user turn admitted
    */
   204: void
 }
 
 export type SessionPromptAsyncResponse = SessionPromptAsyncResponses[keyof SessionPromptAsyncResponses]
+
+export type SessionReceiptData = {
+  body?: never
+  path: {
+    sessionID: string
+    receiptId: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/receipt/{receiptId}"
+}
+
+export type SessionReceiptErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionReceiptError = SessionReceiptErrors[keyof SessionReceiptErrors]
+
+export type SessionReceiptResponses = {
+  /**
+   * Receipt
+   */
+  200: {
+    id: string
+    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
+    messageId?: string
+    error?: string
+  }
+}
+
+export type SessionReceiptResponse = SessionReceiptResponses[keyof SessionReceiptResponses]
 
 export type SessionCommandData = {
   body?: {
@@ -6715,6 +7150,69 @@ export type SyncReplayData = {
         [key: string]: unknown
       }
     }>
+    queueSnapshot?: {
+      version: 1
+      sessionID: string
+      receipts: Array<{
+        id: string
+        session_id: string
+        agent_id: string
+        state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+        intent:
+          | {
+              kind: "prompt"
+              messageID: string
+            }
+          | {
+              kind: "resume"
+              assistantID: string
+              plan: "user-resume" | "tool-resume"
+              expectedAssistantStatus?: string
+            }
+          | {
+              kind: "wake"
+              receiverActorID: string
+              inboxWatermark: string
+            }
+          | {
+              kind: "shell"
+              command: string
+              cwd?: string
+            }
+        epoch: number
+        run_id: number | null
+        claim_frontier: string | null
+        consumed: boolean
+        suspended: boolean
+        outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
+        message_id: string | null
+        delivery_message_id: string | null
+        error: string | null
+        idempotency_key: string
+        time_created: number
+        time_updated: number
+      }>
+      lanes: Array<{
+        session_id: string
+        agent_id: string
+        consumed_frontier: string | null
+        input_revision: number
+        time_updated: number
+      }>
+      epoch: {
+        session_id: string
+        epoch: number
+        time_updated: number
+      } | null
+      bootstrap: {
+        session_id: string
+        message_ids: Array<string>
+        completed: boolean
+        time_updated: number
+      } | null
+    }
+    finalSeq?: number
+    workspaceID?: string
   }
   path?: never
   query?: {
@@ -6729,6 +7227,10 @@ export type SyncReplayErrors = {
    * Bad request
    */
   400: BadRequestError
+  /**
+   * Conflict — session resource is busy
+   */
+  409: ConflictError
 }
 
 export type SyncReplayError = SyncReplayErrors[keyof SyncReplayErrors]
