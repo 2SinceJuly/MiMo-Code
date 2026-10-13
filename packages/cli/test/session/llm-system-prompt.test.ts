@@ -590,22 +590,20 @@ describe("session.llm system prompt — memory-instructions guard", () => {
 // requests with no per-conversation ID (400 MissingSessionID) from 09/05.
 // Only Go targets get the extra header; other providers stay unchanged.
 describe("session.llm outbound headers", () => {
-  test("isOpenCodeGoTarget matches provider id and zen/go URL (model or provider options)", () => {
-    const shape = (providerID: string, url: string, modelOptions: Record<string, unknown> = {}) =>
-      ({ providerID, api: { id: "m", url, npm: "@ai-sdk/openai-compatible" }, options: modelOptions }) as Parameters<
+  test("isOpenCodeGoTarget uses identity or effective baseURL (provider.options.baseURL ?? model.api.url)", () => {
+    const shape = (providerID: string, url: string) =>
+      ({ providerID, api: { id: "m", url, npm: "@ai-sdk/openai-compatible" }, options: {} }) as Parameters<
         typeof isOpenCodeGoTarget
       >[0]
     expect(isOpenCodeGoTarget(shape("opencode-go", ""))).toBe(true)
     expect(isOpenCodeGoTarget(shape("opencode-go-chat", ""))).toBe(true)
+    // effective URL = provider.options.baseURL when set, else model.api.url
     expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"))).toBe(true)
-    expect(isOpenCodeGoTarget(shape("oc", "", { baseURL: "https://opencode.ai/zen/go/v1" }))).toBe(true)
-    // CRITICAL gap from review: provider-level options.baseURL (TUI / custom config)
-    // never lands on Provider.Model — must be passed in separately.
-    expect(isOpenCodeGoTarget(shape("oc", ""), { baseURL: "https://opencode.ai/zen/go/v1" })).toBe(true)
-    expect(isOpenCodeGoTarget(shape("oc", ""), { baseUrl: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", "https://elsewhere.example/v1"), { baseURL: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    // provider.options.baseURL wins over model.api.url — same as resolveSDK
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"), { baseURL: "https://proxy.example/v1" })).toBe(false)
     expect(isOpenCodeGoTarget(shape("alibaba", "https://dashscope.aliyuncs.com"))).toBe(false)
     expect(isOpenCodeGoTarget(shape("opencode", "https://opencode.ai/zen/v1"))).toBe(false)
-    expect(isOpenCodeGoTarget(shape("oc", "https://proxy.example/v1"), { baseURL: "https://proxy.example/v1" })).toBe(false)
   })
 
   test("openCodeGoSessionHeaders only emits for Go targets with a sessionID", () => {

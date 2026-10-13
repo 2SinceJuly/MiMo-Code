@@ -33,9 +33,9 @@ Only requests that target **OpenCode Go** gain the extra header. Every other pro
 `isOpenCodeGoTarget(model, providerOptions?)` is true when either:
 
 1. `model.providerID` starts with `opencode-go` (covers `opencode-go`, `opencode-go-chat`), or
-2. any of `model.api.url` / `model.options.baseURL|baseUrl` / **`providerOptions.baseURL|baseUrl`** contains `opencode.ai/zen/go`.
+2. `effectiveBaseURL(model, providerOptions)` contains `opencode.ai/zen/go`.
 
-`providerOptions` is `Provider.Info.options` (the config `provider.<id>.options` map). This matters: the TUI dialog and custom configs commonly set **only** `provider.options.baseURL` to the Go gateway — that value is resolved inside `resolveSDK` and never lands on `Provider.Model`, so model-only detection misses the standard setup. `session/llm.ts` `stream()` passes `item.options` from `provider.getProvider()`.
+`effectiveBaseURL` lives in `provider/provider.ts` and is the **same precedence `resolveSDK` uses** to pick the request URL: non-empty `provider.options.baseURL` wins, else `model.api.url`. Do not list more config fields in the Go helper — if URL resolution changes, fix `effectiveBaseURL`. (`options.endpoint` is already folded into `options.baseURL` at config load.)
 
 On matching requests from `session/llm.ts` `stream()` that have a `sessionID`:
 

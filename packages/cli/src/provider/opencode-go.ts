@@ -1,3 +1,4 @@
+import { effectiveBaseURL } from "./provider"
 import type { Model } from "./provider"
 
 /**
@@ -5,9 +6,11 @@ import type { Model } from "./provider"
  * no stable per-conversation `x-opencode-session` (400 MissingSessionID) since
  * 2026-09-05. Only that gateway requires the header.
  *
- * Detection must see BOTH the model and the provider-level options: a custom
- * provider often points at Go only via `provider.options.baseURL` (the TUI
- * dialog writes exactly that), and that value never lands on `Provider.Model`.
+ * Target detection is identity **or** the effective request base URL (same
+ * precedence as `resolveSDK` / `Provider.effectiveBaseURL`): `opencode-go*`
+ * provider ids, or any URL whose effective base contains `opencode.ai/zen/go`.
+ * Do not add more field names here — fix `effectiveBaseURL` if the request URL
+ * resolution changes.
  */
 export function isOpenCodeGoTarget(
   model: Pick<Model, "providerID" | "api" | "options">,
@@ -15,15 +18,7 @@ export function isOpenCodeGoTarget(
 ): boolean {
   const providerID = String(model.providerID ?? "")
   if (providerID.startsWith("opencode-go")) return true
-  const options = model.options as { baseURL?: unknown; baseUrl?: unknown } | undefined
-  const candidates = [
-    model.api?.url,
-    options?.baseURL,
-    options?.baseUrl,
-    providerOptions?.baseURL,
-    providerOptions?.baseUrl,
-  ]
-  return candidates.some((url) => typeof url === "string" && url.includes("opencode.ai/zen/go"))
+  return (effectiveBaseURL(model, providerOptions) ?? "").includes("opencode.ai/zen/go")
 }
 
 /**
