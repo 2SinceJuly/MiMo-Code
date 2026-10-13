@@ -27,7 +27,7 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Effect, Exit, Layer, Option, Context, Stream, Semaphore } from "effect"
+import { Deferred, Effect, Exit, Layer, Option, Context, Stream, Semaphore } from "effect"
 import { HostMcp } from "./host"
 import { ManagedClient } from "./managed-client"
 import { EffectBridge } from "@/effect"
@@ -40,6 +40,8 @@ import { SessionID } from "@/session/schema"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
+/** How long `MCP.tools()` waits for startup connections before returning what is ready. */
+const FIRST_TURN_WAIT = 3_000
 
 /**
  * Host entries fully replace the user record for that name. When the host omits
@@ -473,6 +475,8 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  /** Completes once every startup connection attempt has finished (success or not). */
+  settled: Deferred.Deferred<void>
 }
 
 export interface Interface {
@@ -827,48 +831,12 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          settled: yield* Deferred.make<void>(),
         }
 
-        yield* Effect.forEach(
-          Object.entries(config),
-          ([key, mcp]) =>
-            Effect.gen(function* () {
-              if (!isMcpConfigured(mcp)) {
-                log.error("Ignoring MCP config entry without type", { key })
-                return
-              }
-
-              if (mcp.enabled === false) {
-                s.status[key] = { status: "disabled" }
-                return
-              }
-
-              const fromHost = key in host
-              const hostRevision = hostRevisions.get(key)
-              const result = yield* create(key, mcp, { fromHost, hostRevision }).pipe(Effect.catch(() => Effect.void))
-              if (!result) return
-
-              if (result.mcpClient) {
-                // Status is written only on successful admit/commit (R013).
-                // Pre-writing connected would survive a reject-stale discard.
-                yield* storeClient(
-                  s,
-                  key,
-                  result.mcpClient,
-                  result.defs!,
-                  mcp.timeout,
-                  hostEffectiveSampling(mcp, fromHost),
-                  { fromHost, hostRevision },
-                )
-                return
-              }
-
-              s.status[key] = result.status
-              if (fromHost && result.status.status === "failed") s.hostRetryAt[key] = Date.now() + 5000
-            }),
-          { concurrency: "unbounded" },
-        )
-
+        // Registered before the connection fiber is forked: finalizers run in
+        // reverse order, so in-flight connections are interrupted first and this
+        // then closes whatever they managed to store.
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             yield* Effect.forEach(
@@ -893,9 +861,80 @@ export const layer = Layer.effect(
           }),
         )
 
+        for (const [key, mcp] of Object.entries(config)) {
+          if (isMcpConfigured(mcp) && mcp.enabled !== false) s.status[key] = { status: "pending" }
+        }
+
+        // Connect in the background so state initialization (and therefore the
+        // first prompt) never waits on the slowest server. `settled` completes
+        // once every attempt has finished; `tools()` waits on it with a bound.
+        const scope = yield* Effect.scope
+        yield* Effect.forEach(
+          Object.entries(config),
+          ([key, mcp]) =>
+            Effect.gen(function* () {
+              if (!isMcpConfigured(mcp)) {
+                log.error("Ignoring MCP config entry without type", { key })
+                return
+              }
+
+              if (mcp.enabled === false) {
+                s.status[key] = { status: "disabled" }
+                return
+              }
+
+              const fromHost = key in host
+              const hostRevision = hostRevisions.get(key)
+              const result = yield* create(key, mcp, { fromHost, hostRevision }).pipe(Effect.catch(() => Effect.void))
+              if (!result) return
+
+              if (result.mcpClient) {
+                // Status is written only on successful admit/commit (R013).
+                // Pre-writing connected would survive a reject-stale discard.
+                // Uninterruptible so a connected client is never orphaned
+                // between creation and registration.
+                yield* Effect.uninterruptible(
+                  storeClient(
+                    s,
+                    key,
+                    result.mcpClient,
+                    result.defs!,
+                    mcp.timeout,
+                    hostEffectiveSampling(mcp, fromHost),
+                    { fromHost, hostRevision },
+                  ),
+                )
+                return
+              }
+
+              s.status[key] = result.status
+              if (fromHost && result.status.status === "failed") s.hostRetryAt[key] = Date.now() + 5000
+            }).pipe(
+              // A rejected or errored attempt writes no status; drop the
+              // placeholder so it reads as before (absent) rather than pending forever.
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (s.status[key]?.status === "pending") delete s.status[key]
+                }),
+              ),
+            ),
+          { concurrency: "unbounded", discard: true },
+        ).pipe(
+          Effect.ensuring(Deferred.succeed(s.settled, undefined)),
+          Effect.forkIn(scope, { startImmediately: true }),
+        )
+
         return s
       }),
     )
+
+    // Every accessor except `tools()` observes the fully settled state, so
+    // connect/disconnect/add never race the background startup connections.
+    const getState = Effect.fnUntraced(function* () {
+      const s = yield* InstanceState.get(state)
+      yield* Deferred.await(s.settled)
+      return s
+    })
 
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
@@ -1031,7 +1070,7 @@ export const layer = Layer.effect(
     })
 
     const status = Effect.fn("MCP.status")(function* () {
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* refreshHost(s)
 
       const cfg = yield* cfgSvc.get()
@@ -1049,7 +1088,7 @@ export const layer = Layer.effect(
     const clients = Effect.fn("MCP.clients")(function* (context?: TurnContext) {
       if (context)
         return Object.fromEntries([...(turnClients.get(context) ?? [])].map(([client, entry]) => [entry.name, client]))
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* refreshHost(s)
       return s.clients
     })
@@ -1062,7 +1101,7 @@ export const layer = Layer.effect(
     ) {
       // Prefer revision captured at the config-resolution boundary (R006).
       const hostRevision = opts?.hostRevision ?? (HostMcp.get()[name] ? HostMcp.revisionOf(name) : undefined)
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       const result = yield* create(name, mcp, {
         fromHost: opts?.fromHost === true,
         hostRevision,
@@ -1107,12 +1146,12 @@ export const layer = Layer.effect(
       // User/SDK add must not replace or re-enable a host-owned entry.
       if (HostMcp.get()[name] != null) {
         log.error("MCP name is host-owned; add refused", { name })
-        const s = yield* InstanceState.get(state)
+        const s = yield* getState()
         // Return the real current status — do not fabricate "disabled".
         return { status: { ...s.status, [name]: s.status[name] ?? { status: "disabled" as const } } }
       }
       yield* createAndStore(name, mcp, undefined, { fromHost: false })
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       return { status: s.status }
     })
 
@@ -1138,7 +1177,7 @@ export const layer = Layer.effect(
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* closeClient(s, name)
       delete s.clients[name]
       // Explicit disconnect supersedes any host-refresh cooldown; do not auto-revive.
@@ -1149,6 +1188,20 @@ export const layer = Layer.effect(
     const tools = Effect.fn("MCP.tools")(function* (context?: TurnContext) {
       const result: Record<string, Tool> = {}
       const s = yield* InstanceState.get(state)
+      // Bounded wait: a slow or hung server must not hold the turn hostage. Servers
+      // still connecting are left out of this call and picked up by a later one
+      // (the prompt loop resolves tools every step and announces the delta).
+      const settled = yield* Deferred.await(s.settled).pipe(
+        Effect.timeoutOption(FIRST_TURN_WAIT),
+        Effect.map(Option.isSome),
+      )
+      if (!settled) {
+        log.info("MCP servers still connecting; continuing without them", {
+          pending: Object.entries(s.status)
+            .filter(([, status]) => status.status === "pending")
+            .map(([name]) => name),
+        })
+      }
       yield* refreshHost(s)
 
       const cfg = yield* cfgSvc.get()
@@ -1211,13 +1264,13 @@ export const layer = Layer.effect(
     }
 
     const prompts = Effect.fn("MCP.prompts")(function* () {
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* refreshHost(s)
       return yield* collectFromConnected(s, (c) => c.listPrompts().then((r) => r.prompts), "prompts")
     })
 
     const resources = Effect.fn("MCP.resources")(function* () {
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* refreshHost(s)
       return yield* collectFromConnected(s, (c) => c.listResources().then((r) => r.resources), "resources")
     })
@@ -1228,7 +1281,7 @@ export const layer = Layer.effect(
       label: string,
       meta?: Record<string, unknown>,
     ) {
-      const s = yield* InstanceState.get(state)
+      const s = yield* getState()
       yield* refreshHost(s)
       const client = s.clients[clientName]
       if (!client) {
@@ -1376,7 +1429,7 @@ export const layer = Layer.effect(
           return { status: "failed", error: "Failed to get tools" } as Status
         }
 
-        const s = yield* InstanceState.get(state)
+        const s = yield* getState()
         yield* auth.clearOAuthState(mcpName)
         return yield* storeClient(
           s,
