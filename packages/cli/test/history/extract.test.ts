@@ -108,7 +108,7 @@ test("every declared part variant has an explicit indexing decision", () => {
   }
 })
 
-// [search-history-fts] kind is write-side classification for consumers (desktop search).
+// kind is write-side classification for consumers outside History.search.
 // History.search must NOT expose a kind filter (see tool/history.test.ts "search schema has no content-type filter").
 describe("history.extract kind classification", () => {
   test("text kind follows message role", () => {

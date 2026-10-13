@@ -1,4 +1,4 @@
--- Restore content classification on history_fts for consumers (desktop search).
+-- Restore content classification on history_fts for consumers outside History.search.
 -- History.search does not filter on kind; this column is write-side metadata only.
 -- Existing rows get a placeholder; index rebuild rewrites kind via extract().
 ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT '';--> statement-breakpoint

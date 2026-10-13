@@ -3,7 +3,7 @@ import type { MessageV2 } from "../session/message-v2"
 
 /**
  * Content classification for `history_fts.kind`.
- * Consumers (desktop search) filter on this column; History.search does not accept kind.
+ * Consumers may filter on this column; History.search does not accept kind.
  */
 export type Kind =
   | "user_text"
@@ -85,8 +85,8 @@ export function extract(
   messageRole: "user" | "assistant",
   opts?: { summary?: boolean },
 ): Extracted | null {
-  // Index ALL content for History.search (shared tool contract). Desktop
-  // visibility is enforced at query time via kind + projection semantics (C10).
+  // Index ALL content for History.search (shared tool contract). Visibility
+  // for other consumers is enforced at query time via kind + projection semantics.
   void opts
   const raw = extractRaw(part, messageRole, opts)
   if (!raw) return null
