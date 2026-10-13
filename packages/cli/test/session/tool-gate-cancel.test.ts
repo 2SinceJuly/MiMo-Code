@@ -309,6 +309,14 @@ function settlementConfig(origin: string): Partial<Config.Info> {
 // [TP-SR-R21-32]
 for (const isError of [false, true]) {
   it.live(`Stop in MCP after hook retains the actual result and attachments (isError=${isError})`, () => Effect.gen(function* () {
+    // The scripted model calls the MCP tool directly; tool-search deferral would
+    // reject it before tool.execute.after runs.
+    const previousSearch = process.env.MIMOCODE_MCP_TOOL_SEARCH
+    process.env.MIMOCODE_MCP_TOOL_SEARCH = "false"
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (previousSearch === undefined) delete process.env.MIMOCODE_MCP_TOOL_SEARCH
+      else process.env.MIMOCODE_MCP_TOOL_SEARCH = previousSearch
+    }))
     const mcp = new McpServer({ name: "settlement", version: "1" })
     let calls = 0
     mcp.registerTool("probe", { description: "Return an actual MCP observation", inputSchema: {} }, async () => {
