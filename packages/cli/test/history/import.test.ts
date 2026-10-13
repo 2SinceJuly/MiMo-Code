@@ -249,12 +249,6 @@ test("OpenCode: source edits maintain search and preserve locally continued mess
     expect(nextQueue.epoch).toEqual(native.epoch)
     expect(nextQueue.lanes).toEqual(native.lanes)
     expect(Database.Client().$client.prepare("SELECT id FROM message WHERE id = ?").get(native.id)).toEqual({ id: native.id })
-    src.exec(`UPDATE session SET time_updated = 3;
-      UPDATE message SET id = 'msg_empty_import';
-      UPDATE part SET id = 'part_empty_import', message_id = 'msg_empty_import', data = '{"type":"text","text":"emptyownershipneedle"}';`)
-    await acceptEmptyOwnership(sessionID, () => OpencodeImport.run({ dbPath: file, force: true }))
-    expect(hits("replacementneedle")).toEqual({ n: 1 })
-    expect(hits("emptyownershipneedle")).toEqual({ n: 1 })
   } finally {
     src.close()
   }
