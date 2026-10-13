@@ -13,7 +13,7 @@ import type { Model } from "./provider"
  * resolution changes.
  */
 export function isOpenCodeGoTarget(
-  model: Pick<Model, "providerID" | "api" | "options">,
+  model: Pick<Model, "providerID" | "api">,
   providerOptions?: Record<string, unknown> | undefined,
 ): boolean {
   const providerID = String(model.providerID ?? "")
@@ -27,7 +27,7 @@ export function isOpenCodeGoTarget(
  * gateway would 400 either way; inventing an ID here would mis-route cache).
  */
 export function openCodeGoSessionHeaders(
-  model: Pick<Model, "providerID" | "api" | "options">,
+  model: Pick<Model, "providerID" | "api">,
   sessionID: string | undefined,
   providerOptions?: Record<string, unknown> | undefined,
 ): Record<string, string> {

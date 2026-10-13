@@ -1,14 +1,25 @@
 ---
 feature: opencode-go-session-header
-status: in-progress
+status: delivered
 updated: 2026-10-12
 branch: fix/opencode-session-header
-commits: 
+commits: c7dbd85d..bc0cfd9a
 ---
 
 # OpenCode Go Session Header
 
 ## Report
+
+**What was built** — OpenCode Go inference through `session/llm.ts` `stream()` now sends `x-opencode-session: <sessionID>` (same stable per-conversation id as `x-session-affinity`), including ephemeral title/summary. Non-Go providers are untouched. Target detection is `providerID` starting with `opencode-go` **or** `Provider.effectiveBaseURL` containing `opencode.ai/zen/go`; `effectiveBaseURL` is the single source of request-URL precedence (`provider.options.baseURL` ?? `model.api.url`) and `resolveSDK` reuses it.
+
+**Verification** — `bun test` session/llm* (llm, llm-retry, llm-system-prompt, llm-request-prefix) → 50 pass / 2 skip / 0 fail. `bun run typecheck` → PASS. Removing the header or dropping `providerOptions` from detection fails the new tests. Review 1 found CRITICAL (provider-level `options.baseURL` missed) → fixed by `effectiveBaseURL` + `getProvider().options`. Review 2: all ACs met, no CRITICAL.
+
+**Journey log** —
+1. First draft sent the header on every provider; user required Go-only so non-Go stays byte-identical.
+2. Field-list detection (`model.api.url` / `model.options` / `provider.options`) was brittle — replaced by `effectiveBaseURL` matching `resolveSDK` precedence.
+3. Ephemeral title still has a real `sessionID`; OpenCode Go 400s title/summary without the header, so the header is not gated on `!ephemeral` (unlike affinity).
+4. Non-`stream()` inference paths (`predict`, `goal`, `agent.generate`, `llm-server`, `mcp/sampling`) are intentionally unwired — operator configuration if pointed at Go.
+5. Integration tests key off `providerID="opencode-go"`; they do not prove `item.options` is threaded (unit matrix covers the helper contract).
 
 ## [S1] Problem
 
@@ -71,5 +82,5 @@ The header is set in the single `stream()` headers object for matching models, s
 
 ## Tasks
 
-- [ ] T1: Send `x-opencode-session` on OpenCode Go requests only (including ephemeral) — acceptance: unit test for `isOpenCodeGoModel`; integration shows Go non-ephemeral carries `x-opencode-session` == sessionID next to `x-session-affinity`; Go ephemeral carries `x-opencode-session` and omits `x-session-affinity`; non-Go carries neither change (`x-opencode-session` null, affinity unchanged). (covers: S2)
-- [ ] T2: Regression test + typecheck/lint — acceptance: new tests fail if the header is removed or scoped wrong; `bun run typecheck` and targeted `bun test` for `session/llm*` pass. (covers: S2; depends: T1)
+- [x] T1: Send `x-opencode-session` on OpenCode Go requests only (including ephemeral) — acceptance: unit test for `isOpenCodeGoTarget`; integration shows Go non-ephemeral carries `x-opencode-session` == sessionID next to `x-session-affinity`; Go ephemeral carries `x-opencode-session` and omits `x-session-affinity`; non-Go carries neither change (`x-opencode-session` null, affinity unchanged). (covers: S2)
+- [x] T2: Regression test + typecheck/lint — acceptance: new tests fail if the header is removed or scoped wrong; `bun run typecheck` and targeted `bun test` for `session/llm*` pass. (covers: S2; depends: T1)

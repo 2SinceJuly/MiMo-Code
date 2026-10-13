@@ -592,9 +592,10 @@ describe("session.llm system prompt — memory-instructions guard", () => {
 describe("session.llm outbound headers", () => {
   test("isOpenCodeGoTarget uses identity or effective baseURL (provider.options.baseURL ?? model.api.url)", () => {
     const shape = (providerID: string, url: string) =>
-      ({ providerID, api: { id: "m", url, npm: "@ai-sdk/openai-compatible" }, options: {} }) as Parameters<
-        typeof isOpenCodeGoTarget
-      >[0]
+      ({
+        providerID,
+        api: { id: "m", url, npm: "@ai-sdk/openai-compatible" },
+      }) as unknown as Parameters<typeof isOpenCodeGoTarget>[0]
     expect(isOpenCodeGoTarget(shape("opencode-go", ""))).toBe(true)
     expect(isOpenCodeGoTarget(shape("opencode-go-chat", ""))).toBe(true)
     // effective URL = provider.options.baseURL when set, else model.api.url
@@ -607,8 +608,14 @@ describe("session.llm outbound headers", () => {
   })
 
   test("openCodeGoSessionHeaders only emits for Go targets with a sessionID", () => {
-    const go = { providerID: "opencode-go" as never, api: { id: "m", url: "", npm: "" }, options: {} }
-    const other = { providerID: "alibaba" as never, api: { id: "m", url: "https://x", npm: "" }, options: {} }
+    const go = {
+      providerID: "opencode-go",
+      api: { id: "m", url: "", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
+    const other = {
+      providerID: "alibaba",
+      api: { id: "m", url: "https://x", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
     expect(openCodeGoSessionHeaders(go, "ses_1")).toEqual({ "x-opencode-session": "ses_1" })
     expect(openCodeGoSessionHeaders(go, "")).toEqual({})
     expect(openCodeGoSessionHeaders(go, undefined)).toEqual({})
