@@ -891,7 +891,7 @@ export const layer: Layer.Layer<
           error: ctx.assistantMessage.error,
         })
         // Do NOT status.set(idle) here. halt runs before cleanup and the outer
-        // work ensuring (orphan sweep). Publishing idle first lets the Desktop
+        // work ensuring (orphan sweep). Publishing idle first lets the client
         // finish/unsubscribe, then the sweep's part.updated lands on the NEXT
         // turn's subscription (RL-ORPHAN-D01). Idle is published by
         // SessionRunState onIdle after the work Effect (including ensuring)

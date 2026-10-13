@@ -838,7 +838,7 @@ export const layer = Layer.effect(
       // R14 terminal inline: quiet abort still persists cancelled notifications
       // (wake:false skips auto-fork only). Drain parent main inbox NOW so those
       // rows become synthetic <actor-notification> message parts on the parent
-      // session — desktop live/history both read that part for the terminal pill.
+      // session — client live and history both read that part for the terminal pill.
       // drain does NOT start an LLM turn.
       yield* inbox.drain(sessionID, "main").pipe(Effect.ignore)
     })
@@ -3170,7 +3170,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       )
 
       // User-provided images: provenance envelope (synthetic, not tool fiction).
-      // Insert immediately before the first non-synthetic, non-ignored user content so Desktop
+      // Insert immediately before the first non-synthetic, non-ignored user content so client
       // system-reminders / ignored text cannot sit between "## My request:" and the user's text.
       // Predicate excludes MCP resource sources and synthetic parts (isUserAttachmentImagePart).
       const userImages = parts.filter((part): part is Extract<MessageV2.Part, { type: "file" }> =>
@@ -3396,7 +3396,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     // Sweep orphan tool parts on the busy→idle edge, not only at the next prompt
     // entry. A tool whose abort finalizer was skipped (crash / process kill /
     // registration race) stays `running` in the DB after a natural turn end; the
-    // Desktop UI settles that step as `completed` so the user sees nothing, then
+    // The client UI settles that step as `completed` so the user sees nothing, then
     // the next prompt's entry sweep emits `Tool execution aborted` into the NEW
     // turn's stream. Cleaning on idle closes that window.
     // Wired via module ref: SessionRunState main-work ensuring invokes the
@@ -3477,7 +3477,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           agentID: input.agentID ?? "main",
           task_id: input.task_id,
           titleLocale: input.titleLocale,
-          // Trusted user-facing protocol: Desktop/TUI/HTTP/command omit source → user.
+          // Trusted user-facing protocol: client, TUI, HTTP, or command omitting source → user.
           // Internal callers must pass explicit non-user source (spawn/hook).
           source: input.source ?? "user",
           deferInbox: (input.source ?? "user") === "hook" && input.agentID !== undefined && input.agentID !== "main",

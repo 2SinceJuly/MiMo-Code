@@ -512,7 +512,7 @@ export const HookProvenance = z
 export type HookProvenance = z.infer<typeof HookProvenance>
 
 /**
- * Root-session machine/host envelope (desktop automation, system, scheduled host).
+ * Root-session machine/host envelope (host automation, system, scheduled host).
  * Present provenance on source=hook allows non-text parts and does not force
  * text parts synthetic; absence still fail-closes those checks.
  */
@@ -1653,7 +1653,7 @@ function fromErrorCore(
         ...response,
       }, { cause: original }).toObject()
       // 字符串直接用原文:JSON.stringify("Internal Server Error") 会多包一层引号,
-      // 让 SessionRetry/desktop isOpaqueError 精确匹配失效,错误卡把带引号原文吐给用户。
+      // 让 SessionRetry and client isOpaqueError 精确匹配失效,错误卡把带引号原文吐给用户。
       // 对象仍 stringify 保诊断;undefined/null 走 String()。
       const message =
         typeof e === "string"

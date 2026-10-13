@@ -310,7 +310,7 @@ const live: Layer.Layer<
         !input.ephemeral && (yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID))
 
       // replace-agent replaces the PRIMARY line's base prompt with a session-level
-      // system (desktop execution-profile base). It is a main/peer concern: a
+      // system (host execution-profile base). It is a main/peer concern: a
       // subagent shares the sessionID and therefore inherits `systemMode` on the
       // resolved session prompt, but must keep its OWN `agent.prompt` — else
       // explore/general/title/… get their identity clobbered by the parent base.

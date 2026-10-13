@@ -1817,7 +1817,7 @@ describe("session.message-v2.fromError", () => {
 
   test("plain string errors keep raw text without JSON quote wrapping", () => {
     // 回归:JSON.stringify("Internal Server Error") 曾多包一层引号,
-    // 让 SessionRetry/desktop isOpaqueError 精确匹配失效。
+    // 让 SessionRetry and client isOpaqueError 精确匹配失效。
     const result = MessageV2.fromError("Internal Server Error", { providerID })
     expect(result).toStrictEqual({
       name: "UnknownError",
