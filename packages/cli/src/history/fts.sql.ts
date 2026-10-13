@@ -27,7 +27,7 @@ export const HistoryFtsTable = sqliteTable(
 // Versioned content migration. Cursor and index writes commit together.
 export const HistoryIndexMigrationTable = sqliteTable("history_index_migration", {
   version: integer().primaryKey(),
-  phase: text({ enum: ["clean", "repair", "done"] }).notNull(),
+  phase: text({ enum: ["clean", "repair", "finalize", "done"] }).notNull(),
   cursor: integer().notNull(),
   fts_end: integer().notNull(),
   part_end: integer().notNull(),

@@ -9,6 +9,11 @@ export { migrateIndexBatch, MIGRATION_VERSION }
 const log = Log.create({ service: "history.migration" })
 const jobs = new WeakMap<ReturnType<typeof Database.Client>, AbortController>()
 
+/** 快速退避次数；之后改慢速重试，**不**永久放弃（进程活着就该能续跑）。 */
+const QUICK_ATTEMPTS = 5
+/** 快速退避用尽后的固定重试间隔。 */
+const SLOW_RETRY_MS = 120_000
+
 export function startIndexMigration(
   db: ReturnType<typeof Database.Client>,
   deps: { migrate?: (db: ReturnType<typeof Database.Client>) => boolean } = {},
@@ -48,12 +53,16 @@ export function startIndexMigration(
       clearJob()
     } catch (error) {
       log.warn("index migration paused", { error: String(error), attempt })
-      // Limited in-process backoff; clear slot so a later startIndexMigration can retry.
-      if (attempt >= 5 || abort.signal.aborted) {
+      if (abort.signal.aborted) {
         clearJob()
         return
       }
-      setTimeout(() => run(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt)).unref()
+      if (attempt < QUICK_ATTEMPTS) {
+        setTimeout(() => run(attempt + 1), Math.min(30_000, 1000 * 2 ** attempt)).unref()
+        return
+      }
+      // 慢速续试：清 job 会让「索引整理中」卡死到下次进程启动。
+      setTimeout(() => run(QUICK_ATTEMPTS), SLOW_RETRY_MS).unref()
     }
   }
   setTimeout(() => run(0), 1000).unref()

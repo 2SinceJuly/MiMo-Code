@@ -288,8 +288,8 @@ test("background migration delays startup, rests after expensive work and cancel
   }
 })
 
-// R6/N1: error path — 5 failed attempts clear the jobs slot so startIndexMigration can re-arm.
-test("index migration clears jobs slot after five failed attempts and allows restart", () => {
+// R6/N1: 失败退避后**慢速续试**，不永久清空 job（否则「索引整理中」卡到下次进程启动）。
+test("index migration keeps slow-retrying after five failed attempts", () => {
   process.env.MIMOCODE_SKIP_MIGRATIONS = "1"
   Database.close()
   const scheduled: { run: () => void; delay: number }[] = []
@@ -300,7 +300,6 @@ test("index migration clears jobs slot after five failed attempts and allows res
   try {
     const db = Database.Client()
     stopIndexMigration(db)
-    // Drop auto-start timers captured before stop; boom path starts clean.
     scheduled.length = 0
     seed(textParts(3))
     db.update(HistoryIndexMigrationTable).set({ phase: "repair", cursor: 0, part_end: 3 })
@@ -312,19 +311,20 @@ test("index migration clears jobs slot after five failed attempts and allows res
     }
     startIndexMigration(db, { migrate: boom })
     expect(scheduled).toHaveLength(1)
-    // attempt 0..5: each failure schedules the next backoff until attempt>=5 clears the slot
+    // attempt 0..5：快速退避；attempt>=5 转慢速重试，job 不丢
     for (let i = 0; i < 6; i++) {
       const next = scheduled[scheduled.length - 1]
       expect(next).toBeDefined()
       next!.run()
     }
     expect(attempts).toBe(6)
-    const afterGiveUp = scheduled.length
-    expect(afterGiveUp).toBe(6) // 1 start + 5 retries; attempt 5 clears without reschedule
-    // Slot cleared — a later startIndexMigration must re-arm the 1s startup timer
-    startIndexMigration(db, { migrate: boom })
-    expect(scheduled.length).toBe(afterGiveUp + 1)
-    expect(scheduled[scheduled.length - 1]!.delay).toBeGreaterThanOrEqual(1000)
+    const afterQuick = scheduled.length
+    expect(afterQuick).toBe(7) // 1 start + 5 quick retries + 1 slow retry
+    expect(scheduled[scheduled.length - 1]!.delay).toBeGreaterThanOrEqual(120_000)
+    // 慢速重试仍会继续调度
+    scheduled[scheduled.length - 1]!.run()
+    expect(attempts).toBe(7)
+    expect(scheduled.length).toBe(afterQuick + 1)
   } finally {
     delete process.env.MIMOCODE_SKIP_MIGRATIONS
     timeout.mockRestore()

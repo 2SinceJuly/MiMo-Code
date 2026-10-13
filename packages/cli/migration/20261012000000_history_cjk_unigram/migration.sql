@@ -14,6 +14,9 @@ CREATE VIRTUAL TABLE `history_fts_idx` USING fts5(
   tokenize='unicode61'
 );--> statement-breakpoint
 
+-- Normal write path keeps triggers. migrateIndexBatch drops them for clean/repair
+-- (external-content FTS must not see delete/insert for rows never indexed) and
+-- recreates them in finalize after `rebuild`.
 CREATE TRIGGER `history_fts_ai` AFTER INSERT ON `history_fts` BEGIN
   INSERT INTO `history_fts_idx`(rowid, body_idx) VALUES (NEW.rowid, NEW.body_idx);
 END;--> statement-breakpoint

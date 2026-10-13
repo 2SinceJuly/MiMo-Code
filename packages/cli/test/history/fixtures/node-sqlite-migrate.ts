@@ -59,6 +59,12 @@ sqlite.exec(`
     fts_end INTEGER NOT NULL,
     part_end INTEGER NOT NULL
   );
+  CREATE VIRTUAL TABLE history_fts_idx USING fts5(
+    body_idx,
+    content='history_fts',
+    content_rowid='rowid',
+    tokenize='unicode61'
+  );
 `)
 
 const bigText = `needle ${"x".repeat(200_000)}`
