@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import path from "path"
 import { Effect, Stream, ManagedRuntime, Layer } from "effect"
 import { LLM } from "../../src/session/llm"
+import { isOpenCodeGoTarget, openCodeGoSessionHeaders } from "../../src/provider/opencode-go"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Session as SessionNs } from "../../src/session"
 import { Instance } from "../../src/project/instance"
@@ -589,17 +590,31 @@ describe("session.llm system prompt — memory-instructions guard", () => {
 // requests with no per-conversation ID (400 MissingSessionID) from 09/05.
 // Only Go targets get the extra header; other providers stay unchanged.
 describe("session.llm outbound headers", () => {
-  test("isOpenCodeGoModel matches provider id and zen/go URL only", () => {
-    const shape = (providerID: string, url: string, options: Record<string, unknown> = {}) =>
-      ({ providerID, api: { id: "m", url, npm: "@ai-sdk/openai-compatible" }, options }) as Parameters<
-        typeof LLM.isOpenCodeGoModel
+  test("isOpenCodeGoTarget matches provider id and zen/go URL (model or provider options)", () => {
+    const shape = (providerID: string, url: string, modelOptions: Record<string, unknown> = {}) =>
+      ({ providerID, api: { id: "m", url, npm: "@ai-sdk/openai-compatible" }, options: modelOptions }) as Parameters<
+        typeof isOpenCodeGoTarget
       >[0]
-    expect(LLM.isOpenCodeGoModel(shape("opencode-go", ""))).toBe(true)
-    expect(LLM.isOpenCodeGoModel(shape("opencode-go-chat", ""))).toBe(true)
-    expect(LLM.isOpenCodeGoModel(shape("oc", "https://opencode.ai/zen/go/v1"))).toBe(true)
-    expect(LLM.isOpenCodeGoModel(shape("oc", "", { baseURL: "https://opencode.ai/zen/go/v1" }))).toBe(true)
-    expect(LLM.isOpenCodeGoModel(shape("alibaba", "https://dashscope.aliyuncs.com"))).toBe(false)
-    expect(LLM.isOpenCodeGoModel(shape("opencode", "https://opencode.ai/zen/v1"))).toBe(false)
+    expect(isOpenCodeGoTarget(shape("opencode-go", ""))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("opencode-go-chat", ""))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", "", { baseURL: "https://opencode.ai/zen/go/v1" }))).toBe(true)
+    // CRITICAL gap from review: provider-level options.baseURL (TUI / custom config)
+    // never lands on Provider.Model — must be passed in separately.
+    expect(isOpenCodeGoTarget(shape("oc", ""), { baseURL: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", ""), { baseUrl: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    expect(isOpenCodeGoTarget(shape("alibaba", "https://dashscope.aliyuncs.com"))).toBe(false)
+    expect(isOpenCodeGoTarget(shape("opencode", "https://opencode.ai/zen/v1"))).toBe(false)
+    expect(isOpenCodeGoTarget(shape("oc", "https://proxy.example/v1"), { baseURL: "https://proxy.example/v1" })).toBe(false)
+  })
+
+  test("openCodeGoSessionHeaders only emits for Go targets with a sessionID", () => {
+    const go = { providerID: "opencode-go" as never, api: { id: "m", url: "", npm: "" }, options: {} }
+    const other = { providerID: "alibaba" as never, api: { id: "m", url: "https://x", npm: "" }, options: {} }
+    expect(openCodeGoSessionHeaders(go, "ses_1")).toEqual({ "x-opencode-session": "ses_1" })
+    expect(openCodeGoSessionHeaders(go, "")).toEqual({})
+    expect(openCodeGoSessionHeaders(go, undefined)).toEqual({})
+    expect(openCodeGoSessionHeaders(other, "ses_1")).toEqual({})
   })
 
   test("OpenCode Go non-ephemeral call carries x-opencode-session and x-session-affinity", async () => {

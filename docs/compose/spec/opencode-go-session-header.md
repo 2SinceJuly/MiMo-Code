@@ -30,33 +30,38 @@ Prior PRs (#2327 closed, #2494 open-but-conflicting) target the retired `package
 
 Only requests that target **OpenCode Go** gain the extra header. Every other provider's outbound headers stay byte-identical to today.
 
-`isOpenCodeGoModel(model)` is true when either:
+`isOpenCodeGoTarget(model, providerOptions?)` is true when either:
 
-1. `model.providerID` is `opencode-go` or starts with `opencode-go` (covers `opencode-go`, `opencode-go-chat`), or
-2. `model.api.url` / `model.options.baseURL` / `model.options.baseUrl` contains `opencode.ai/zen/go` (covers custom provider IDs such as `oc` pointed at the Go gateway).
+1. `model.providerID` starts with `opencode-go` (covers `opencode-go`, `opencode-go-chat`), or
+2. any of `model.api.url` / `model.options.baseURL|baseUrl` / **`providerOptions.baseURL|baseUrl`** contains `opencode.ai/zen/go`.
+
+`providerOptions` is `Provider.Info.options` (the config `provider.<id>.options` map). This matters: the TUI dialog and custom configs commonly set **only** `provider.options.baseURL` to the Go gateway — that value is resolved inside `resolveSDK` and never lands on `Provider.Model`, so model-only detection misses the standard setup. `session/llm.ts` `stream()` passes `item.options` from `provider.getProvider()`.
 
 On matching requests from `session/llm.ts` `stream()` that have a `sessionID`:
 
 - Send `x-opencode-session: <sessionID>` — **including** `ephemeral: true` calls (title / summary / compaction).
 - Keep `x-session-affinity` and `x-parent-session-id` gated on `!input.ephemeral` exactly as today (all providers).
-- Do **not** invent a new identifier. Reuse the existing stable per-conversation `sessionID` (the same value already sent as `x-session-affinity`).
-- Do **not** send the header when `sessionID` is empty/absent (defensive; the type currently requires it).
+- Do **not** invent a new identifier. Reuse the existing stable per-conversation `sessionID`.
+- Do **not** send the header when `sessionID` is empty/absent.
 - `User-Agent: mimocode/<version>` stays unchanged.
 
 ### Scope of the header
 
-**Not** sent on non-Go providers. OpenCode Zen free/paid (`opencode` without a `zen/go` URL) is out of scope — only the Go gateway returns `MissingSessionID`.
+**Not** sent on non-Go providers. OpenCode Zen (`opencode` without a `zen/go` URL) is out of scope.
+
+**Call sites:** `session/llm.ts` `stream()` only (covers main chat + ephemeral title via `prompt.ts`). Other AI SDK surfaces (`predict`, `goal.evaluate`, `agent.generate`, `llm-server`, `mcp/sampling`) are intentionally not wired — if those are pointed at Go without a session header, that is operator configuration, not this fix.
 
 ### Transport coverage
 
-The header is set in the single `stream()` headers object for matching models, so it applies to every AI SDK path (OpenAI-compatible `/chat/completions`, Anthropic `/messages`, Responses). No per-transport special case.
+The header is set in the single `stream()` headers object for matching models, so it applies to every AI SDK path that `stream()` uses (OpenAI-compatible `/chat/completions`, Anthropic `/messages`, Responses).
 
 ### Explicit non-goals
 
-- Restoring `x-opencode-client` / `x-opencode-project` (optional in the Go docs; not required for routing).
+- Restoring `x-opencode-client` / `x-opencode-project` (optional in the Go docs).
 - Provider-ID filtering of "opencode" (#114) or Responses-only model errors (#2030).
 - Changing how `sessionID` is generated.
-- Adding the header to non-Go providers "just in case".
+- Adding the header to non-Go providers.
+- Covering every non-`stream()` inference call site in the repo.
 
 ## [S3] Out of Scope
 
