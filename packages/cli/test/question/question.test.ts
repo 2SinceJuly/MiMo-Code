@@ -356,6 +356,9 @@ test("questions stay isolated by directory", async () => {
         ],
       }),
   })
+  // Handle rejection immediately so a later reject() cannot surface as an
+  // unhandled rejection and fail this test.
+  p1.catch(() => {})
 
   const p2 = Instance.provide({
     directory: two.path,
@@ -371,6 +374,7 @@ test("questions stay isolated by directory", async () => {
         ],
       }),
   })
+  p2.catch(() => {})
 
   const onePending = await Instance.provide({
     directory: one.path,
