@@ -56,7 +56,7 @@ import { Ripgrep } from "../../src/file/ripgrep"
 import { Format } from "../../src/format"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
-import { TestLLMServer } from "../lib/llm-server"
+import { TestLLMServer, httpError } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable, type InboxRow } from "../../src/inbox/inbox.sql"
 
@@ -384,7 +384,14 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
             // stolen by a title-generation request (see llm-server isTitleRequest).
             yield* llm.textMatch(({ body }) => JSON.stringify(body.messages).includes('"content":"continue"'), "second result")
           }
-          if (terminal === "failure") yield* llm.error(401, { error: { message: "invalid credential", type: "authentication_error" } })
+          if (terminal === "failure") {
+            // Same as success: keep the 401 on the continuation request so a
+            // title-generation probe cannot steal it.
+            yield* llm.pushMatch(
+              ({ body }) => JSON.stringify(body.messages).includes('"content":"continue"'),
+              httpError(401, { error: { message: "invalid credential", type: "authentication_error" } }),
+            )
+          }
           if (terminal === "cancelled") yield* llm.hang
           yield* prompt.prompt({ sessionID: spawned.sessionID, agentID: spawned.actorID, agent: "build", model: ref, noReply: true, parts: [{ type: "text", text: "continue" }] })
           const execution = yield* prompt.loop({ sessionID: spawned.sessionID, agentID: spawned.actorID, notifyParentOnComplete: true }).pipe(Effect.exit, Effect.forkChild)
