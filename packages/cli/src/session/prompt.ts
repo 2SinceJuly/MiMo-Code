@@ -3529,6 +3529,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       sessionBusy?: boolean
       force?: boolean
       preserveError?: boolean
+      exceptMessageID?: MessageID
     }) {
       const busy = input.sessionBusy ?? (yield* status.get(input.sessionID)).type !== "idle"
       const preserveError = input.preserveError ?? true
@@ -3537,6 +3538,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       for (const msg of msgs) {
         if (msg.info.role !== "assistant") continue
         if (msg.info.parentID !== input.parentMessageID) continue
+        if (input.exceptMessageID && msg.info.id === input.exceptMessageID) continue
         if (!isEmptyAssistantResidue(msg.info, msg.parts)) continue
         if (preserveError && msg.info.error) continue
         const liveOwned = !input.force && busy && !msg.info.error && !("completed" in msg.info.time)
@@ -6365,15 +6367,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         trim = yield* Effect.sync(() => MessageV2.planResumeTrim(tailMsgs, plan.parentMessageID)).pipe(
           Effect.catchCause(() => Effect.sync(() => { throw new NotFoundError({ message: "No safe resume history boundary" }) })),
         )
-        // Empty residue is dirty tail data: clean it before model resolution so a
-        // later getModel failure cannot leave shells that block re-dispatch.
-        if (!strictTail) {
+        // Empty residue is dirty tail data on user-resume: clean it before model
+        // resolution so a later getModel failure cannot leave shells that block
+        // re-dispatch. tool-resume keeps durable empty containers intact.
+        if (plan.action === "user-resume" && !strictTail) {
+          // Keep the resume target itself (TP-SR-R21-27 empty container stays
+          // durable); only sibling empty residue blocks re-dispatch.
           yield* cleanupEmptyResidueAssistants({
             sessionID: input.sessionID,
             agentID: input.agentID,
             parentMessageID: plan.parentMessageID,
             sessionBusy: false,
             preserveError: false,
+            exceptMessageID: plan.assistantMessageID,
           })
         }
         const parent = tailMsgs[parentIdx].info as MessageV2.User
