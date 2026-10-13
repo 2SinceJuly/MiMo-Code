@@ -180,6 +180,42 @@ describe("resume trim model boundary", () => {
       expect(input).toEqual(original)
     }
   })
+  // [TP-SR-R21-32]
+  test("only proven unexecuted calls can be discarded before calculating the tool boundary", async () => {
+    const pending = { ...tool("pending"), execution: "not-started" as const,
+      state: { status: "error" as const, input: {}, inputComplete: false, error: "interrupted",
+        metadata: { interrupted: true }, time: { start: 1, end: 2 } } }
+    const input = history([pending])
+    const trim = MessageV2.planResumeTrim(input, userID)
+    expect(trim.removeMessages).toEqual([assistantID])
+    expect(trim.messages).toEqual(input.slice(0, 1))
+    const completed = tool("completed")
+    const mixed = MessageV2.planResumeTrim(history([completed, pending]), userID)
+    expect(mixed.removeParts).toEqual([pending])
+    expect(mixed.messages[1].parts).toEqual([completed])
+    MessageV2.assertResumeModelBoundary(await MessageV2.toModelMessages(mixed.messages, model))
+    for (const execution of [undefined, "started"] as const) {
+      expect(() => MessageV2.planResumeTrim(history([{ ...pending, execution }]), userID)).toThrow("execution boundary")
+    }
+    expect(() => MessageV2.planResumeTrim(history([{ ...pending, metadata: { providerExecuted: true } }]), userID)).toThrow("execution boundary")
+    const delivered = { ...completed, execution: "not-started" as const }
+    expect(MessageV2.planResumeTrim(history([delivered]), userID).removeParts).toEqual([])
+    const attached = { ...pending, state: { ...pending.state, attachments: [{ ...base, id: PartID.make("result-file"),
+      type: "file" as const, mime: "image/png", url: `data:image/png;base64,${pngBase64}` }] } }
+    expect(() => MessageV2.planResumeTrim(history([attached]), userID)).toThrow("execution boundary")
+    for (const fields of [{ summary: true }, { structured: null }, { finish: "stop" }]) {
+      const protectedHistory = history([pending])
+      protectedHistory[1].info = { ...assistantInfo(assistantID, userID), ...fields }
+      expect(() => MessageV2.planResumeTrim(protectedHistory, userID)).toThrow("protected output")
+    }
+    const block: MessageV2.Part[] = [completed, { ...base, id: PartID.make("later-step"), type: "step-start" },
+      { ...base, id: PartID.make("later-text"), type: "text", text: "unfinished" }, pending,
+      { ...base, id: PartID.make("later-reason"), type: "reasoning", text: "unfinished reasoning", time: { start: 1 } }]
+    const blocks = MessageV2.planResumeTrim(history(block), userID)
+    expect(blocks.messages[1].parts).toEqual([completed])
+    expect(new Set(blocks.removeParts.map((part) => part.id))).toEqual(new Set(block.slice(1).map((part) => part.id)))
+    expect(MessageV2.planResumeTrim(blocks.messages, userID).removeParts).toEqual([])
+  })
   test("APIError on tool carrier cannot silently hide completed observations", async () => {
     const input = history([tool("completed")])
     input[1].info = { ...assistantInfo(assistantID, userID), error: { name: "APIError", data: { message: "unavailable", isRetryable: false } } }

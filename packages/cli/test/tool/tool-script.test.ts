@@ -64,6 +64,25 @@ describe("sandbox non-deterministic mode", () => {
       evalScript(`await pause(); while (true) {}`, hooks, { deterministic: false, interrupt: () => stop }),
     ).rejects.toThrow()
   })
+
+  // [TP-SR-R21-32]
+  for (const withHostCall of [false, true]) {
+    test(`AbortSignal stops a pending guest promise without further bytecode (host=${withHostCall})`, async () => {
+      const entered = Promise.withResolvers<void>()
+      const controller = new AbortController()
+      const running = evalScript(
+        `${withHostCall ? "await completed();" : ""} parked(); return await new Promise(() => {})`,
+        { completed: async () => "real result", parked: () => entered.resolve() },
+        { signal: controller.signal },
+      )
+      const outcome = running.catch((error: unknown) => error)
+      await entered.promise
+      const reason = new Error("cancel pending guest")
+      controller.abort(reason)
+      expect(await outcome).toBe(reason)
+      expect(await evalScript("return 42", {})).toBe(42)
+    }, 2000)
+  }
 })
 
 const runtime = ManagedRuntime.make(Layer.mergeAll(Truncate.defaultLayer, Agent.defaultLayer))

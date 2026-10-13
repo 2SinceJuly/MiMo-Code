@@ -30,7 +30,7 @@ export type Event<Def extends Definition = Definition> = {
 
 export type SerializedEvent<Def extends Definition = Definition> = Event<Def> & { type: string }
 
-type ProjectorFunc = (db: Database.TxOrDb, data: unknown) => void
+type ProjectorFunc = (db: Database.TxOrDb, data: unknown, source: { replay: boolean }) => void
 
 export const registry = new Map<string, Definition>()
 let projectors: Map<Definition, ProjectorFunc> | undefined
@@ -96,7 +96,7 @@ export function define<
 
 export function project<Def extends Definition>(
   def: Def,
-  func: (db: Database.TxOrDb, data: Event<Def>["data"]) => void,
+  func: (db: Database.TxOrDb, data: Event<Def>["data"], source: { replay: boolean }) => void,
 ): [Definition, ProjectorFunc] {
   return [def, func as ProjectorFunc]
 }
@@ -114,7 +114,7 @@ function process<Def extends Definition>(def: Def, event: Event<Def>, options: {
   // idempotent: need to ignore any events already logged
 
   Database.transaction((tx) => {
-    projector(tx, event.data)
+    projector(tx, event.data, { replay: options.replay === true })
 
     if (Flag.MIMOCODE_EXPERIMENTAL_WORKSPACES || options.replay) {
       tx.insert(EventSequenceTable)

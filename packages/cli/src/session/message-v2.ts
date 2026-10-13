@@ -484,6 +484,7 @@ export const ToolState = z
 
 export const ToolPart = PartBase.extend({
   type: z.literal("tool"),
+  execution: z.enum(["not-started", "started"]).optional(),
   callID: z.string(),
   tool: z.string(),
   state: ToolState,
@@ -851,13 +852,29 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export function planResumeTrim(input: WithParts[], parentID: MessageID) {
   const parent = input.findIndex((message) => message.info.id === parentID && message.info.role === "user")
   if (parent < 0) throw new Error("Resume parent is missing")
-  const tail = input.slice(parent + 1)
-  if (tail.some((message) => message.info.role !== "assistant" || message.info.parentID !== parentID)) {
+  const sourceTail = input.slice(parent + 1)
+  if (sourceTail.some((message) => message.info.role !== "assistant" || message.info.parentID !== parentID)) {
     throw new Error("Resume trim crosses a parent boundary")
   }
-  const lastToolMessage = tail.findLastIndex((message) => message.parts.some((part) => part.type === "tool"))
   const removeMessages: MessageID[] = []
   const removeParts: Part[] = []
+  const tail = sourceTail.map((message) => ({
+    ...message,
+    parts: message.parts.filter((part) => {
+      if (part.type !== "tool" || part.execution !== "not-started" || part.metadata?.providerExecuted ||
+        part.state.status === "completed" || ("attachments" in part.state && part.state.attachments?.length) ||
+        ("output" in part.state && part.state.output !== undefined) ||
+        ("metadata" in part.state && (part.state.metadata?.output !== undefined || part.state.metadata?.diff !== undefined))) return true
+      if (message.info.role === "assistant" && (message.info.summary || message.info.structured !== undefined ||
+        (!message.info.error && message.info.finish && message.info.finish !== "length" && message.info.finish !== "tool-calls" &&
+          (message.info.finish === "stop" || message.info.time.completed !== undefined)))) {
+        throw new Error("Resume trim would discard protected output")
+      }
+      removeParts.push(part)
+      return false
+    }),
+  }))
+  const lastToolMessage = tail.findLastIndex((message) => message.parts.some((part) => part.type === "tool"))
   const updateParts: ToolPart[] = []
   const updateMessages: Assistant[] = []
   const retained = tail.flatMap((message, index): WithParts[] => {
@@ -883,9 +900,12 @@ export function planResumeTrim(input: WithParts[], parentID: MessageID) {
             : part.type === "reasoning" && part.text.trim().length > 0)) ||
       discarded.some((part) => !["text", "reasoning", "step-start", "step-finish", "retry"].includes(part.type))
     )) throw new Error("Resume trim would discard protected output")
-    if (cut === 0 && !hasContent) return [message]
+    if (cut === 0 && !hasContent && !removeParts.some((part) => part.messageID === info.id)) return [message]
     if (cut === 0) {
       removeMessages.push(info.id)
+      for (let i = removeParts.length - 1; i >= 0; i--) {
+        if (removeParts[i].messageID === info.id) removeParts.splice(i, 1)
+      }
       return []
     }
     removeParts.push(...discarded)

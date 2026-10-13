@@ -143,8 +143,24 @@ export default [
       .run()
   }),
 
-  SyncEvent.project(MessageV2.Event.PartUpdated, (db, data) => {
+  SyncEvent.project(MessageV2.Event.PartUpdated, (db, data, source) => {
     const { id, messageID, sessionID, ...rest } = data.part
+    const current = db.select().from(PartTable).where(eq(PartTable.id, id)).get()
+    if (current?.data.type === "tool" && rest.type !== "tool") throw new Error("Tool part type changed")
+    if (rest.type === "tool") {
+      if (current && (current.session_id !== sessionID || current.message_id !== messageID ||
+        current.data.type !== "tool")) throw new Error("Tool part identity mismatch")
+      if (source.replay && rest.execution === "not-started") rest.execution = undefined
+      if (current) {
+        const tool = MessageV2.ToolPart.parse({ ...current.data, id: current.id, sessionID: current.session_id, messageID: current.message_id })
+        if (tool.callID !== rest.callID) throw new Error("Tool call identity mismatch")
+        if (tool.execution === "started") rest.execution = "started"
+        if ((tool.state.status === "completed" || tool.state.status === "error") &&
+          (source.replay || rest.state.status !== tool.state.status)) rest.state = tool.state
+        if (tool.metadata?.providerExecuted) rest.metadata = { ...rest.metadata, providerExecuted: true }
+      }
+      data.part = { ...rest, id, messageID, sessionID }
+    }
 
     try {
       db.insert(PartTable)

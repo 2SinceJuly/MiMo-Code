@@ -7,6 +7,7 @@ import { Global } from "../../src/global"
 import * as ClaudeImport from "../../src/session/claude-import"
 import * as CodexImport from "../../src/session/codex-import"
 import * as OpencodeImport from "../../src/session/opencode-import"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { HistoryFtsTable, HistoryIndexMigrationTable } from "../../src/history/fts.sql"
 import { ExternalImportTable } from "../../src/session/external-import.sql"
 import { MessageTable, PartTable, SessionTable } from "../../src/session/session.sql"
@@ -89,7 +90,8 @@ for (const source of ["claude", "codex"] as const) {
   })
 }
 
-test("OpenCode: import and source edits maintain search without directory initialization", async () => {
+// [TP-SR-R21-32]
+test("OpenCode: source edits maintain search and preserve locally continued messages with executed tools", async () => {
   await using dir = await tmpdir()
   const file = path.join(dir.path, "source.db")
   const src = new SQLite(file)
@@ -104,6 +106,25 @@ test("OpenCode: import and source edits maintain search without directory initia
     expect(first.errors).toEqual([])
     expect(first.imported).toBe(1)
     expect(hits("originalneedle")).toEqual({ n: 1 })
+    const db = Database.Client()
+    const tool = { type: "tool", tool: "bash", callID: "call-local", execution: "started",
+      state: { status: "completed", input: { command: "pwd" }, output: "/tmp/example", title: "Local continuation",
+        metadata: { exit: 0 }, time: { start: 3, end: 4 } }, metadata: { local: true },
+    } satisfies Omit<MessageV2.ToolPart, "id" | "sessionID" | "messageID">
+    const insertMessage = db.$client.prepare("INSERT INTO message (id, session_id, agent_id, time_created, time_updated, data) VALUES (?, 'ses_import', 'main', 3, 4, ?)")
+    insertMessage.run("msg_local_user", JSON.stringify({ role: "user", agent: "build", model: { providerID: "test", modelID: "model" }, time: { created: 3 } }))
+    insertMessage.run("msg_local_assistant", JSON.stringify({ role: "assistant", parentID: "msg_local_user", time: { created: 3, completed: 4 } }))
+    const insertPart = db.$client.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, 'ses_import', 3, 4, ?)")
+    insertPart.run("prt_local_user", "msg_local_user", JSON.stringify({ type: "text", text: "Continue locally" }))
+    insertPart.run("prt_local_tool", "msg_local_assistant", JSON.stringify(tool))
+    const localHistory = () => ({
+      messages: db.select().from(MessageTable).all().filter(row => row.id.startsWith("msg_local_")),
+      parts: db.select().from(PartTable).all().filter(row => row.id.startsWith("prt_local_")),
+    })
+    const before = localHistory()
+    expect(before.messages).toHaveLength(2)
+    expect(before.parts).toHaveLength(2)
+    expect(db.select().from(ExternalImportTable).get()?.message_ids?.map(String)).toEqual(["msg_import"])
     src.exec(`UPDATE session SET time_updated = 2;
       UPDATE part SET data = '{"type":"text","text":"replacementneedle"}';`)
     const second = await OpencodeImport.run({ dbPath: file })
@@ -111,6 +132,43 @@ test("OpenCode: import and source edits maintain search without directory initia
     expect(second.resynced).toBe(1)
     expect(hits("originalneedle")).toEqual({ n: 0 })
     expect(hits("replacementneedle")).toEqual({ n: 1 })
+    expect(localHistory()).toEqual(before)
+    expect(db.select().from(PartTable).all().find(row => row.id === "prt_local_tool")?.data).toEqual(tool)
+    expect(db.select().from(ExternalImportTable).get()).toMatchObject({ message_ids: ["msg_import"], source_mtime: 2 })
+  } finally {
+    src.close()
+  }
+})
+
+// [TP-SR-R21-32]
+test("OpenCode reimport cannot erase execution proof through message replacement or tool type changes", async () => {
+  await using dir = await tmpdir()
+  const file = path.join(dir.path, "proof-source.db")
+  const src = new SQLite(file)
+  try {
+    src.exec(`CREATE TABLE session(id TEXT, directory TEXT, slug TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER);
+      CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+      CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+      INSERT INTO session VALUES('ses_proof', '/tmp/example', 'example', 'Example', '1', 1, 1);
+      INSERT INTO message VALUES('msg_proof', 'ses_proof', 1, 1, '{"role":"assistant"}');`)
+    const tool = { type: "tool", tool: "write", callID: "call-proof", execution: "not-started",
+      state: { status: "error", input: {}, inputComplete: false, error: "interrupted", time: { start: 1, end: 2 } } } satisfies Omit<MessageV2.ToolPart, "id" | "sessionID" | "messageID">
+    src.prepare("INSERT INTO part VALUES('prt_proof', 'msg_proof', 'ses_proof', 1, 1, ?)").run(JSON.stringify(tool))
+    expect((await OpencodeImport.run({ dbPath: file })).errors).toEqual([])
+    const db = Database.Client()
+    expect(db.select().from(PartTable).get()?.data).not.toHaveProperty("execution")
+    const completed = { ...tool, execution: "started", metadata: { providerExecuted: true },
+      state: { status: "completed", input: {}, output: "original result", title: "done", metadata: {}, time: { start: 1, end: 2 } } } satisfies Omit<MessageV2.ToolPart, "id" | "sessionID" | "messageID">
+    db.$client.prepare("UPDATE part SET data = ? WHERE id = 'prt_proof'").run(JSON.stringify(completed))
+    src.exec("UPDATE session SET time_updated = 2")
+    expect((await OpencodeImport.run({ dbPath: file })).errors).toEqual([])
+    expect(db.select().from(PartTable).get()?.data).toEqual(completed)
+    src.exec(`UPDATE session SET time_updated = 3; UPDATE part SET data = '{"type":"text","text":"replacement"}'`)
+    expect((await OpencodeImport.run({ dbPath: file })).errors).toHaveLength(1)
+    expect(db.select().from(PartTable).get()?.data).toEqual(completed)
+    src.exec("UPDATE session SET time_updated = 4; DELETE FROM part")
+    expect((await OpencodeImport.run({ dbPath: file })).errors).toHaveLength(1)
+    expect(db.select().from(PartTable).get()?.data).toEqual(completed)
   } finally {
     src.close()
   }

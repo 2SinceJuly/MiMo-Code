@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Context, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent, resolveStoredAgent } from "@/agent/agent"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
@@ -22,6 +22,7 @@ import type { Provider } from "@/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { ToolGate, FAIL_CASCADE_MESSAGE } from "@/tool/gate"
+import { ResultRef } from "@/tool/settlement"
 import { isRecoverableError } from "@/tool/recoverable"
 import { getToolResultAttachments, getToolResultMetadata } from "@/tool/result-error"
 import { Log } from "@/util"
@@ -158,6 +159,13 @@ export type ReplayInput = {
 
 export interface Handle {
   readonly toolGate: ToolGate
+  readonly registerTool: (name: string) => void
+  readonly executeTool: <A, E, R>(
+    tool: string,
+    callID: string,
+    body: Effect.Effect<A, E, R>,
+    options?: { signal?: AbortSignal; gateTool?: string },
+  ) => Effect.Effect<A, E | Error, R>
   readonly message: MessageV2.Assistant
   readonly updateToolCall: (
     toolCallID: string,
@@ -201,7 +209,6 @@ type ToolCall = {
   partID: MessageV2.ToolPart["id"]
   messageID: MessageV2.ToolPart["messageID"]
   sessionID: MessageV2.ToolPart["sessionID"]
-  done: Deferred.Deferred<void>
 }
 
 interface ProcessorContext extends Input {
@@ -259,6 +266,22 @@ export const layer: Layer.Layer<
       // so capturing inside the event handler can be too late.
       const initialSnapshot = yield* snapshot.track()
       const toolGate = new ToolGate()
+      let toolScope = yield* Scope.make()
+      let toolsClosed = false
+      const closeTools = () => Effect.gen(function* () {
+        toolsClosed = true
+        yield* Scope.close(toolScope, Exit.void)
+      })
+      const localTools = new Set<string>()
+      const ready = new Map<string, Deferred.Deferred<void>>()
+      const toolReady = (callID: string) => {
+        let value = ready.get(callID)
+        if (!value) {
+          value = Deferred.makeUnsafe<void>()
+          ready.set(callID, value)
+        }
+        return value
+      }
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
@@ -344,41 +367,13 @@ export const layer: Layer.Layer<
           .pipe(Effect.ignore)
       })
 
-      const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
-        const done = ctx.toolcalls[toolCallID]?.done
-        delete ctx.toolcalls[toolCallID]
-        if (done) yield* Deferred.succeed(done, undefined).pipe(Effect.ignore)
-      })
-
-      const readToolCall = Effect.fn("SessionProcessor.readToolCall")(function* (toolCallID: string) {
-        const call = ctx.toolcalls[toolCallID]
-        if (!call) return
-        const part = yield* session.getPart({
-          partID: call.partID,
-          messageID: call.messageID,
-          sessionID: call.sessionID,
-        })
-        if (!part || part.type !== "tool") {
-          delete ctx.toolcalls[toolCallID]
-          return
-        }
-        return { call, part }
-      })
-
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
       ) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match) return
-        const part = yield* session.updatePart(update(match.part))
-        ctx.toolcalls[toolCallID] = {
-          ...match.call,
-          partID: part.id,
-          messageID: part.messageID,
-          sessionID: part.sessionID,
-        }
-        return part
+        const call = ctx.toolcalls[toolCallID]
+        if (!call) return
+        return yield* session.mutateToolPart(call, (part) => part ? update(part) : undefined)
       })
 
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
@@ -386,37 +381,38 @@ export const layer: Layer.Layer<
         output: unknown,
         providerMetadata?: Record<string, any>,
       ) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return
         const result = isToolExecutionResult(output) ? output : undefined
-        const structured = !result && match.part.metadata?.providerExecuted
-        const part = yield* session.updatePart({
-          ...match.part,
-          state: {
-            status: "completed",
-            input: match.part.state.input,
-            output: result?.output ?? displayToolOutput(output),
-            ...(structured ? { providerOutput: jsonToolOutput(output) } : {}),
-            ...(providerMetadata ? { providerMetadata } : {}),
-            metadata: result?.metadata ?? {},
-            title: result?.title ?? "",
-            time: { start: match.part.state.time.start, end: Date.now() },
-            attachments: result?.attachments,
-          },
+        let changed = false
+        const part = yield* updateToolCall(toolCallID, (current) => {
+          if (current.state.status !== "running") return current
+          changed = true
+          const structured = !result && current.metadata?.providerExecuted
+          return {
+            ...current,
+            state: {
+              status: "completed",
+              input: current.state.input,
+              output: result?.output ?? displayToolOutput(output),
+              ...(structured ? { providerOutput: jsonToolOutput(output) } : {}),
+              ...(providerMetadata ? { providerMetadata } : {}),
+              metadata: result?.metadata ?? {},
+              title: result?.title ?? "",
+              time: { start: current.state.time.start, end: Date.now() },
+              attachments: result?.attachments,
+            },
+          }
         })
+        if (!part || !changed) return
         yield* detectTryBest(part)
-        yield* settleToolCall(toolCallID)
       })
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
-        const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return false
+        let changed = false
         // Agent-recoverable failures (bad args, malformed call, unknown task/actor
         // id) carry a marker the TUI reads to render them muted instead of as a red
         // error block. The full actionable message still flows to the model.
         const recoverable = isRecoverableError(error)
         const metadata = {
-          ...match.part.state.metadata,
           ...getToolResultMetadata(error),
           ...(recoverable ? { recoverable: true } : {}),
         }
@@ -424,24 +420,64 @@ export const layer: Layer.Layer<
           const parsed = MessageV2.FilePart.safeParse(attachment)
           return parsed.success ? [parsed.data] : []
         })
-        const part = yield* session.updatePart({
-          ...match.part,
-          state: {
-            status: "error",
-            input: match.part.state.input,
-            inputComplete: true,
-            error: errorMessage(error),
-            ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-            ...(attachments && attachments.length > 0 ? { attachments } : {}),
-            time: { start: match.part.state.time.start, end: Date.now() },
-          },
+        const part = yield* updateToolCall(toolCallID, (current) => {
+          if (current.state.status !== "running") return current
+          changed = true
+          return {
+            ...current,
+            state: {
+              status: "error",
+              input: current.state.input,
+              inputComplete: true,
+              error: errorMessage(error),
+              metadata: { ...current.state.metadata, ...metadata },
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
+              time: { start: current.state.time.start, end: Date.now() },
+            },
+          }
         })
+        if (!part || !changed) return false
         yield* detectTryBest(part)
         if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
           ctx.blocked = ctx.blocked || ctx.shouldBreak
         }
-        yield* settleToolCall(toolCallID)
         return true
+      })
+
+      const executeTool: Handle["executeTool"] = (tool, callID, body, options) => Effect.gen(function* () {
+        if (toolsClosed || options?.signal?.aborted) return yield* Effect.fail(new Error("Tool execution is closed"))
+        const execution = Effect.gen(function* () {
+          yield* Deferred.await(toolReady(callID))
+          return yield* toolGate.run(options?.gateTool ?? tool, callID, Effect.gen(function* () {
+            const call = ctx.toolcalls[callID]
+            if (!call) return yield* Effect.fail(new Error("Tool call is not registered"))
+            yield* session.mutateToolPart(call, (part) => {
+              if (toolsClosed || options?.signal?.aborted) throw new Error("Tool execution is closed")
+              if (!part || part.tool !== tool || part.callID !== callID || part.state.status !== "running" ||
+                part.execution !== "not-started" || part.metadata?.providerExecuted) {
+                throw new Error("Tool execution has no trusted input boundary")
+              }
+              return { ...part, execution: "started" }
+            })
+            const settled: { callID: string; result?: Effect.Effect<unknown, unknown> } = { callID }
+            return yield* Effect.uninterruptibleMask((restore) => restore(body.pipe(
+              Effect.provideService(ResultRef, settled),
+            )).pipe(
+              Effect.tap((output) => completeToolCall(callID, output)),
+              Effect.onExit((exit) => Exit.isFailure(exit) && settled.result
+                ? settled.result.pipe(Effect.matchEffect({
+                    onSuccess: (output) => completeToolCall(callID, output),
+                    onFailure: (error) => failToolCall(callID, error).pipe(Effect.asVoid),
+                  }))
+                : Effect.void),
+              Effect.tapError((error) => failToolCall(callID, error)),
+            ))
+          }), { signal: options?.signal })
+        })
+        const fiber = yield* execution.pipe(Effect.forkIn(toolScope))
+        // Unwrap Exit after notification; join can skip concurrent scope waiters on interruption in Effect beta.48.
+        const exit = yield* Fiber.await(fiber)
+        return yield* exit
       })
 
       const checkTextNgram = (text: string) => {
@@ -502,19 +538,27 @@ export const layer: Layer.Layer<
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
             }
-            const part = yield* session.updatePart({
-              id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
+            if (toolsClosed) return
+            const partID = ctx.toolcalls[value.id]?.partID ?? PartID.ascending()
+            const part = yield* session.mutateToolPart({
+              partID, messageID: ctx.assistantMessage.id, sessionID: ctx.sessionID,
+            }, (current) => current ? {
+              ...current,
+              metadata: value.providerExecuted ? { ...current.metadata, providerExecuted: true } : current.metadata,
+            } : {
+              id: partID,
               messageID: ctx.assistantMessage.id,
               sessionID: ctx.assistantMessage.sessionID,
               type: "tool",
               tool: value.toolName,
               callID: value.id,
+              execution: !value.providerExecuted && localTools.has(value.toolName) ? "not-started" : undefined,
               state: { status: "pending", input: {}, raw: "" },
               metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
-            } satisfies MessageV2.ToolPart)
+            })
+            if (!part) throw new Error("Tool registration was not persisted")
             ctx.stepPartIds.push(part.id)
             ctx.toolcalls[value.id] = {
-              done: yield* Deferred.make<void>(),
               partID: part.id,
               messageID: part.messageID,
               sessionID: part.sessionID,
@@ -537,16 +581,18 @@ export const layer: Layer.Layer<
             yield* updateToolCall(value.toolCallId, (match) => ({
               ...match,
               tool: value.toolName,
-              state: {
-                ...match.state,
+              execution: match.execution ?? (match.state.status === "pending" && localTools.has(value.toolName) &&
+                !match.metadata?.providerExecuted && !value.providerExecuted ? "not-started" : undefined),
+              state: match.state.status !== "pending" ? match.state : {
                 status: "running",
                 input: value.input,
                 time: { start: Date.now() },
               },
-              metadata: match.metadata?.providerExecuted
+              metadata: match.metadata?.providerExecuted || value.providerExecuted
                 ? { ...value.providerMetadata, providerExecuted: true }
                 : value.providerMetadata,
             }))
+            yield* Deferred.succeed(toolReady(value.toolCallId), undefined)
 
             const parts = MessageV2.parts(ctx.assistantMessage.id)
             const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
@@ -579,11 +625,17 @@ export const layer: Layer.Layer<
           }
 
           case "tool-result": {
+            if (value.providerExecuted) yield* updateToolCall(value.toolCallId, (part) => ({
+              ...part, metadata: { ...part.metadata, providerExecuted: true },
+            }))
             yield* completeToolCall(value.toolCallId, value.output, value.providerMetadata)
             return
           }
 
           case "tool-error": {
+            if (value.providerExecuted) yield* updateToolCall(value.toolCallId, (part) => ({
+              ...part, metadata: { ...part.metadata, providerExecuted: true },
+            }))
             yield* failToolCall(value.toolCallId, value.error)
             yield* bus
               .publish(Metrics.ToolCall, {
@@ -755,6 +807,7 @@ export const layer: Layer.Layer<
       })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
+        yield* closeTools()
         if (ctx.snapshot) {
           const patch = yield* snapshot.patch(ctx.snapshot)
           if (patch.files.length) {
@@ -788,21 +841,12 @@ export const layer: Layer.Layer<
         }
         ctx.reasoningMap = {}
 
-        yield* Effect.forEach(
-          Object.values(ctx.toolcalls),
-          (call) => Deferred.await(call.done).pipe(Effect.timeout("250 millis"), Effect.ignore),
-          { concurrency: "unbounded" },
-        )
-
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
-          const match = yield* readToolCall(toolCallID)
-          if (!match) continue
-          yield* session.updatePart({
-            ...match.part,
-            state: MessageV2.abortedToolState(
-              match.part.state,
-              toolGate.wasCancelled(toolCallID) ? FAIL_CASCADE_MESSAGE : undefined,
-            ),
+          yield* updateToolCall(toolCallID, (part) => {
+            if (part.state.status !== "pending" && part.state.status !== "running") return part
+            return { ...part, state: MessageV2.abortedToolState(
+              part.state, toolGate.wasCancelled(toolCallID) ? FAIL_CASCADE_MESSAGE : undefined,
+            ) }
           })
         }
         ctx.toolcalls = {}
@@ -817,12 +861,11 @@ export const layer: Layer.Layer<
         for (const part of yield* Effect.sync(() => MessageV2.parts(ctx.assistantMessage.id))) {
           if (part.type !== "tool") continue
           if (part.state.status !== "pending" && part.state.status !== "running") continue
-          yield* session.updatePart({
-            ...part,
-            state: MessageV2.abortedToolState(
-              part.state,
-              toolGate.wasCancelled(part.callID) ? FAIL_CASCADE_MESSAGE : undefined,
-            ),
+          yield* session.mutateToolPart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id }, (current) => {
+            if (!current || (current.state.status !== "pending" && current.state.status !== "running")) return current
+            return { ...current, state: MessageV2.abortedToolState(
+              current.state, toolGate.wasCancelled(current.callID) ? FAIL_CASCADE_MESSAGE : undefined,
+            ) }
           })
         }
         // 有 error = 没完成 = 留在 /recovery 候选集里。不管错误类型(瞬态/终态/用户中止),
@@ -868,6 +911,11 @@ export const layer: Layer.Layer<
             ctx.reasoningMap = {}
             ctx.stepPartIds = []
             ctx.toolcalls = {}
+            if (toolsClosed) {
+              toolScope = yield* Scope.make()
+              toolsClosed = false
+              ready.clear()
+            }
             ctx.retrySafe = true
             ctx.textNgramRepeat = false
             ctx.textNgramMonitor = createTextNgramMonitor()
@@ -877,6 +925,7 @@ export const layer: Layer.Layer<
               Stream.tap(handleEvent),
               Stream.takeUntil(() => ctx.needsOverflowHandling || ctx.textNgramRepeat || ctx.blocked),
               Stream.runDrain,
+              Effect.ensuring(closeTools()),
             )
           }).pipe(
             Effect.onInterrupt(() =>
@@ -1236,6 +1285,8 @@ export const layer: Layer.Layer<
 
       return {
         toolGate,
+        registerTool: (name) => { localTools.add(name) },
+        executeTool,
         get message() {
           return ctx.assistantMessage
         },

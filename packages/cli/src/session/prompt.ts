@@ -149,6 +149,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Context } f
 import { EffectLogger } from "@/effect"
 import { InstanceState } from "@/effect"
 import { PARALLEL_READONLY_TOOLS } from "@/tool/gate"
+import * as ToolSettlement from "@/tool/settlement"
 import { ActorTool, type ActorPromptOps } from "@/tool/actor"
 import { SessionRunState } from "./run-state"
 import { ResumeTestHooks } from "./resume-test-hooks"
@@ -1703,7 +1704,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       model: Provider.Model
       session: Session.Info
       tools?: Record<string, boolean>
-      processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall" | "toolGate">
+      processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall" | "toolGate" | "executeTool" | "registerTool">
       bypassAgentCheck: boolean
       messages: MessageV2.WithParts[]
       agentID?: string
@@ -1856,6 +1857,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         harness: input.harness,
       })) {
         const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+        input.processor.registerTool(item.id)
         tools[item.id] = tool({
           description: item.description,
           inputSchema: jsonSchema(schema),
@@ -1932,6 +1934,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     messageID: input.processor.message.id,
                   })),
                 }
+                yield* ToolSettlement.record(ctx.callID, Effect.succeed(output))
                 yield* plugin.trigger(
                   "tool.execute.after",
                   { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args: beforeOutput.args },
@@ -1966,11 +1969,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 }
                 return output
               }).pipe((body) =>
-                gate.run(
-                  gateTool,
-                  options?.toolCallId ?? "?",
+                input.processor.executeTool(
+                  item.id,
+                  options.toolCallId,
                   body,
-                  { signal: options.abortSignal },
+                  { signal: options.abortSignal, gateTool },
                 ),
               ),
             )
@@ -2081,9 +2084,39 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 return cancelResult
               }
               yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-              const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.tryPromise({
-                try: () => execute(mcpBeforeOutput.args, {
+              const normalizeResult = (result: Awaited<ReturnType<NonNullable<typeof execute>>>) => Effect.gen(function* () {
+                const normalized = normalizeToolResult(result)
+                const truncated = yield* truncate.output(
+                  normalized.output,
+                  { outcome: normalized.isError ? "error" : "success" },
+                  input.agent,
+                )
+                const metadata = {
+                  ...normalized.metadata,
+                  truncated: truncated.truncated,
+                  ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                }
+                const attachments = normalized.attachments.map((attachment) => ({
+                  type: "file" as const,
+                  ...attachment,
+                  id: PartID.ascending(),
+                  sessionID: ctx.sessionID,
+                  messageID: input.processor.message.id,
+                }))
+                if (normalized.isError) {
+                  return yield* Effect.fail(new ToolResultError(
+                    truncated.content.trim() || "MCP tool execution failed", metadata, attachments,
+                  ))
+                }
+                return {
+                  normalized,
+                  output: { title: "", metadata, output: truncated.content, attachments },
+                }
+              })
+              const result = yield* ToolSettlement.promise(
+                (signal) => Promise.resolve(execute(mcpBeforeOutput.args, {
                   ...opts,
+                  abortSignal: opts.abortSignal ? AbortSignal.any([opts.abortSignal, signal]) : signal,
                   experimental_context: {
                     onMcpToolProgress: (meta: Record<string, unknown>) => run.promise(
                       input.processor.updateToolCall(opts.toolCallId, (part) => {
@@ -2094,9 +2127,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       }),
                     ),
                   },
+                })),
+                (exit) => Effect.gen(function* () {
+                  const result = Exit.isSuccess(exit) ? exit.value : yield* Effect.failCause(exit.cause)
+                  yield* ToolSettlement.record(opts.toolCallId, normalizeResult(result).pipe(Effect.map(({ output }) => output)))
+                  return result
                 }),
-                catch: (error) => error,
-              }).pipe(Effect.catch((error) => Effect.gen(function* () {
+              ).pipe(Effect.catch((error) => Effect.gen(function* () {
                 // Catch SDK execution failures here, before direct/exec paths persist
                 // or forward them. Successful results (including diffs) never enter.
                 if (opts.abortSignal?.aborted) return yield* Effect.fail(error)
@@ -2113,41 +2150,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 result,
               )
 
-              const normalized = normalizeToolResult(result)
+              const { normalized, output } = yield* normalizeResult(result)
               log.debug("tool execute done (mcp)", {
                 tool: key,
                 callID,
                 durationMs: Date.now() - startTs,
                 ok: !normalized.isError,
               })
-
-              const truncated = yield* truncate.output(
-                neutralizeHarnessTags(normalized.output),
-                { outcome: normalized.isError ? "error" : "success" },
-                input.agent,
-              )
-              const metadata = {
-                ...normalized.metadata,
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              }
-              const attachments = normalized.attachments.map((attachment) => ({
-                type: "file" as const,
-                ...attachment,
-                id: PartID.ascending(),
-                sessionID: ctx.sessionID,
-                messageID: input.processor.message.id,
-              }))
-
-              if (normalized.isError) {
-                return yield* Effect.fail(
-                  new ToolResultError(
-                    truncated.content.trim() || "MCP tool execution failed",
-                    metadata,
-                    attachments,
-                  ),
-                )
-              }
 
               yield* bus
                 .publish(Metrics.ToolCall, {
@@ -2163,12 +2172,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 })
                 .pipe(Effect.ignore)
 
-              const output = {
-                title: "",
-                metadata,
-                output: truncated.content,
-                attachments,
-              }
               if (opts.abortSignal?.aborted) {
                 yield* input.processor.completeToolCall(opts.toolCallId, output)
               }
@@ -2176,10 +2179,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }).pipe((body) =>
               // Only model-facing calls join this batch. Exec guest calls keep
               // the same execution pipeline with script-controlled concurrency.
-              modelFacing ? gate.run(key, opts?.toolCallId ?? "?", body, { signal: opts.abortSignal }) : body,
+              modelFacing ? input.processor.executeTool(key, opts.toolCallId, body, { signal: opts.abortSignal }) : body,
             ),
           )
         }
+        input.processor.registerTool(key)
         item.execute = (args, opts) => executeMcp(args, opts, true)
         tools[key] = item
         if (searchable && input.model.capabilities.toolcall) {
@@ -3370,7 +3374,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const started = part.state.status === "running" ? part.state.time.start : undefined
           if (opts?.before !== undefined && started !== undefined && started > opts.before) continue
           yield* sessions
-            .updatePart({ ...part, state: MessageV2.abortedToolState(part.state) })
+            .mutateToolPart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id }, (current) => {
+              if (!current || (current.state.status !== "pending" && current.state.status !== "running")) return current
+              return { ...current, state: MessageV2.abortedToolState(current.state) }
+            })
             .pipe(
               Effect.catchCause((cause) =>
                 elog.warn("orphan-tool-part-update-failed", { sessionID, partID: part.id, cause }),
@@ -4986,11 +4993,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     },
                   })
                   const run = yield* runner()
+                  handle.registerTool("StructuredOutput")
                   tools["StructuredOutput"] = {
                     ...outputTool,
                     execute(args, options) {
                       return run.promise(
-                        handle.toolGate.run(
+                        handle.executeTool(
                           "StructuredOutput",
                           options.toolCallId,
                           Effect.promise(async () => outputTool.execute!(args, options)),

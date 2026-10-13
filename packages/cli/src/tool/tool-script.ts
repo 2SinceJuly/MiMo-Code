@@ -3,7 +3,7 @@ import os from "os"
 import fs from "fs"
 import path from "path"
 import ts from "typescript"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import type { Tool as AiTool } from "ai"
 import { EffectBridge, InstanceState } from "@/effect"
 import { Log, Filesystem, ToolCompat } from "@/util"
@@ -15,6 +15,7 @@ import { toolScriptRegistry, TOOL_SCRIPT_ALIASES, TOOL_SCRIPT_EXCLUDED } from ".
 import type { HarnessMode } from "./gpt"
 import DESCRIPTION from "./tool-script.txt"
 import * as Tool from "./tool"
+import * as ToolSettlement from "./settlement"
 import { getToolResultAttachments, getToolResultMetadata } from "./result-error"
 import { isRecoverableError } from "./recoverable"
 import * as Truncate from "./truncate"
@@ -702,6 +703,22 @@ export const ToolScriptTool = Tool.define(
           let logBytes = 0
           let calls = 0
           const withSlot = makeSemaphore(MAX_CONCURRENT)
+          const controller = new AbortController()
+          const abort = AbortSignal.any([ctx.abort, controller.signal])
+          const hostCalls = new Set<Promise<unknown>>()
+          let closing = false
+          const trackHostCall = (fn: HostFn): HostFn => (...args) => {
+            if (closing || abort.aborted) return Promise.reject(new Error("exec host admission is closed"))
+            const result = fn(...args)
+            if (!(result instanceof Promise)) return result
+            hostCalls.add(result)
+            return result.finally(() => hostCalls.delete(result))
+          }
+          const closeHostCalls = () => Effect.promise(async () => {
+            closing = true
+            controller.abort()
+            await Promise.allSettled(hostCalls)
+          })
 
           // Live progress for the TUI: after each settled call, publish the
           // aggregated counts, complete nested metadata records, and a bounded
@@ -800,6 +817,7 @@ export const ToolScriptTool = Tool.define(
             publishProgress({ immediate: subParts.length === 1 })
             const subCtx = {
               ...ctx,
+              abort,
               extra: { ...ctx.extra, fromExec: true },
               callID,
               // Capture nested metadata in its own record. Forwarding it to the
@@ -842,7 +860,7 @@ export const ToolScriptTool = Tool.define(
                     tool.execute!(toolArgs ?? {}, {
                       toolCallId: subCtx.callID,
                       messages: [],
-                      abortSignal: ctx.abort,
+                      abortSignal: abort,
                       experimental_context: {
                         onMcpToolProgress: (meta: Record<string, unknown>) =>
                           bridge.promise(
@@ -886,8 +904,9 @@ export const ToolScriptTool = Tool.define(
                   })),
                 )
               : executeMcp(mcpDef!)
-            return withSlot(() =>
-              bridge
+            return withSlot(() => {
+              if (closing || abort.aborted) throw new Error("exec tool admission is closed")
+              return bridge
                 .promise(executeBuiltin)
                 .then(
                   (result) => {
@@ -945,8 +964,8 @@ export const ToolScriptTool = Tool.define(
                     publishProgress()
                     throw new Error(`${id}: ${message}`)
                   },
-                ),
-            )
+                )
+            })
           }
 
           const logHook: HostFn = (message: unknown) => {
@@ -989,14 +1008,15 @@ export const ToolScriptTool = Tool.define(
             return undefined
           }
 
-          const outcome = yield* Effect.tryPromise({
-            try: () =>
+          const outcome = yield* ToolSettlement.promise(
+            (signal) => {
+              signal.addEventListener("abort", () => controller.abort(), { once: true })
               // The return value is serialized IN THE GUEST via __serialize (strict):
               // unserializable values (circular refs, BigInt, throwing getters) throw
               // with a $.path instead of silently degrading to "[object Object]",
               // and lossy conversions (NaN→null, Map→array, Error→plain object) are
               // reported as warnings. The envelope crosses the boundary as plain JSON.
-              evalScript(
+              return evalScript(
                 `const ALL_TOOLS = Object.freeze(${JSON.stringify(allTools)}.map(Object.freeze));\n` +
                   GUEST_PRELUDE +
                   "\n" +
@@ -1004,19 +1024,32 @@ export const ToolScriptTool = Tool.define(
                   `\nconst __ret = await globalThis.__main();
 const __out = __serialize(__ret, false);
 return { __undef: __out.value === undefined, json: __out.value === undefined ? "" : JSON.stringify(__out.value), warnings: __out.warnings };`,
-                {
-                __callTool: callTool,
-                __log: logHook,
-                __readText: readText,
-                __writeText: writeText,
-              }, {
+                Object.fromEntries(Object.entries({
+                  __callTool: callTool,
+                  __log: logHook,
+                  __readText: readText,
+                  __writeText: writeText,
+                }).map(([name, fn]) => [name, trackHostCall(fn)])), {
                 deterministic: false,
                 deadlineMs: WALL_DEADLINE_MS,
                 activeDeadlineMs,
-                interrupt: () => ctx.abort.aborted,
-              }),
-            catch: (err) => (err instanceof Error ? err : new Error(String(err))),
-          }).pipe(Effect.result)
+                signal: abort,
+              })
+            },
+            (exit) => Effect.gen(function* () {
+              const interrupted = abort.aborted
+              yield* closeHostCalls()
+              yield* flushProgress()
+              if (interrupted) {
+                yield* ToolSettlement.record(ctx.callID, Effect.succeed({
+                  title: "cancelled",
+                  metadata: terminalMetadata("cancelled"),
+                  output: '<exec status="cancelled">\n<error_message>Execution cancelled</error_message>\n</exec>',
+                }))
+              }
+              return Exit.isSuccess(exit) ? exit.value : yield* Effect.failCause(exit.cause)
+            }),
+          ).pipe(Effect.result)
 
           const traceLines = trace.map(
             (t) => `- ${t.name} → ${t.status}${t.error ? ` (${t.error.slice(0, 200)})` : ""} [${t.durationMs}ms]`,

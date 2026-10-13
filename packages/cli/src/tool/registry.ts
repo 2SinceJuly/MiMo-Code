@@ -22,6 +22,7 @@ import { SkillTool } from "./skill"
 import { SkillSearchTool } from "./skill-search"
 import { MCP_TOOL_SEARCH_ID, McpToolSearchTool } from "./mcp-tool-search"
 import * as Tool from "./tool"
+import * as ToolSettlement from "./settlement"
 import { Config } from "../config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@mimo-ai/plugin"
 import z from "zod"
@@ -37,7 +38,7 @@ import { Log } from "@/util"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
-import { Effect, Layer, Context } from "effect"
+import { Effect, Exit, Layer, Context } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
@@ -184,20 +185,30 @@ export const layer = Layer.effect(
                   directory: ctx.directory,
                   worktree: ctx.worktree,
                 }
-                const result = yield* Effect.promise(() => def.execute(args as any, pluginCtx))
-                const output = typeof result === "string" ? result : result.output
-                const metadata = typeof result === "string" ? {} : (result.metadata ?? {})
-                const info = yield* agent.get(toolCtx.agent)
-                const out = yield* truncate.output(output, {}, info)
-                return {
-                  title: "",
-                  output: out.truncated ? out.content : output,
-                  metadata: {
-                    ...metadata,
-                    truncated: out.truncated,
-                    ...(out.truncated && { outputPath: out.outputPath }),
-                  },
-                }
+                return yield* ToolSettlement.promise(
+                  (signal) => def.execute(args as any, {
+                    ...pluginCtx,
+                    abort: AbortSignal.any([toolCtx.abort, signal]),
+                  }),
+                  (exit) => Effect.gen(function* () {
+                    const result = Exit.isSuccess(exit) ? exit.value : yield* Effect.failCause(exit.cause)
+                    const output = typeof result === "string" ? result : result.output
+                    const metadata = typeof result === "string" ? {} : (result.metadata ?? {})
+                    const info = yield* agent.get(toolCtx.agent)
+                    const out = yield* truncate.output(output, {}, info)
+                    const normalized = {
+                      title: "",
+                      output: out.truncated ? out.content : output,
+                      metadata: {
+                        ...metadata,
+                        truncated: out.truncated,
+                        ...(out.truncated && { outputPath: out.outputPath }),
+                      },
+                    }
+                    yield* ToolSettlement.record(toolCtx.callID, Effect.succeed(normalized))
+                    return normalized
+                  }),
+                ).pipe(Effect.orDie)
               }),
           }
         }
