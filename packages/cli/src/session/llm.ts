@@ -171,6 +171,22 @@ Don't ask the user about something memory may already record.`,
   return sections.join("\n\n")
 }
 
+/**
+ * OpenCode Go (`https://opencode.ai/zen/go`) hard-rejects inference requests with
+ * no stable per-conversation `x-opencode-session` (400 MissingSessionID). Only
+ * that gateway requires the header — other providers must stay byte-identical.
+ */
+export function isOpenCodeGoModel(model: Pick<Provider.Model, "providerID" | "api" | "options">): boolean {
+  const providerID = String(model.providerID ?? "")
+  if (providerID === "opencode-go" || providerID.startsWith("opencode-go")) return true
+  const candidates = [
+    model.api?.url,
+    (model.options as { baseURL?: unknown } | undefined)?.baseURL,
+    (model.options as { baseUrl?: unknown } | undefined)?.baseUrl,
+  ]
+  return candidates.some((url) => typeof url === "string" && url.includes("opencode.ai/zen/go"))
+}
+
 export type StreamInput = {
   user: MessageV2.User
   sessionID: string
@@ -731,6 +747,13 @@ const live: Layer.Layer<
         maxOutputTokens: params.maxOutputTokens,
         abortSignal: input.abort,
         headers: {
+          // OpenCode Go only (see isOpenCodeGoModel). Reuse sessionID — including
+          // ephemeral title/summary/compaction — under the name that gateway expects.
+          // Same value as x-session-affinity; no new identifier. Other providers
+          // must not gain this header.
+          ...(isOpenCodeGoModel(input.model) && input.sessionID
+            ? { "x-opencode-session": input.sessionID }
+            : {}),
           ...(!input.ephemeral ? { "x-session-affinity": input.sessionID } : {}),
           ...(!input.ephemeral && input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
           ...input.model.headers,
