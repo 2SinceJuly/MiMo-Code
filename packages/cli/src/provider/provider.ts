@@ -1039,6 +1039,23 @@ export const Model = Schema.Struct({
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Model = Types.DeepMutable<Schema.Schema.Type<typeof Model>>
 
+/**
+ * The request base URL a provider will actually hit — same precedence as
+ * `resolveSDK`: non-empty `provider.options.baseURL` wins, else `model.api.url`.
+ * Config load already folds `options.endpoint` into `options.baseURL`.
+ * Callers that need `${var}` expansion should expand the returned string; this
+ * helper only answers "which URL string is in effect".
+ */
+export function effectiveBaseURL(
+  model: Pick<Model, "api">,
+  providerOptions?: Record<string, unknown> | undefined,
+): string | undefined {
+  const fromProvider = providerOptions?.["baseURL"]
+  if (typeof fromProvider === "string" && fromProvider !== "") return fromProvider
+  const fromModel = model.api?.url
+  return typeof fromModel === "string" && fromModel !== "" ? fromModel : undefined
+}
+
 export const Info = Schema.Struct({
   id: ProviderID,
   name: Schema.String,
@@ -1648,8 +1665,7 @@ const layer: Layer.Layer<
         }
 
         const baseURL = iife(() => {
-          let url =
-            typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
+          let url = effectiveBaseURL(model, options)
           if (!url) return
 
           const loader = s.varsLoaders[model.providerID]

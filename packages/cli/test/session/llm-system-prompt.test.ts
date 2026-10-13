@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import path from "path"
 import { Effect, Stream, ManagedRuntime, Layer } from "effect"
 import { LLM } from "../../src/session/llm"
+import { isOpenCodeGoTarget, openCodeGoSessionHeaders } from "../../src/provider/opencode-go"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Session as SessionNs } from "../../src/session"
 import { Instance } from "../../src/project/instance"
@@ -129,6 +130,23 @@ function tmpConfig(providerID: string, baseURL: string) {
     enabled_providers: [providerID],
     provider: {
       [providerID]: { options: { apiKey: "test-key", baseURL } },
+    },
+  })
+}
+
+/** OpenCode Go-shaped provider: identity/URL say zen/go, traffic goes to the mock. */
+function goTmpConfig(providerID: string, mockBaseURL: string, modelID: string, model: unknown) {
+  return JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    enabled_providers: [providerID],
+    provider: {
+      [providerID]: {
+        name: "OpenCode Go",
+        npm: "@ai-sdk/openai-compatible",
+        api: "https://opencode.ai/zen/go/v1",
+        models: { [modelID]: model },
+        options: { apiKey: "test-key", baseURL: mockBaseURL },
+      },
     },
   })
 }
@@ -565,5 +583,214 @@ describe("session.llm system prompt — memory-instructions guard", () => {
       if (previous === undefined) delete process.env.MIMOCODE_DISABLE_CHECKPOINT
       else process.env.MIMOCODE_DISABLE_CHECKPOINT = previous
     }
+  })
+})
+
+// https://github.com/XiaomiMiMo/MiMo-Code/issues/2317 — OpenCode Go rejects
+// requests with no per-conversation ID (400 MissingSessionID) from 09/05.
+// Only Go targets get the extra header; other providers stay unchanged.
+describe("session.llm outbound headers", () => {
+  test("isOpenCodeGoTarget uses identity or effective baseURL (provider.options.baseURL ?? model.api.url)", () => {
+    const shape = (providerID: string, url: string) =>
+      ({
+        providerID,
+        api: { id: "m", url, npm: "@ai-sdk/openai-compatible" },
+      }) as unknown as Parameters<typeof isOpenCodeGoTarget>[0]
+    expect(isOpenCodeGoTarget(shape("opencode-go", ""))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("opencode-go-chat", ""))).toBe(true)
+    // effective URL = provider.options.baseURL when set, else model.api.url
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"))).toBe(true)
+    expect(isOpenCodeGoTarget(shape("oc", "https://elsewhere.example/v1"), { baseURL: "https://opencode.ai/zen/go/v1" })).toBe(true)
+    // provider.options.baseURL wins over model.api.url — same as resolveSDK
+    expect(isOpenCodeGoTarget(shape("oc", "https://opencode.ai/zen/go/v1"), { baseURL: "https://proxy.example/v1" })).toBe(false)
+    expect(isOpenCodeGoTarget(shape("alibaba", "https://dashscope.aliyuncs.com"))).toBe(false)
+    expect(isOpenCodeGoTarget(shape("opencode", "https://opencode.ai/zen/v1"))).toBe(false)
+  })
+
+  test("openCodeGoSessionHeaders only emits for Go targets with a sessionID", () => {
+    const go = {
+      providerID: "opencode-go",
+      api: { id: "m", url: "", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
+    const other = {
+      providerID: "alibaba",
+      api: { id: "m", url: "https://x", npm: "" },
+    } as unknown as Parameters<typeof openCodeGoSessionHeaders>[0]
+    expect(openCodeGoSessionHeaders(go, "ses_1")).toEqual({ "x-opencode-session": "ses_1" })
+    expect(openCodeGoSessionHeaders(go, "")).toEqual({})
+    expect(openCodeGoSessionHeaders(go, undefined)).toEqual({})
+    expect(openCodeGoSessionHeaders(other, "ses_1")).toEqual({})
+  })
+
+  test("OpenCode Go non-ephemeral call carries x-opencode-session and x-session-affinity", async () => {
+    const server = queueState.server!
+    const providerID = "opencode-go"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture("alibaba", modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "mimocode.json"),
+          goTmpConfig(providerID, `${server.url.origin}/v1`, modelID, fixture.model),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(modelID))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBe(sessionID)
+        expect(capture.headers.get("x-session-affinity")).toBe(sessionID)
+      },
+    })
+  })
+
+  test("OpenCode Go ephemeral call still carries x-opencode-session but not x-session-affinity", async () => {
+    const server = queueState.server!
+    const providerID = "opencode-go"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture("alibaba", modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "mimocode.json"),
+          goTmpConfig(providerID, `${server.url.origin}/v1`, modelID, fixture.model),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(modelID))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                  ephemeral: true,
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBe(sessionID)
+        expect(capture.headers.get("x-session-affinity")).toBeNull()
+      },
+    })
+  })
+
+  test("non-Go provider requests gain no x-opencode-session header", async () => {
+    const server = queueState.server!
+    const providerID = "alibaba"
+    const modelID = "qwen-plus"
+    const fixture = await loadFixture(providerID, modelID)
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hi"), { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "mimocode.json"), tmpConfig(providerID, `${server.url.origin}/v1`))
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const sessionRt = ManagedRuntime.make(SessionNs.defaultLayer)
+        let sessionID: SessionID
+        try {
+          const info = await sessionRt.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+          sessionID = info.id
+        } finally {
+          await sessionRt.dispose()
+        }
+        const rt = ManagedRuntime.make(Layer.mergeAll(LLM.defaultLayer))
+        try {
+          await rt.runPromise(
+            LLM.Service.use((svc) =>
+              svc
+                .stream({
+                  user: makeBaseUser(sessionID, providerID, resolved.id),
+                  sessionID,
+                  model: resolved,
+                  agent: makeAgent(),
+                  system: ["You are a helpful assistant."],
+                  messages: [{ role: "user", content: "Hello" }],
+                  tools: {},
+                })
+                .pipe(Stream.runDrain),
+            ),
+          )
+        } finally {
+          await rt.dispose()
+        }
+        const capture = await request
+        expect(capture.headers.get("x-opencode-session")).toBeNull()
+        expect(capture.headers.get("x-session-affinity")).toBe(sessionID)
+      },
+    })
   })
 })

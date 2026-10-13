@@ -2,6 +2,7 @@ import { HostModelTransport } from "../provider/host-transport"
 import { bindHostError, inheritHostError } from "@/error/host-registry"
 import path from "path"
 import { Provider, ProviderError } from "@/provider"
+import { openCodeGoSessionHeaders } from "@/provider/opencode-go"
 import { Log } from "@/util"
 import { Context, Duration, Effect, Layer, Record, Cause } from "effect"
 import * as Stream from "effect/Stream"
@@ -731,6 +732,11 @@ const live: Layer.Layer<
         maxOutputTokens: params.maxOutputTokens,
         abortSignal: input.abort,
         headers: {
+          // OpenCode Go only (provider/opencode-go). Reuse sessionID — including
+          // ephemeral title/summary/compaction — under the name that gateway expects.
+          // Same value as x-session-affinity; no new identifier. Other providers
+          // must not gain this header. Detect via model + provider.options.baseURL.
+          ...openCodeGoSessionHeaders(input.model, input.sessionID, item.options),
           ...(!input.ephemeral ? { "x-session-affinity": input.sessionID } : {}),
           ...(!input.ephemeral && input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
           ...input.model.headers,
