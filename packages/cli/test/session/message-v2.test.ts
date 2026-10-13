@@ -238,7 +238,10 @@ describe("resume trim model boundary", () => {
     test(`protect delivered output ${JSON.stringify(protectedInfo)}`, () => {
       const input = history([{ ...base, id: PartID.make("text"), type: "text", text: "delivered" }])
       input[1].info = { ...assistantInfo(assistantID, userID), ...protectedInfo }
-      expect(() => MessageV2.planResumeTrim(input, userID)).toThrow("protected output")
+      // Delivered output is kept, never silently dropped from durable history.
+      const trim = MessageV2.planResumeTrim(input, userID)
+      expect(trim.removeMessages).toEqual([])
+      expect(trim.messages[1].parts).toEqual(input[1].parts)
     })
   }
 })

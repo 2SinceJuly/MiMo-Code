@@ -3518,6 +3518,36 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       assistant.structured === undefined && !assistant.summary && !hasUsefulAssistantParts(parts)
 
     /**
+     * Delete empty-residue assistants under one parent user.
+     * Parent-scoped: never session-wide. Live empty shells (busy, no terminal
+     * marker) are skipped; `preserveError` keeps error-marked shells for recovery.
+     */
+    const cleanupEmptyResidueAssistants = Effect.fn("SessionPrompt.cleanupEmptyResidueAssistants")(function* (input: {
+      sessionID: SessionID
+      agentID?: string
+      parentMessageID: MessageID
+      sessionBusy?: boolean
+      force?: boolean
+      preserveError?: boolean
+    }) {
+      const busy = input.sessionBusy ?? (yield* status.get(input.sessionID)).type !== "idle"
+      const preserveError = input.preserveError ?? true
+      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
+      const removed: MessageID[] = []
+      for (const msg of msgs) {
+        if (msg.info.role !== "assistant") continue
+        if (msg.info.parentID !== input.parentMessageID) continue
+        if (!isEmptyAssistantResidue(msg.info, msg.parts)) continue
+        if (preserveError && msg.info.error) continue
+        const liveOwned = !input.force && busy && !msg.info.error && !("completed" in msg.info.time)
+        if (liveOwned) continue
+        yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: msg.info.id })
+        removed.push(msg.info.id)
+      }
+      return removed
+    })
+
+    /**
      * Provider stop alone is not a valid delivery: empty stops can resume from
      * their parent even after completion was persisted, before classification.
      */
@@ -6250,7 +6280,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       const parentMessageID = target.info.parentID
-      if (!isEmptyAssistantResidue(target.info, target.parts)) {
+      // tool-resume only when the target has real tool calls to keep. Text-only
+      // incomplete assistants fall back to user-resume (no prefill; D16.3).
+      const hasToolParts = target.parts.some((part) => part.type === "tool")
+      if (!isEmptyAssistantResidue(target.info, target.parts) && hasToolParts) {
         const tool: ResumePlan = {
           action: "tool-resume",
           assistantMessageID: target.info.id,
@@ -6323,7 +6356,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   tail.info.id !== plan.assistantMessageID ||
                   tail.info.parentID !== plan.parentMessageID ||
                   !isRecoveryWorthyAssistant(tail.info, tail.parts) ||
-                  isEmptyAssistantResidue(tail.info, tail.parts) !== (plan.action === "user-resume")
+                  // Same classify as planResume: tool-resume only with real tool parts.
+                  ((!isEmptyAssistantResidue(tail.info, tail.parts) && tail.parts.some((p) => p.type === "tool")) !== (plan.action === "tool-resume"))
                 )
                 ? "assistant changed at runner admission"
                 : undefined
@@ -6335,6 +6369,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         trim = yield* Effect.sync(() => MessageV2.planResumeTrim(tailMsgs, plan.parentMessageID)).pipe(
           Effect.catchCause(() => Effect.sync(() => { throw new NotFoundError({ message: "No safe resume history boundary" }) })),
         )
+        // Empty residue is dirty tail data: clean it before model resolution so a
+        // later getModel failure cannot leave shells that block re-dispatch.
+        if (!strictTail) {
+          yield* cleanupEmptyResidueAssistants({
+            sessionID: input.sessionID,
+            agentID: input.agentID,
+            parentMessageID: plan.parentMessageID,
+            sessionBusy: false,
+            preserveError: false,
+          })
+        }
         const parent = tailMsgs[parentIdx].info as MessageV2.User
         trimModel = yield* getModel(
           input.model ? ProviderID.make(input.model.providerID) : parent.model.providerID,

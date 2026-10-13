@@ -884,7 +884,13 @@ export function planResumeTrim(input: WithParts[], parentID: MessageID) {
     const nextBlock = index === lastToolMessage
       ? message.parts.findIndex((part, partIndex) => partIndex > lastTool && part.type === "step-start")
       : -1
-    const cut = index < lastToolMessage ? message.parts.length
+    // No tool in the tail: keep delivered/protected work, discard incomplete
+    // text-only tails so the request ends at the parent user (no prefill).
+    const delivered = !!info.summary || info.structured !== undefined ||
+      (!info.error && info.finish && info.finish !== "length" && info.finish !== "tool-calls" &&
+        (info.finish === "stop" || info.time.completed !== undefined))
+    const cut = lastToolMessage < 0 ? (delivered ? message.parts.length : 0)
+      : index < lastToolMessage ? message.parts.length
       : index === lastToolMessage ? (nextBlock < 0 ? message.parts.length : nextBlock)
       : 0
     const discarded = message.parts.slice(cut)
@@ -892,6 +898,20 @@ export function planResumeTrim(input: WithParts[], parentID: MessageID) {
       part.type === "text" ? !part.ignored && part.text.trim().length > 0
         : part.type === "reasoning" ? part.text.trim().length > 0 : part.type === "tool",
     )
+    // File-only / non-model-site shells are residue: drop before the protected
+    // gate so attachments do not masquerade as delivered output.
+    const useful = message.parts.some((part) =>
+      part.type === "text" ? !part.synthetic && !part.ignored && part.text.trim().length > 0
+        : part.type === "tool" ? true
+        : part.type === "reasoning" && part.text.trim().length > 0)
+    const onlyStructural = message.parts.every((part) =>
+      part.type === "step-start" || part.type === "step-finish" || part.type === "retry" ||
+      part.type === "text" && (part.ignored || !part.text.trim().length) ||
+      part.type === "reasoning" && !part.text.trim().length)
+    if (!useful && !onlyStructural && message.parts.length > 0 && info.structured === undefined && !info.summary) {
+      removeMessages.push(info.id)
+      return []
+    }
     if (cut < message.parts.length && (
       info.summary || info.structured !== undefined ||
       (!info.error && info.finish && info.finish !== "length" && info.finish !== "tool-calls" &&
@@ -949,7 +969,9 @@ export function assertResumeModelBoundary(messages: ModelMessage[]) {
   if (messages.at(-1)?.role === "assistant") {
     throw new Error("Resume requires a user or complete client tool-result boundary")
   }
-  if (messages.length === 0) throw new Error("Resume has no model input")
+  // Empty is legal for user-resume: the parent user may carry no parts and
+  // runLoop re-seeds the turn from that user. Only tool-pairing and tail shape
+  // must hold when there is model input.
 }
 
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
