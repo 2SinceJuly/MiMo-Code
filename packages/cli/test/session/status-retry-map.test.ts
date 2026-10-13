@@ -7,7 +7,7 @@ import { AppRuntime } from "@/effect/app-runtime"
 
 describe("SessionStatus.setRetry is visible to GET /session/status (list)", () => {
   test("setRetry updates the map that list() serves", async () => {
-    await using tmp = await Instance.provide({
+    await Instance.provide({
       directory: process.cwd(),
       fn: async () => {
         const sessionID = SessionID.make("ses_recover_retry_map")
