@@ -237,7 +237,9 @@ describe("retry density instrumentation (upstream transport failure)", () => {
 
             yield* Deferred.await(observed).pipe(Effect.timeout("32 seconds"))
             expect(handle.message.error).toBeUndefined()
-            expect((yield* status.get(chat.id)).type).toBe(phase === "request" ? "busy" : "retry")
+            // Request-phase ladders write SessionStatus too (reconnect row), so both
+            // phases surface retry while the persistent network budget is waiting.
+            expect((yield* status.get(chat.id)).type).toBe("retry")
             yield* Fiber.interrupt(run)
             const exit = yield* Fiber.await(run)
             expect(Exit.isFailure(exit)).toBe(true)
