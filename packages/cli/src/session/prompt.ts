@@ -6280,10 +6280,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       const parentMessageID = target.info.parentID
-      // tool-resume only when the target has real tool calls to keep. Text-only
-      // incomplete assistants fall back to user-resume (no prefill; D16.3).
-      const hasToolParts = target.parts.some((part) => part.type === "tool")
-      if (!isEmptyAssistantResidue(target.info, target.parts) && hasToolParts) {
+      if (!isEmptyAssistantResidue(target.info, target.parts)) {
         const tool: ResumePlan = {
           action: "tool-resume",
           assistantMessageID: target.info.id,
@@ -6356,8 +6353,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   tail.info.id !== plan.assistantMessageID ||
                   tail.info.parentID !== plan.parentMessageID ||
                   !isRecoveryWorthyAssistant(tail.info, tail.parts) ||
-                  // Same classify as planResume: tool-resume only with real tool parts.
-                  ((!isEmptyAssistantResidue(tail.info, tail.parts) && tail.parts.some((p) => p.type === "tool")) !== (plan.action === "tool-resume"))
+                  isEmptyAssistantResidue(tail.info, tail.parts) !== (plan.action === "user-resume")
                 )
                 ? "assistant changed at runner admission"
                 : undefined
