@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { Deferred, Duration, Effect, Exit, Fiber, Layer, ManagedRuntime, Context } from "effect"
+import { Deferred, Duration, Effect, Exit, Fiber, Layer, ManagedRuntime, Context, ScopedCache } from "effect"
 import { InstanceState } from "../../src/effect"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { Instance } from "../../src/project/instance"
@@ -10,6 +10,7 @@ import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID } from "../../src/session/schema"
+import { disposeInstance } from "../../src/effect/instance-registry"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { testEffect } from "../lib/effect"
 import "../../src/server/projectors"
@@ -583,6 +584,203 @@ test("InstanceState dedupes concurrent lookups", async () => {
     ),
   )
 })
+
+// [TP-RUN-R4-09]
+it.live("InstanceState cancellation of the first caller preserves initialization for concurrent and later turns", () =>
+  provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const waiting = yield* Deferred.make<void>()
+      const events: string[] = []
+      let attempts = 0
+      const state = yield* InstanceState.make(() =>
+        Effect.gen(function* () {
+          const attempt = ++attempts
+          events.push(`acquire:${attempt}`)
+          yield* Effect.addFinalizer(() => Effect.sync(() => { events.push(`release:${attempt}`) }))
+          yield* Deferred.succeed(entered, undefined)
+          yield* Deferred.await(release)
+          return { attempt }
+        }),
+      )
+      const first = yield* InstanceState.get(state).pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
+      const concurrent = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(waiting, undefined)
+        return yield* InstanceState.get(state)
+      }).pipe(Effect.forkChild)
+      yield* Deferred.await(waiting)
+      yield* Fiber.interrupt(first).pipe(Effect.timeout("1 second"))
+      expect(Exit.isFailure(yield* Fiber.await(first))).toBe(true)
+      expect(concurrent.pollUnsafe()).toBeUndefined()
+      expect(events).toEqual(["acquire:1"])
+      yield* Deferred.succeed(release, undefined)
+      const value = yield* Fiber.join(concurrent)
+      expect(yield* InstanceState.get(state)).toBe(value)
+      expect(attempts).toBe(1)
+      yield* InstanceState.invalidate(state)
+      expect(events).toEqual(["acquire:1", "release:1"])
+    }),
+  ),
+)
+
+// [TP-RUN-R4-09]
+for (const operation of ["invalidate", "dispose"] as const) {
+  it.live(`InstanceState ${operation} waits for initialization exit before releasing resources without touching a new entry`, () =>
+    provideTmpdirInstance((directory) =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>()
+        const stopping = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const events: string[] = []
+        let attempts = 0
+        const state = yield* InstanceState.make(() =>
+          Effect.gen(function* () {
+            const attempt = ++attempts
+            events.push(`acquire:${attempt}`)
+            yield* Effect.addFinalizer(() => Effect.sync(() => { events.push(`release:${attempt}`) }))
+            if (attempt === 1) {
+              yield* Deferred.succeed(entered, undefined)
+              yield* Effect.never.pipe(Effect.ensuring(Effect.gen(function* () {
+                events.push("stopping:1")
+                yield* Deferred.succeed(stopping, undefined)
+                yield* Deferred.await(release)
+                events.push("stopped:1")
+              })))
+            }
+            return { attempt }
+          }),
+        )
+        const first = yield* InstanceState.get(state).pipe(Effect.forkChild)
+        yield* Deferred.await(entered)
+        const closing = yield* (operation === "invalidate"
+          ? InstanceState.invalidate(state)
+          : Effect.promise(() => disposeInstance(directory))).pipe(Effect.forkChild)
+        yield* Deferred.await(stopping).pipe(Effect.timeout("1 second"))
+        expect(closing.pollUnsafe()).toBeUndefined()
+        expect(events).toEqual(["acquire:1", "stopping:1"])
+        const next = yield* InstanceState.get(state)
+        expect(next).toEqual({ attempt: 2 })
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(closing)
+        expect(Exit.isFailure(yield* Fiber.await(first))).toBe(true)
+        expect(events).toEqual(["acquire:1", "stopping:1", "acquire:2", "stopped:1", "release:1"])
+        expect(yield* InstanceState.get(state)).toBe(next)
+        yield* InstanceState.invalidate(state)
+        expect(events.at(-1)).toBe("release:2")
+      }),
+    ),
+  )
+}
+
+// [TP-RUN-R4-09]
+it.live("InstanceState invalidation before initialization starts settles its result and permits a new entry", () =>
+  provideTmpdirInstance((directory) =>
+    Effect.gen(function* () {
+      let attempts = 0
+      const state = yield* InstanceState.make(() => Effect.sync(() => ({ attempt: ++attempts })))
+      const result = yield* ScopedCache.get(state.cache, directory)
+      expect(attempts).toBe(0)
+      yield* InstanceState.invalidate(state).pipe(Effect.timeout("1 second"))
+      const exit = yield* Deferred.await(result).pipe(Effect.exit, Effect.timeout("1 second"))
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(attempts).toBe(0)
+      const next = yield* InstanceState.get(state)
+      expect(next).toEqual({ attempt: 1 })
+      expect(yield* InstanceState.get(state)).toBe(next)
+    }),
+  ),
+)
+
+// [TP-RUN-R4-09]
+it.live("InstanceState cancellation of a waiter preserves the shared initialization", () =>
+  provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const waiting = yield* Deferred.make<void>()
+      let attempts = 0
+      const state = yield* InstanceState.make(() =>
+        Effect.gen(function* () {
+          attempts++
+          yield* Deferred.succeed(entered, undefined)
+          yield* Deferred.await(release)
+          return { ready: true }
+        }),
+      )
+      const owner = yield* InstanceState.get(state).pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
+      const waiter = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(waiting, undefined)
+        return yield* InstanceState.get(state)
+      }).pipe(Effect.forkChild)
+      yield* Deferred.await(waiting)
+      yield* Fiber.interrupt(waiter)
+      expect(Exit.isFailure(yield* Fiber.await(waiter))).toBe(true)
+      yield* Deferred.succeed(release, undefined)
+      const value = yield* Fiber.join(owner)
+      expect(yield* InstanceState.get(state)).toBe(value)
+      expect(attempts).toBe(1)
+    }),
+  ),
+)
+
+// [TP-RUN-R4-09]
+it.live("InstanceState finishes nested initialization without callers and reuses the completed value", () =>
+  provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      const owner = yield* InstanceState.context
+      let innerAttempts = 0
+      let outerAttempts = 0
+      const inner = yield* InstanceState.make((ctx) => Effect.gen(function* () {
+        innerAttempts++
+        yield* Effect.yieldNow
+        expect(yield* InstanceState.context).toBe(owner)
+        expect(ctx).toBe(owner)
+        return { ready: true }
+      }))
+      const outer = yield* InstanceState.make(() => Effect.gen(function* () {
+        outerAttempts++
+        yield* Deferred.succeed(entered, undefined)
+        yield* Deferred.await(release)
+        const value = yield* InstanceState.get(inner)
+        yield* Deferred.succeed(finished, undefined)
+        return value
+      }))
+      const first = yield* InstanceState.get(outer).pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
+      yield* Fiber.interrupt(first).pipe(Effect.timeout("1 second"))
+      expect(Exit.isFailure(yield* Fiber.await(first))).toBe(true)
+      yield* Deferred.succeed(release, undefined)
+      yield* Deferred.await(finished).pipe(Effect.timeout("1 second"))
+      expect(yield* InstanceState.get(outer)).toBe(yield* InstanceState.get(inner))
+      expect({ innerAttempts, outerAttempts }).toEqual({ innerAttempts: 1, outerAttempts: 1 })
+    }),
+  ),
+)
+
+// [TP-RUN-R4-09]
+it.live("InstanceState retains non-interruption failures until explicit invalidation", () =>
+  provideTmpdirInstance(() =>
+    Effect.gen(function* () {
+      let attempts = 0
+      const state = yield* InstanceState.make(() =>
+        Effect.sync(() => { attempts++ }).pipe(Effect.andThen(Effect.fail("configuration invalid"))),
+      )
+      const first = yield* InstanceState.get(state).pipe(Effect.exit)
+      const second = yield* InstanceState.get(state).pipe(Effect.exit)
+      expect(second).toEqual(first)
+      expect(attempts).toBe(1)
+      yield* InstanceState.invalidate(state)
+      yield* InstanceState.get(state).pipe(Effect.exit)
+      expect(attempts).toBe(2)
+    }),
+  ),
+)
 
 test("InstanceState survives deferred resume from the same instance context", async () => {
   await using tmp = await tmpdir({ git: true })

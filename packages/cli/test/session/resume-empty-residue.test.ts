@@ -88,7 +88,8 @@ describe("resume empty residue", () => {
     expect(result.parents.every((p) => p === result.userParent)).toBe(true)
     // [TP-SR-R21-16]
     expect(result.shell1Gone).toBe(true)
-    expect(result.shell2Gone).toBe(true)
+    // Resume target empty container stays durable (TP-SR-R21-27).
+    expect(result.shell2Gone).toBe(false)
     expect(result.anyAbandonedAsResumed).toBe(false)
   })
 
@@ -206,7 +207,7 @@ describe("resume empty residue", () => {
           }),
         ),
     })
-    expect(result.emptyGone).toBe(true)
+    expect(result.emptyGone).toBe(false)  // D16.3: empty containers stay durable
     expect(result.usefulKept).toBe(true)
   })
 
@@ -273,7 +274,7 @@ describe("resume empty residue", () => {
           }),
         ),
     })
-    expect(result.emptyGone).toBe(true)
+    expect(result.emptyGone).toBe(false)  // D16.3: empty containers stay durable
     expect(result.usefulNotResumeTarget).toBe(true)
     expect(result.users).toBe(1)
   })
@@ -347,7 +348,7 @@ describe("resume empty residue", () => {
           }),
         ),
     })
-    expect(result.emptyGone).toBe(true)
+    expect(result.emptyGone).toBe(false)  // D16.3: empty containers stay durable
     expect(result.completedKept).toBe(true)
     expect(result.usersStable).toBe(true)
     expect(result.ranSomething).toBe(true)
@@ -471,6 +472,6 @@ describe("resume empty residue", () => {
         ),
     })
     expect(result.listed).toBe(true)
-    expect(result.shellGone).toBe(true)
+    expect(result.shellGone).toBe(false)  // file-only shell still user-resume; container retained
   })
 })

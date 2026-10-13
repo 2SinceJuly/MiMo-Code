@@ -4,6 +4,93 @@ import { Runner } from "../../src/effect"
 import { it } from "../lib/effect"
 
 describe("Runner", () => {
+  for (const mode of ["startOwned", "start", "ensureExclusive", "ensureRunning"] as const) {
+    it.live(`[TP-RUN-R4-08] ${mode} publishes busy before work and idle only after cancellation finalizers`, Effect.gen(function* () {
+      const scope = yield* Scope.Scope
+      const events: string[] = []
+      const started = yield* Deferred.make<void>()
+      const finalizing = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const runner = Runner.make<void>(scope, {
+        onBusy: Effect.sync(() => { events.push("busy") }),
+        onIdle: Effect.sync(() => { events.push("idle") }),
+      })
+      const launched = yield* runner[mode](Effect.gen(function* () {
+        events.push("work")
+        yield* Deferred.succeed(started, undefined)
+        yield* Effect.never
+      }).pipe(Effect.ensuring(Deferred.succeed(finalizing, undefined).pipe(Effect.andThen(Deferred.await(release)))))).pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      const beforeRefusal = [...events]
+      const refused = yield* runner.startOwned(Effect.void).pipe(Effect.exit)
+      const afterRefusal = [...events]
+      const cancelling = yield* runner.cancel.pipe(Effect.forkChild)
+      yield* Deferred.await(finalizing)
+      const cancellingBusy = runner.busy
+      const duringFinalizer = [...events]
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(cancelling)
+      yield* Fiber.await(launched)
+      expect(beforeRefusal).toEqual(["busy", "work"])
+      expect(Exit.isFailure(refused)).toBe(true)
+      expect(afterRefusal).toEqual(["busy", "work"])
+      expect(cancellingBusy).toBe(true)
+      expect(duringFinalizer).toEqual(["busy", "work"])
+      expect(runner.busy).toBe(false)
+      expect(events).toEqual(["busy", "work", "idle"])
+    }))
+  }
+  it.live("[TP-RUN-R4-08] owned exit settles when cancelled before the work starts", Effect.gen(function* () {
+    const scope = yield* Scope.Scope
+    const runner = Runner.make<void>(scope)
+    let started = false
+    let finalized = false
+    const owned = yield* runner.startOwned(Effect.sync(() => { started = true }).pipe(
+      Effect.ensuring(Effect.sync(() => { finalized = true })),
+    ))
+    yield* owned.interruptOwned
+    yield* owned.awaitExit.pipe(Effect.timeout("1 second"))
+    expect(started).toBe(false)
+    expect(finalized).toBe(false)
+    expect(runner.busy).toBe(false)
+  }))
+
+  it.live("[TP-RUN-R4-08] owned exit waits for finalizers and cannot interrupt the next owner", Effect.gen(function* () {
+    const scope = yield* Scope.Scope
+    const runner = Runner.make<void>(scope)
+    const started = yield* Deferred.make<void>()
+    const finalizing = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const owned = yield* runner.startOwned(Deferred.succeed(started, undefined).pipe(
+      Effect.andThen(Effect.never),
+      Effect.ensuring(Deferred.succeed(finalizing, undefined).pipe(Effect.andThen(Deferred.await(release)))),
+    ))
+    yield* Deferred.await(started)
+    let exited = false
+    const watcher = yield* owned.awaitExit.pipe(Effect.andThen(Effect.sync(() => { exited = true })), Effect.forkChild)
+    const cancelling = yield* owned.interruptOwned.pipe(Effect.forkChild)
+    yield* Deferred.await(finalizing)
+    expect(exited).toBe(false)
+    expect(runner.busy).toBe(true)
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(cancelling)
+    yield* Fiber.join(watcher)
+    expect(exited).toBe(true)
+    const replacement = yield* runner.startOwned(Effect.never)
+    yield* owned.interruptOwned
+    expect(runner.busy).toBe(true)
+    expect(replacement.runId).not.toBe(owned.runId)
+    yield* replacement.interruptOwned
+    yield* replacement.awaitExit
+  }))
+
+  for (const failure of [false, true]) it.live(`[TP-RUN-R4-08] owned exit observes ${failure ? "failure" : "success"} without an admission waiter`, Effect.gen(function* () {
+    const scope = yield* Scope.Scope
+    const runner = Runner.make<void, string>(scope)
+    const owned = yield* runner.startOwned(failure ? Effect.fail("failed") : Effect.void)
+    yield* owned.awaitExit.pipe(Effect.timeout("1 second"))
+    expect(runner.busy).toBe(false)
+  }))
   it.live("start reports busy as a failure instead of a defect", Effect.gen(function* () {
     const s = yield* Scope.Scope
     const runner = Runner.make<string>(s)

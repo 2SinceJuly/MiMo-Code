@@ -5,7 +5,7 @@ import { Session } from "../../session"
 import { MessageV2 } from "../../session/message-v2"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
-import { Database } from "../../storage"
+import { Database, eq } from "../../storage"
 import { SessionTable, MessageTable, PartTable } from "../../session/session.sql"
 import { Instance } from "../../project/instance"
 import { ShareNext } from "../../share"
@@ -95,7 +95,15 @@ export function storeImportedSession(
       const ids = []
       for (const part of msg.parts) {
         const partInfo = MessageV2.Part.parse(part)
+        if (partInfo.type === "tool" && partInfo.execution === "not-started") delete partInfo.execution
         const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+        const current = tx.select().from(PartTable).where(eq(PartTable.id, partId)).get()
+        if (current && (current.data.type === "tool" || partInfo.type === "tool")) {
+          if (current.session_id !== row.id || current.message_id !== messageID ||
+            current.data.type !== "tool" || partInfo.type !== "tool") throw new Error("Imported tool identity mismatch")
+          const previous = MessageV2.ToolPart.parse({ ...current.data, id: current.id, sessionID: current.session_id, messageID: current.message_id })
+          if (previous.callID !== partInfo.callID) throw new Error("Imported tool call identity mismatch")
+        }
         tx.insert(PartTable)
           .values({ id: partId, message_id: messageID, session_id: row.id, data: partData })
           .onConflictDoNothing()

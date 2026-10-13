@@ -30,8 +30,9 @@ import { PoeAuthPlugin } from "opencode-poe-auth"
 import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
 import { CheckpointSplitoverPlugin } from "./checkpoint-splitover"
 import { SubagentProgressCheckerPlugin } from "./subagent-progress-checker"
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Exit, Layer, Context, Stream } from "effect"
 import { EffectBridge } from "@/effect"
+import * as ToolSettlement from "@/tool/settlement"
 import { InstanceState } from "@/effect"
 import { errorMessage } from "@/util/error"
 import { PluginLoader } from "./loader"
@@ -631,11 +632,16 @@ export const layer = Layer.effect(
       if (!name) return output
       const s = yield* InstanceState.get(state)
       const fh = yield* freshFileHooks
+      const toolHook = name === "tool.execute.before" || name === "tool.execute.after"
 
       for (const entry of s.hooksWithMeta ?? []) {
         const fn = entry?.hook?.[name] as ((input: Input, output: Output) => unknown) | undefined
         if (typeof fn !== "function") continue
-        yield* Effect.promise(async () => fn(input, output))
+        yield* toolHook
+          ? ToolSettlement.promise(async () => fn(input, output), (exit) =>
+              Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
+            ).pipe(Effect.orDie)
+          : Effect.promise(async () => fn(input, output))
       }
 
       for (const entry of fh.meta ?? []) {
@@ -649,17 +655,7 @@ export const layer = Layer.effect(
         }
 
         const snapshot = structuredClone(output)
-        const failed = yield* Effect.tryPromise({
-          try: async () => {
-            await Promise.race([
-              Promise.resolve(fn(input, output)),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`hook timed out after ${HOOK_TIMEOUT_MS}ms`)), HOOK_TIMEOUT_MS),
-              ),
-            ])
-          },
-          catch: (err) => err,
-        }).pipe(
+        const finish = (effect: Effect.Effect<unknown, unknown>) => effect.pipe(
           Effect.map(() => false),
           Effect.catch((err) => {
             Object.assign(output as any, snapshot)
@@ -675,6 +671,33 @@ export const layer = Layer.effect(
             return Effect.succeed(true)
           }),
         )
+        const failed = yield* toolHook
+          ? ToolSettlement.promise(() => {
+              const pending = Promise.resolve().then(() => fn(input, output))
+              let timer: ReturnType<typeof setTimeout>
+              const timed = Promise.race([
+                pending,
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error(`hook timed out after ${HOOK_TIMEOUT_MS}ms`)), HOOK_TIMEOUT_MS)
+                }),
+              ])
+              return timed.catch((error) => pending.then(
+                () => { throw error },
+                () => { throw error },
+              )).finally(() => clearTimeout(timer))
+            }, (exit) => finish(Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause)))
+              .pipe(Effect.orDie)
+          : finish(Effect.tryPromise({
+              try: async () => {
+                await Promise.race([
+                  Promise.resolve(fn(input, output)),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`hook timed out after ${HOOK_TIMEOUT_MS}ms`)), HOOK_TIMEOUT_MS),
+                  ),
+                ])
+              },
+              catch: (err) => err,
+            }))
         if (!failed) hookFailures.delete(hookID)
       }
       return output

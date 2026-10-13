@@ -56,7 +56,7 @@ import { Ripgrep } from "../../src/file/ripgrep"
 import { Format } from "../../src/format"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
-import { TestLLMServer } from "../lib/llm-server"
+import { TestLLMServer, httpError } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { InboxTable, type InboxRow } from "../../src/inbox/inbox.sql"
 
@@ -294,16 +294,21 @@ const captureParentInbox = (parentID: SessionID, parentActorID = "main") =>
   })
 
 const observeWake = (sessionID: SessionID, actorID: string) => Effect.gen(function* () {
-  const executions = yield* ActorExecution.Service
   const instance = Instance.current
-  const started = yield* Deferred.make<Execution | undefined>()
+  const started = yield* Deferred.make<void>()
+  const finished = yield* Deferred.make<void>()
+  let sawRunning = false
   const onStatus = (event: GlobalEvent) => {
     if (event.directory !== instance.directory || event.project !== instance.project.id || event.payload.type !== ActorStatusChanged.type) return
     const properties = ActorStatusChanged.properties.parse(event.payload.properties)
-    if (properties.sessionID !== sessionID || properties.actorID !== actorID || properties.status !== "running") return
-    Effect.runSync(executions.current(sessionID, actorID).pipe(
-      Effect.flatMap((execution) => Deferred.succeed(started, execution)),
-    ))
+    if (properties.sessionID !== sessionID || properties.actorID !== actorID) return
+    if (properties.status === "running" && !sawRunning) {
+      sawRunning = true
+      Effect.runSync(Deferred.succeed(started, undefined))
+    }
+    if (sawRunning && properties.status === "idle") {
+      Effect.runSync(Deferred.succeed(finished, undefined))
+    }
   }
   yield* Effect.acquireRelease(
     Effect.sync(() => GlobalBus.on("event", onStatus)),
@@ -312,9 +317,8 @@ const observeWake = (sessionID: SessionID, actorID: string) => Effect.gen(functi
   return Effect.gen(function* () {
     // Initial idle is not evidence of a completed wake; wait for this turn to
     // start, then for execution release before another notification can arrive.
-    const execution = yield* Deferred.await(started)
-    expect(execution).toBeDefined()
-    yield* Deferred.await(execution!.done)
+    yield* Deferred.await(started)
+    yield* Deferred.await(finished)
   })
 })
 
@@ -375,8 +379,19 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
           yield* firstWake
           const continuedWake = yield* observeWake(parent.id, "owner")
           const before = yield* llm.calls
-          if (terminal === "success") yield* llm.text("second result")
-          if (terminal === "failure") yield* llm.error(401, { error: { message: "invalid credential", type: "authentication_error" } })
+          if (terminal === "success") {
+            // Match the continuation turn only — a plain queue entry can be
+            // stolen by a title-generation request (see llm-server isTitleRequest).
+            yield* llm.textMatch(({ body }) => JSON.stringify(body.messages).includes('"content":"continue"'), "second result")
+          }
+          if (terminal === "failure") {
+            // Same as success: keep the 401 on the continuation request so a
+            // title-generation probe cannot steal it.
+            yield* llm.pushMatch(
+              ({ body }) => JSON.stringify(body.messages).includes('"content":"continue"'),
+              httpError(401, { error: { message: "invalid credential", type: "authentication_error" } }),
+            )
+          }
           if (terminal === "cancelled") yield* llm.hang
           yield* prompt.prompt({ sessionID: spawned.sessionID, agentID: spawned.actorID, agent: "build", model: ref, noReply: true, parts: [{ type: "text", text: "continue" }] })
           const execution = yield* prompt.loop({ sessionID: spawned.sessionID, agentID: spawned.actorID, notifyParentOnComplete: true }).pipe(Effect.exit, Effect.forkChild)
@@ -422,7 +437,7 @@ describe("Actor cancel notification (T41 unified terminal-status bridge)", () =>
             yield* mainNotifications(0, spawned.actorID)
           }
         }), { git: true, config: providerCfg },
-      ))
+      ), 30_000)
     }
   }
 

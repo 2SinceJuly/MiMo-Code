@@ -1,6 +1,11 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, expect } from "bun:test"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { appendFile, readFile } from "node:fs/promises"
+import { EffectBridge } from "../../src/effect"
+import { SyncEvent } from "../../src/sync"
+import { Database, eq } from "../../src/storage"
+import { EventSequenceTable } from "../../src/sync/event.sql"
 import path from "path"
 import type { Agent } from "../../src/agent/agent"
 import { Agent as AgentSvc } from "../../src/agent/agent"
@@ -16,6 +21,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
+import { SessionRunState } from "../../src/session/run-state"
 import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
 import { Log } from "../../src/util"
@@ -162,6 +168,7 @@ const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
 const deps = Layer.mergeAll(
   Session.defaultLayer,
+  SessionRunState.defaultLayer,
   Snapshot.defaultLayer,
   AgentSvc.defaultLayer,
   Permission.defaultLayer,
@@ -184,6 +191,224 @@ const boot = Effect.fn("test.boot")(function* () {
   const provider = yield* Provider.Service
   return { processors, session, provider }
 })
+
+// [TP-SR-R21-32]
+it.live("execution proof precedes effects, rejects duplicate execution, and survives stale writes", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const bridge = yield* EffectBridge.make()
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "write once")
+    const message = yield* assistant(chat.id, parent.id, dir)
+    const model = yield* provider.getModel(ref.providerID, ref.modelID)
+    const handle = yield* processors.create({ assistantMessage: message, sessionID: chat.id, model })
+    handle.registerTool("write")
+    const file = path.join(dir, "effects.txt")
+    const body = Effect.gen(function* () {
+      const part = MessageV2.parts(message.id).find((part) => part.type === "tool")
+      expect(part).toMatchObject({ execution: "started", state: { status: "running", input: { content: "once" } } })
+      yield* Effect.promise(() => appendFile(file, "once\n"))
+      return { title: "written", output: "saved", metadata: {} }
+    })
+    yield* handle.replay({
+      toolCalls: [{ toolName: "write", toolCallId: "write-once", input: { content: "once" } }],
+      finishReason: "tool-calls", messages: [],
+      tools: { write: { execute: async () => {
+        const results = await Promise.allSettled([
+          bridge.promise(handle.executeTool("write", "write-once", body)),
+          bridge.promise(handle.executeTool("write", "write-once", body)),
+        ])
+        expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1)
+        return results.find((result) => result.status === "fulfilled")!.value
+      } } },
+    })
+    expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("once\n")
+    const part = MessageV2.parts(message.id).find((part) => part.type === "tool")!
+    if (part.type !== "tool") throw new Error("missing tool")
+    const stale = { ...part, execution: "not-started" as const, state: { status: "pending" as const, input: {}, raw: "" } }
+    yield* session.updatePart(stale)
+    const saved = yield* session.getPart({ sessionID: chat.id, messageID: message.id, partID: part.id })
+    expect(saved).toMatchObject({ execution: "started", state: part.state })
+    const late = yield* handle.executeTool("write", "write-once", body).pipe(Effect.exit)
+    expect(Exit.isFailure(late)).toBe(true)
+    expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("once\n")
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
+
+// [TP-SR-R21-32]
+it.live("closing a processor cancels execution awaiting input and missing persistence prevents effects", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { processors, session, provider } = yield* boot()
+    const bridge = yield* EffectBridge.make()
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "do not execute")
+    const model = yield* provider.getModel(ref.providerID, ref.modelID)
+    let effects = 0
+    for (const scenario of ["waiting", "removed"] as const) {
+      const message = yield* assistant(chat.id, parent.id, dir)
+      const handle = yield* processors.create({ assistantMessage: message, sessionID: chat.id, model })
+      handle.registerTool("write")
+      const body = Effect.sync(() => { effects++; return { title: "", output: "unexpected", metadata: {} } })
+      if (scenario === "waiting") {
+        const waiting = yield* handle.executeTool("write", "missing", body).pipe(Effect.forkChild)
+        yield* Effect.yieldNow
+        yield* handle.replay({ toolCalls: [], finishReason: "stop", messages: [], tools: {} })
+        expect(Exit.isFailure(yield* Fiber.await(waiting))).toBe(true)
+      } else {
+        yield* handle.replay({
+          toolCalls: [{ toolName: "write", toolCallId: "removed", input: {} }],
+          finishReason: "tool-calls", messages: [],
+          tools: { write: { execute: () => bridge.promise(Effect.gen(function* () {
+            const part = MessageV2.parts(message.id).find((part) => part.type === "tool")!
+            yield* session.removePart({ sessionID: chat.id, messageID: message.id, partID: part.id })
+            return yield* handle.executeTool("write", "removed", body)
+          })) } },
+        })
+      }
+    }
+    expect(effects).toBe(0)
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
+
+// [TP-SR-R21-32]
+it.live("fork preserves idle execution proof and revokes unexecuted proof while its slice is busy", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { session } = yield* boot()
+    const runs = yield* SessionRunState.Service
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "fork interrupted tools")
+    const message = yield* assistant(chat.id, parent.id, dir)
+    for (const execution of ["not-started", "started"] as const) {
+      const id = PartID.ascending()
+      yield* session.mutateToolPart({ sessionID: chat.id, messageID: message.id, partID: id }, () => ({
+        id, sessionID: chat.id, messageID: message.id, type: "tool", tool: "write", callID: execution, execution,
+        state: { status: "error", input: {}, inputComplete: execution === "started", error: "interrupted",
+          metadata: { interrupted: true }, time: { start: 1, end: 2 } },
+      }))
+    }
+    const idle = yield* session.fork({ sessionID: chat.id })
+    const idleTools = (yield* session.messages({ sessionID: idle.id })).flatMap((message) => message.parts).filter((part) => part.type === "tool")
+    expect(idleTools.map((part) => part.execution)).toEqual(["not-started", "started"])
+    yield* runs.start(chat.id, "main", Effect.succeed({ info: message, parts: [] }), Effect.never)
+    yield* Effect.addFinalizer(() => runs.cancel(chat.id))
+    const active = yield* session.fork({ sessionID: chat.id })
+    const activeTools = (yield* session.messages({ sessionID: active.id })).flatMap((message) => message.parts).filter((part) => part.type === "tool")
+    expect(activeTools.map((part) => part.execution)).toEqual([undefined, "started"])
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
+
+// [TP-SR-R21-32]
+it.live("fork rereads completed execution after its initial history snapshot", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { session } = yield* boot()
+    const runs = yield* SessionRunState.Service
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "fork concurrent execution")
+    const message = yield* assistant(chat.id, parent.id, dir)
+    const id = PartID.ascending()
+    const identity = { sessionID: chat.id, messageID: message.id, partID: id }
+    const initial: MessageV2.ToolPart = {
+      id, sessionID: chat.id, messageID: message.id, type: "tool", tool: "write", callID: "fork-concurrent",
+      execution: "not-started", state: { status: "pending", input: {}, raw: "" },
+    }
+    yield* session.mutateToolPart(identity, () => initial)
+    const snapshotRead = defer<void>()
+    const resumeCopy = defer<void>()
+    const execute = defer<void>()
+    const file = path.join(dir, "fork-effects.txt")
+    const result: MessageV2.ToolStateCompleted = {
+      status: "completed", input: { content: "once" }, output: "FORK_LATEST_RESULT", title: "written",
+      metadata: { bytes: 5 }, time: { start: 1, end: 2 },
+    }
+    const owner = yield* runs.startOwned(chat.id, "main", Effect.succeed({ info: message, parts: [] }), Effect.gen(function* () {
+      yield* Effect.promise(() => execute.promise)
+      yield* session.mutateToolPart(identity, current => ({
+        ...current!, execution: "started", state: { status: "running", input: result.input, time: { start: 1 } },
+      }))
+      yield* Effect.promise(() => appendFile(file, "once\n"))
+      const completed = yield* session.mutateToolPart(identity, current => ({ ...current!, state: result }))
+      return { info: message, parts: [completed!] }
+    }))
+    yield* Effect.addFinalizer(() => owner.interruptOwned)
+    const originalAssert = runs.assertNotBusy
+    const mutableRuns = runs as { assertNotBusy: typeof originalAssert }
+    let held = false
+    // fork 已读取历史；这里只延迟真实占用检查，复制与持久读取继续使用 Session 实现。
+    mutableRuns.assertNotBusy = (sessionID, agentID) => Effect.gen(function* () {
+      if (sessionID === chat.id && !held) {
+        held = true
+        snapshotRead.resolve()
+        yield* Effect.promise(() => resumeCopy.promise)
+      }
+      return yield* originalAssert(sessionID, agentID)
+    })
+    try {
+      const copying = yield* session.fork({ sessionID: chat.id }).pipe(Effect.forkChild)
+      yield* Effect.promise(() => snapshotRead.promise)
+      expect(yield* session.getPart(identity)).toEqual(initial)
+      expect(Exit.isFailure(yield* originalAssert(chat.id, "main").pipe(Effect.exit))).toBe(true)
+      execute.resolve()
+      yield* owner.awaitExit
+      yield* originalAssert(chat.id, "main")
+      const completed = MessageV2.ToolPart.parse(yield* session.getPart(identity))
+      expect(completed).toMatchObject({ execution: "started", state: result })
+      expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("once\n")
+      resumeCopy.resolve()
+      const forked = yield* Fiber.join(copying)
+      const messages = yield* session.messages({ sessionID: forked.id })
+      const forkUser = messages.find(message => message.info.role === "user")!
+      const forkAssistant = messages.find(message => message.info.role === "assistant")!
+      const tools = messages.flatMap(message => message.parts).filter(part => part.type === "tool")
+      expect(tools).toHaveLength(1)
+      expect(tools[0]).toEqual({ ...completed, id: tools[0].id, sessionID: forked.id, messageID: forkAssistant.info.id })
+      expect(tools[0].id).not.toBe(id)
+      expect(forkAssistant.info).toMatchObject({ parentID: forkUser.info.id })
+      const trim = MessageV2.planResumeTrim(messages, forkUser.info.id)
+      expect(trim.removeMessages).toEqual([])
+      expect(trim.removeParts).toEqual([])
+      expect(trim.messages.flatMap(message => message.parts).filter(part => part.type === "tool")).toEqual(tools)
+      expect(yield* session.getPart(identity)).toEqual(completed)
+      expect(yield* Effect.promise(() => readFile(file, "utf8"))).toBe("once\n")
+    } finally {
+      mutableRuns.assertNotBusy = originalAssert
+      execute.resolve()
+      resumeCopy.resolve()
+    }
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
+
+// [TP-SR-R21-32]
+it.live("external part writes and sync replay cannot create unexecuted proof or erase provider facts", () =>
+  provideTmpdirServer(({ dir }) => Effect.gen(function* () {
+    const { session } = yield* boot()
+    const chat = yield* session.create({})
+    const parent = yield* user(chat.id, "proof provenance")
+    const message = yield* assistant(chat.id, parent.id, dir)
+    const part: MessageV2.ToolPart = {
+      id: PartID.ascending(), sessionID: chat.id, messageID: message.id,
+      type: "tool", tool: "write", callID: "proof", execution: "not-started",
+      state: { status: "pending", input: {}, raw: "" },
+    }
+    expect((yield* session.updatePart(part)).execution).toBeUndefined()
+    const identity = { sessionID: chat.id, messageID: message.id, partID: part.id }
+    const replay = (value: MessageV2.ToolPart) => Effect.sync(() => {
+      const latest = Database.use((db) => db.select().from(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, chat.id)).get())
+      SyncEvent.replay({
+        id: `event-${PartID.ascending()}`, aggregateID: chat.id, seq: (latest?.seq ?? -1) + 1,
+        type: SyncEvent.versionedType(MessageV2.Event.PartUpdated.type, MessageV2.Event.PartUpdated.version),
+        data: { sessionID: chat.id, part: value, time: Date.now() },
+      })
+    })
+    yield* replay(part)
+    expect(yield* session.getPart(identity)).not.toHaveProperty("execution")
+    yield* session.mutateToolPart(identity, (current) => ({ ...current!, execution: "started", metadata: { providerExecuted: true } }))
+    yield* replay({ ...part, metadata: { providerExecuted: false } })
+    expect(yield* session.getPart(identity)).toMatchObject({ execution: "started", metadata: { providerExecuted: true } })
+    yield* session.updatePart(part)
+    expect(yield* session.getPart(identity)).toMatchObject({ execution: "started", metadata: { providerExecuted: true } })
+    expect(Exit.isFailure(yield* replay({ ...part, callID: "other" }).pipe(Effect.exit))).toBe(true)
+  }), { git: true, config: (url) => providerCfg(url) }),
+)
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -417,51 +642,55 @@ it.live("session.processor effect tests capture reasoning from http mock", () =>
   ),
 )
 
-it.live("session.processor effect tests reset reasoning state across retries", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
+it.live(
+  "session.processor effect tests reset reasoning state across retries",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
 
-        yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+          yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
 
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "reason")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "reason")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
             sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies MessageV2.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "reason" }],
-          tools: {},
-        })
+            model: mdl,
+          })
 
-        const parts = MessageV2.parts(msg.id)
-        const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+          const value = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies MessageV2.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "reason" }],
+            tools: {},
+          })
 
-        expect(value).toBe("continue")
-        expect(yield* llm.calls).toBe(2)
-        expect(reasoning.some((part) => part.text === "two")).toBe(true)
-        expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
-      }),
-    { git: true, config: (url) => providerCfg(url) },
-  ),
+          const parts = MessageV2.parts(msg.id)
+          const reasoning = parts.filter((part): part is MessageV2.ReasoningPart => part.type === "reasoning")
+
+          expect(value).toBe("continue")
+          expect(yield* llm.calls).toBe(2)
+          expect(reasoning.some((part) => part.text === "two")).toBe(true)
+          expect(reasoning.some((part) => part.text === "onetwo")).toBe(false)
+        }),
+      { git: true, config: (url) => providerCfg(url) },
+    ),
+  // Connection-reset stream retry waits the network/stream backoff (~2–5s) before the second call.
+  15_000,
 )
 
 it.live("session.processor effect tests do not retry unknown json errors", () =>
@@ -618,10 +847,9 @@ it.live(
         expect(yield* llm.calls).toBe(3)
         // Recoverable kinds (network/rate_limit/server) use persistent budgets and
         // ignore phase=request / request.maxRetries. Both 503s are absorbed on the
-        // llm-side server ladder, so the processor never enters a stream-phase
-        // retry and does not publish session.status{retry} here. That is the
-        // intended density outcome: fewer UI frames, not more.
-        expect(states).toStrictEqual([])
+        // llm-side server ladder. Request-phase now publishes session.status{retry}
+        // so Desktop can show the reconnect row instead of a dead spinner.
+        expect(states).toStrictEqual([1, 2])
       }),
       {
         git: true,

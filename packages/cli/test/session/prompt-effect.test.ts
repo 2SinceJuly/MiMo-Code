@@ -946,7 +946,7 @@ it.live("[TP-R4-01][TP-R7-01] uncommitted-hint enabled + hook-source turn does n
 )
 
 // R003: root-session machine contract — hook + provenance accepts machine payloads.
-const machineProvenance = { machine: "desktop-automation" } as const
+const machineProvenance = { machine: "host-automation" } as const
 
 it.live("[TP-R4-01] machine hook text-only with provenance is accepted and not force-synthetic", () =>
   provideTmpdirServer(
@@ -1530,7 +1530,7 @@ it.live("[TP-R4-01] uncommitted-hint delete during wait produces no late hint me
   15_000,
 )
 
-it.live("[TP-R7-01] uncommitted-hint decision logs land in Desktop WARN-level sink", () =>
+it.live("[TP-R7-01] uncommitted-hint decision logs land in a WARN-level sink", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm, dir }) {
       const prompt = yield* SessionPrompt.Service
@@ -1548,7 +1548,7 @@ it.live("[TP-R7-01] uncommitted-hint decision logs land in Desktop WARN-level si
       const prevLogPath = Global.Path.log
       let warnLogDir = ""
       try {
-        // Mirror Desktop engine bootstrap: Log.init({ print: false, level: "WARN" }).
+        // Mirror host engine bootstrap: Log.init({ print: false, level: "WARN" }).
         yield* Effect.promise(async () => {
           const { mkdtempSync } = await import("node:fs")
           const { tmpdir } = await import("node:os")
@@ -2289,17 +2289,10 @@ it.live("resume continues an incomplete assistant without creating or rewriting 
 
       const after = yield* sessions.messages({ sessionID: chat.id })
       expect(after.filter((message) => message.info.role === "user")).toHaveLength(1)
-      expect(after.length).toBe(before.length + 1)
-      expect(after.find((message) => message.info.id === seeded.assistant.id)?.info).toMatchObject(seeded.assistant)
-      // tool-resume must stamp Abandoned-as-resumed on the continued assistant
-      const seededAfter = after.find((message) => message.info.id === seeded.assistant.id)?.info
-      const abandonMsg =
-        seededAfter && seededAfter.role === "assistant" && seededAfter.error
-          ? ((seededAfter.error as { data?: { message?: string }; message?: string }).data?.message ??
-            (seededAfter.error as { message?: string }).message ??
-            "")
-          : ""
-      expect(abandonMsg).toContain("Abandoned: resumed as a new assistant turn")
+      // [TP-SR-R21-27] Pure assistant tails are durably removed, not reused as prefill.
+      expect(after.length).toBe(before.length)
+      expect(after.find((message) => message.info.id === seeded.assistant.id)).toBeUndefined()
+      expect((requests[0]?.messages as { role: string }[]).at(-1)?.role).toBe("user")
       expect(result.info.role).toBe("assistant")
       expect(result.info.id).not.toBe(seeded.assistant.id)
       expect(result.parts.some((part) => part.type === "text" && part.text === "world")).toBe(true)
@@ -2359,24 +2352,10 @@ it.live(
         expect(JSON.stringify(requests[0]?.messages ?? [])).not.toContain("Abandoned: resumed as a new assistant turn")
 
         const after = yield* sessions.messages({ sessionID: chat.id })
-        expect(after.find((m) => m.info.id === shell.id)).toBeUndefined()
+        // [TP-SR-R21-27] Empty output containers are not a reason to delete history.
+        expect(after.find((m) => m.info.id === shell.id)?.info).toMatchObject(shell)
+        expect(after.find((m) => m.info.id === shell.id)?.parts).toEqual([])
         expect(after.filter((m) => m.info.role === "user")).toHaveLength(1)
-        const assistants = after.filter((m) => m.info.role === "assistant")
-        expect(assistants.length).toBeGreaterThan(0)
-        // success path: no stacked empty residue under parent
-        expect(
-          assistants.every(
-            (m) =>
-              m.info.role !== "assistant" ||
-              m.parts.some(
-                (part) =>
-                  (part.type === "text" && part.text.trim().length > 0) ||
-                  part.type === "tool" ||
-                  (part.type === "reasoning" && part.text.trim().length > 0),
-              ) ||
-              Boolean(m.info.role === "assistant" && m.info.error),
-          ),
-        ).toBe(true)
         expect(result.info.role).toBe("assistant")
         expect(result.parts.some((part) => part.type === "text" && part.text === "found 2 resumes")).toBe(true)
       }),
@@ -2719,7 +2698,7 @@ for (const isError of [false, true]) {
   )
 }
 
-// [TP-RUN-R12-36] Desktop turn-execution: exercise the engine execution boundary,
+// [TP-RUN-R12-36] turn-execution: exercise the engine execution boundary,
 // persistence and model continuation, not a renderer-injected error string.
 for (const mode of ["throw", "reject", "short"] as const) {
   const text = mode === "short" ? "short MCP exception" : "MCP exception\n" + "诊断😀 line\n".repeat(30_000)
@@ -5273,6 +5252,7 @@ describe("trailing-user resume integration", () => {
             .resume({ sessionID: chat.id, userMessageID: user2.id, agentID: "main", model: ref })
             .pipe(Effect.exit, Effect.forkChild)
           yield* Effect.promise(() => beforeOccupy.reached)
+          ResumeTestHooks.beforeExclusiveOccupy = undefined
           // Second start-mode resume occupies the runner while first is still pre-occupy.
           const second = yield* prompt
             .resumeBackground({ sessionID: chat.id, userMessageID: user2.id, agentID: "main", model: ref })
@@ -5711,7 +5691,7 @@ describe("trailing-user resume integration", () => {
   )
 })
 
-// Desktop turn-execution [TP-RUN-R6-09], session-resume [TP-SR-R16-04].
+// turn-execution [TP-RUN-R6-09], session-resume [TP-SR-R16-04].
 for (const boundary of ["snapshot", "language"] as const) {
   it.live(`cancel during assistant ${boundary} preparation persists user abort before idle and permits the next turn`, () =>
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {

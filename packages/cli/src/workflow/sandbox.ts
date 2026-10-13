@@ -39,6 +39,7 @@ export type SandboxOptions = {
   /** Optional cooperative cancel: polled from the interrupt handler (guest
    * bytecode) so an aborted caller can stop a busy guest promptly. */
   interrupt?: () => boolean
+  signal?: AbortSignal
 }
 
 const DEFAULT_DEADLINE_MS = 12 * 60 * 60 * 1000
@@ -104,7 +105,9 @@ globalThis.URL = class URL {
  *  - every QuickJSHandle disposed before context dispose (else process abort)
  */
 export async function evalScript(body: string, hooks: Record<string, HostFn>, opts: SandboxOptions = {}): Promise<unknown> {
+  opts.signal?.throwIfAborted()
   const QuickJS = await newQuickJSWASMModuleFromVariant(singlefileVariant)
+  opts.signal?.throwIfAborted()
   const rt = QuickJS.newRuntime()
   rt.setMemoryLimit(opts.memoryLimitBytes ?? DEFAULT_MEMORY)
   // Active-time accounting: charge the guest only while no host hook promise is
@@ -130,7 +133,7 @@ export async function evalScript(body: string, hooks: Record<string, HostFn>, op
         }
   const wallDeadline = Date.now() + (opts.deadlineMs ?? DEFAULT_DEADLINE_MS)
   rt.setInterruptHandler(() => {
-    if (opts.interrupt?.()) return true
+    if (opts.signal?.aborted || opts.interrupt?.()) return true
     if (Date.now() > wallDeadline) return true
     if (activeBudget === undefined) return false
     const active = activeAccum + (pending === 0 ? Date.now() - activeStart : 0)
@@ -255,8 +258,15 @@ export async function evalScript(body: string, hooks: Record<string, HostFn>, op
         opts.deadlineMs ?? DEFAULT_DEADLINE_MS,
       )
     })
+    let onAbort: (() => void) | undefined
+    const aborted = new Promise<never>((_, reject) => {
+      if (!opts.signal) return
+      onAbort = () => reject(opts.signal!.reason)
+      if (opts.signal.aborted) onAbort()
+      else opts.signal.addEventListener("abort", onAbort, { once: true })
+    })
     try {
-      const resolved = await Promise.race([vm.resolvePromise(promiseHandle), deadline])
+      const resolved = await Promise.race([vm.resolvePromise(promiseHandle), deadline, aborted])
       if (resolved.error) {
         const err = vm.dump(resolved.error)
         resolved.error.dispose()
@@ -267,6 +277,7 @@ export async function evalScript(body: string, hooks: Record<string, HostFn>, op
     } finally {
       clearTimeout(pumpTimer)
       clearTimeout(deadlineTimer)
+      if (onAbort) opts.signal?.removeEventListener("abort", onAbort)
     }
   } finally {
     // Dispose deferreds BEFORE the arena/context: an unsettled deferred still

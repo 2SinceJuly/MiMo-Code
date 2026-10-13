@@ -1,4 +1,5 @@
 import { indexImportedParts } from "../history/import"
+import { MessageV2 } from "./message-v2"
 import { existsSync } from "fs"
 import { Log } from "../util"
 import { Database, eq, and, inArray } from "../storage"
@@ -159,6 +160,30 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
         }
 
         Database.transaction((tx) => {
+          const previous = new Map(tx.select().from(PartTable).where(eq(PartTable.session_id, sess.id as SessionID)).all().map((row) => [row.id, row]))
+          const importedParts = parts.map((p) => {
+            const data = JSON.parse(p.data)
+            const current = previous.get(p.id as PartID) ?? tx.select().from(PartTable).where(eq(PartTable.id, p.id as PartID)).get()
+            if (data.type === "tool" && data.execution === "not-started") delete data.execution
+            if (current && (data.type === "tool" || current.data.type === "tool")) {
+              if (current.session_id !== sess.id || current.message_id !== p.message_id ||
+                data.type !== "tool" || current.data.type !== "tool") throw new Error("Imported tool identity mismatch")
+              const tool = MessageV2.ToolPart.parse({ ...current.data, id: current.id, sessionID: current.session_id, messageID: current.message_id })
+              if (tool.callID !== data.callID) throw new Error("Imported tool call identity mismatch")
+              if (tool.execution === "started") data.execution = "started"
+              if (tool.metadata?.providerExecuted) data.metadata = { ...data.metadata, providerExecuted: true }
+              if (tool.state.status === "completed" || tool.state.status === "error") data.state = tool.state
+            }
+            return { ...p, data }
+          })
+          const importedIDs = new Set(parts.map((part) => part.id))
+          const replacedMessages = existing?.message_ids?.length ? new Set(existing.message_ids) : undefined
+          for (const row of previous.values()) {
+            if (!existing || (replacedMessages && !replacedMessages.has(row.message_id)) ||
+              row.data.type !== "tool" || importedIDs.has(row.id)) continue
+            const tool = MessageV2.ToolPart.parse({ ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id })
+            if (tool.execution === "started" || tool.metadata?.providerExecuted) throw new Error("Import would remove executed tool")
+          }
           tx.insert(ProjectTable)
             .values({
               id: project.id,
@@ -232,8 +257,8 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
               .run()
           }
 
-          for (const p of parts) {
-            const data = typeof p.data === "string" ? JSON.parse(p.data) : p.data
+          for (const p of importedParts) {
+            const data = p.data
             tx.insert(PartTable)
               .values({
                 id: p.id as PartID,

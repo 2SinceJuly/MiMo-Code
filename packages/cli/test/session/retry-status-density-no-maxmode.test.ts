@@ -6,11 +6,12 @@ import { SessionRetry } from "../../src/session/retry"
  * aligned to persistent budgetFor (network / rate_limit / server ignore phase).
  *
  * Field measurement (invalid baseURL, pre-ownership-fix): 20 session.status frames / ~32s.
- * Pattern: request×4 + stream, repeated. After the ownership fix, request-phase does not
- * publish session.status; only processor stream frames appear.
+ * Pattern: request×4 + stream, repeated. After persistent budgetFor, recoverable kinds
+ * keep the kind's exponential ceiling even when phase=request (no 4×/30s nesting).
  *
- * After persistent budgetFor, recoverable kinds also stop falling into the 4×/30s request
- * ladder — they keep the kind's exponential ceiling even when phase=request.
+ * Request-phase now also publishes session.status{retry} — the request ladder is often
+ * the only waiter the user observes (processor stream retries never see the failure),
+ * so Desktop must get the reconnect row instead of a dead spinner.
  */
 
 describe("retry status publish density without maxMode", () => {
@@ -41,7 +42,8 @@ describe("retry status publish density without maxMode", () => {
 
     // Pre-fix field ceiling used request×4 + stream packing (~20). Post-persistent
     // budgetFor, request-phase network no longer multiplies outer cycles by 4 short
-    // request retries; stream-side ownership remains the only session.status publisher.
+    // request retries; both request and stream ladders publish session.status{retry}
+    // at the kind's own exponential ceiling.
     // Keep the historical 15-note for the old nested-request arithmetic.
     const legacyRequestRetries = 4
     const legacyPerCycle = legacyRequestRetries + 1

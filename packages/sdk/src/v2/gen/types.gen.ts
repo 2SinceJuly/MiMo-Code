@@ -1245,6 +1245,7 @@ export type ToolStateError = {
   input: {
     [key: string]: unknown
   }
+  inputComplete?: boolean
   error: string
   metadata?: {
     [key: string]: unknown
@@ -1263,6 +1264,7 @@ export type ToolPart = {
   sessionID: string
   messageID: string
   type: "tool"
+  execution?: "not-started" | "started"
   callID: string
   tool: string
   state: ToolState
@@ -5591,6 +5593,11 @@ export type SessionResumeResponses = {
 export type SessionResumeUserData = {
   body?: {
     userMessageID?: string
+    assistantMessageID?: string
+    attempt?: {
+      requestId: string
+      attemptId: string
+    }
   }
   path: {
     sessionID: string

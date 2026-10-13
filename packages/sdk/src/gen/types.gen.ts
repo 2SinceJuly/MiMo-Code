@@ -299,6 +299,7 @@ export type ToolPart = {
   sessionID: string
   messageID: string
   type: "tool"
+  execution?: "not-started" | "started"
   callID: string
   tool: string
   state: ToolState
