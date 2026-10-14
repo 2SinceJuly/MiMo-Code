@@ -112,18 +112,7 @@ export const Client = lazy(() => {
         item.sql = "select 1;"
       }
     }
-    migrateReplaySafe(
-      {
-        run: (q) => db.run(q),
-        client: {
-          prepare: (sql) => ({
-            all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all(),
-            get: () => (db.$client.prepare(sql) as { get: () => unknown }).get(),
-          }),
-        },
-      },
-      entries,
-    )
+    migrateReplaySafe(db, entries)
   }
   if (!Flag.MIMOCODE_SKIP_MIGRATIONS) startIndexMigration(db)
   return db

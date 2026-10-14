@@ -1,41 +1,26 @@
 // [fix] replaying history kind migrations must not abort on a desynced journal.
-// DDL stays in migration/*.sql; migrateReplaySafe only skips replay-safe no-ops.
+// Schema still comes from migration/*.sql; only session.run swallows replay-safe DDL.
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
 import { Database } from "bun:sqlite"
-import { migrateReplaySafe, type MigrationEntry, type ReplaySafeDb } from "../../src/storage/migrate-replay-safe"
+import { drizzle } from "drizzle-orm/bun-sqlite"
+import { migrateReplaySafe, isReplaySafeDdl } from "../../src/storage/migrate-replay-safe"
 
-function entry(name: string): MigrationEntry {
-  return {
-    sql: readFileSync(join(import.meta.dir, "../../migration", name, "migration.sql"), "utf8"),
-    timestamp: 1,
-    name,
-  }
-}
+const KIND_SQL = `
+ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT '';
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS history_fts_kind_idx ON history_fts (kind);
+--> statement-breakpoint
+INSERT OR IGNORE INTO history_index_migration
+SELECT 7, 'clean', 0, 0, 0;
+`
 
-function wrap(db: Database): ReplaySafeDb {
-  return {
-    run: (q) => {
-      db.run(q)
-    },
-    client: {
-      prepare: (sql) => ({
-        all: () => db.prepare(sql).all(),
-        get: () => db.prepare(sql).get(),
-      }),
-    },
-  }
-}
+const CJK_SQL = `
+ALTER TABLE history_fts ADD COLUMN body_idx text NOT NULL DEFAULT '';
+`
 
-function columnNames(db: Database, table: string): Set<string> {
-  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
-  return new Set(rows.map((r) => r.name))
-}
-
-function baseDb() {
-  const db = new Database(":memory:")
-  db.exec(`
+function openDb() {
+  const sqlite = new Database(":memory:")
+  sqlite.exec(`
     CREATE TABLE history_fts (
       part_id text PRIMARY KEY NOT NULL,
       session_id text NOT NULL,
@@ -54,49 +39,60 @@ function baseDb() {
     );
     CREATE TABLE part (id text PRIMARY KEY);
   `)
-  return db
+  return { sqlite, db: drizzle({ client: sqlite }) }
 }
 
-const KIND_SQL = entry("20261011000000_history_fts_kind")
-const CJK_SQL = entry("20261012000000_history_cjk_unigram")
+function cols(sqlite: Database): Set<string> {
+  return new Set(
+    (sqlite.prepare(`PRAGMA table_info(history_fts)`).all() as Array<{ name: string }>).map((r) => r.name),
+  )
+}
 
-describe("history FTS kind migrations are replay-safe", () => {
-  test("stuck client: kind exists, 20261011 unjournaled → replay succeeds", () => {
-    const db = baseDb()
-    db.exec(`ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT ''`)
-    // Old bare ALTER was the production abort:
-    expect(() => db.exec(`ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT ''`)).toThrow(
-      /duplicate column name/i,
-    )
-    expect(() => migrateReplaySafe(wrap(db), [KIND_SQL, CJK_SQL])).not.toThrow()
-    expect(columnNames(db, "history_fts").has("kind")).toBe(true)
-    expect(columnNames(db, "history_fts").has("body_idx")).toBe(true)
-    // second replay is a no-op except journal is already recorded
-    expect(() => migrateReplaySafe(wrap(db), [KIND_SQL, CJK_SQL])).not.toThrow()
-    const v7 = db.prepare(`SELECT count(*) AS n FROM history_index_migration WHERE version=7`).get() as { n: number }
-    expect(v7.n).toBe(1)
-    db.close()
+describe("migrateReplaySafe", () => {
+  test("swallow only replay-safe DDL", () => {
+    expect(isReplaySafeDdl("ALTER TABLE t ADD COLUMN k int", new Error("duplicate column name: k"))).toBe(true)
+    expect(isReplaySafeDdl("ALTER TABLE t DROP COLUMN k", new Error("no such column: k"))).toBe(true)
+    expect(isReplaySafeDdl("CREATE INDEX i ON t (k)", new Error("index i already exists"))).toBe(true)
+    expect(isReplaySafeDdl("CREATE TABLE t (id int)", new Error("table t already exists"))).toBe(false)
+    expect(isReplaySafeDdl("SELECT 1", new Error("duplicate column name: k"))).toBe(false)
   })
 
-  test("reverse desync: journal has name, kind missing → replay is skipped", () => {
-    const db = baseDb()
-    migrateReplaySafe(wrap(db), [KIND_SQL])
-    // Drop column then re-add name as applied without re-running DDL — simulate
-    // journal ahead of schema: runner skips because name is journaled.
-    db.exec(`DROP INDEX IF EXISTS history_fts_kind_idx`)
-    db.exec(`ALTER TABLE history_fts DROP COLUMN kind`)
-    expect(() => migrateReplaySafe(wrap(db), [KIND_SQL])).not.toThrow()
-    // skipped (name journaled) — column stays missing; that is ledger-truthful
-    expect(columnNames(db, "history_fts").has("kind")).toBe(false)
-    db.close()
+  test("stuck client: kind exists, migration unjournaled → replay succeeds", () => {
+    const { sqlite, db } = openDb()
+    sqlite.exec(`ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT ''`)
+    expect(() =>
+      migrateReplaySafe(db as never, [
+        { sql: KIND_SQL, timestamp: 1, name: "20261011000000_history_fts_kind" },
+        { sql: CJK_SQL, timestamp: 2, name: "20261012000000_history_cjk_unigram" },
+      ]),
+    ).not.toThrow()
+    const c = cols(sqlite)
+    expect(c.has("kind")).toBe(true)
+    expect(c.has("body_idx")).toBe(true)
+    const n = sqlite.prepare(`SELECT count(*) AS n FROM __drizzle_migrations`).get() as { n: number }
+    expect(n.n).toBe(2)
+    sqlite.close()
   })
 
   test("fresh: DDL runs once from migration SQL", () => {
-    const db = baseDb()
-    migrateReplaySafe(wrap(db), [KIND_SQL, CJK_SQL])
-    const cols = columnNames(db, "history_fts")
-    expect(cols.has("kind")).toBe(true)
-    expect(cols.has("body_idx")).toBe(true)
-    db.close()
+    const { sqlite, db } = openDb()
+    migrateReplaySafe(db as never, [{ sql: KIND_SQL, timestamp: 1, name: "k" }])
+    expect(cols(sqlite).has("kind")).toBe(true)
+    // second call is a no-op (journaled)
+    expect(() => migrateReplaySafe(db as never, [{ sql: KIND_SQL, timestamp: 1, name: "k" }])).not.toThrow()
+    sqlite.close()
+  })
+
+  test("non-replay-safe error still aborts and rolls back", () => {
+    const { sqlite, db } = openDb()
+    const bad = `
+      ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT '';
+      --> statement-breakpoint
+      CREATE TABLE history_fts (id int);
+    `
+    expect(() => migrateReplaySafe(db as never, [{ sql: bad, timestamp: 1, name: "bad" }])).toThrow()
+    const n = sqlite.prepare(`SELECT count(*) AS n FROM __drizzle_migrations`).get() as { n: number }
+    expect(n.n).toBe(0)
+    sqlite.close()
   })
 })
