@@ -139,11 +139,11 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 | `POST /session/:id/message` | 受理。busy 不 409。认领开始且客户端仍连接 → **200 stream**；否则 **202** + `{ receiptId }` 并结束响应 |
 | `GET /session/:id/receipt/:receiptId` | 返回 `PublicReceipt` 投影 |
 | `POST /session/:id/abort` | 响应 `{ epoch }` |
-| 事件 | `session.receipt.updated` `{ receiptId, state, outcome?, messageId?, deliveryMessageId?, epoch }` |
+| 事件 | `session.receipt.updated` `{ sessionID, receiptId, agentID, state, outcome?, messageId?, deliveryMessageId?, epoch }` |
 
-`PublicReceipt` 字段：`id`、`lane`、`state`、`intent`、`epoch`、`consumed`、`outcome?`、`messageId?`、`deliveryMessageId?`、`error?`。内部记账（`runId`、`claimFrontier`、`idempotencyKey`、`time`）不进外部契约。
+`PublicReceipt` 字段：`id`、`lane`、`state`、`intent`、`epoch`、`consumed`、`suspended`、`outcome?`、`messageId?`、`deliveryMessageId?`、`error?`。内部记账（`runId`、`claimFrontier`、`idempotencyKey`、`time`）不进外部契约。
 
-intent 对所有输入给出 `messageID`，对 agent 输入附带发送方（`senderSessionID` / `senderActorID`）与 `type`。没有 wake intent。resume/shell 仍是独占入口（不写 inbox 记录），按既有语义工作。
+`intent` 对外投影为四种：`prompt`（`messageID`）、`resume`（`assistantID`、`plan`）、`wake`（`receiverActorID`、`inboxWatermark`）、`shell`（`command`、`cwd?`）。`resume` 的 `expectedAssistantStatus` 等认领并发字段不进外部契约。
 
 `deliveryMessageId` 是首次读入该输入的 model-step assistant 消息，只写一次；`session.receipt.updated` 在写入时发布。OpenAPI 响应 schema 与 HTTP body 共用 `PublicReceipt` zod 单源。
 
