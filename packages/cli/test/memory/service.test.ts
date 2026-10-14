@@ -54,11 +54,11 @@ describe("Memory.search", () => {
 
         const globalOnly = yield* memory.search({ query: "matching", scope: "global" })
         expect(globalOnly.length).toBe(1)
-        expect(globalOnly[0].path).toContain("/global/")
+        expect(globalOnly[0].path).toBe(path.join(root, "global", "x.md"))
 
         const sessionOnly = yield* memory.search({ query: "matching", scope: "sessions" })
         expect(sessionOnly.length).toBe(1)
-        expect(sessionOnly[0].path).toContain("/sessions/")
+        expect(sessionOnly[0].path).toBe(path.join(root, "sessions", "ses_a", "x.md"))
       }),
     ),
   )

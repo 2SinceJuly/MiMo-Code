@@ -19,6 +19,51 @@ afterEach(async () => {
 const it = testEffect(Layer.mergeAll(Memory.defaultLayer, CrossSpawnSpawner.defaultLayer))
 
 describe("Memory.reconcile", () => {
+  // Desktop engine-runtime [TP-R6-06]: native filesystem paths must remain FTS identities.
+  it.live("indexes native memory layouts, searches them and reconciles updates/deletes [TP-R6-06]", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const memory = yield* Memory.Service
+        const root = yield* memory.root()
+        yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
+        const cases = [
+          ["global", "", "MEMORY", "memory"],
+          ["projects", "project-example", "MEMORY", "memory"],
+          ["sessions", "ses_example", "checkpoint", "checkpoint"],
+          ["sessions", "ses_example", "notes", "free"],
+          ["sessions", "ses_example", "tasks/T1/progress", "progress"],
+          ["sessions", "ses_example", "tasks/T1/notes", "notes"],
+        ] as const
+        for (const [scope, scopeID, key] of cases) {
+          const file = path.join(root, scope, scopeID, `${key}.md`)
+          yield* Effect.promise(() => fs.mkdir(path.dirname(file), { recursive: true }))
+          yield* Effect.promise(() => fs.writeFile(file, "nativepathregression original"))
+        }
+
+        expect(yield* memory.reconcile()).toEqual({ indexed: cases.length, pruned: 0 })
+        const before = Database.use((db) => db.select().from(MemoryFtsTable).all())
+        for (const [scope, scopeID, key, type] of cases) {
+          expect(before.find((row) => row.path === path.join(root, scope, scopeID, `${key}.md`))).toMatchObject({
+            scope, scope_id: scopeID, type, body: "nativepathregression original",
+          })
+        }
+        const results = yield* memory.search({ query: "nativepathregression" })
+        expect(results.map((row) => row.path).sort()).toEqual(before.map((row) => row.path).sort())
+        expect(yield* memory.reconcile()).toEqual({ indexed: 0, pruned: 0 })
+        expect(Database.use((db) => db.select().from(MemoryFtsTable).all())).toEqual(before)
+
+        const globalFile = path.join(root, "global", "MEMORY.md")
+        yield* Effect.promise(() => fs.writeFile(globalFile, "nativepathupdated replacement content"))
+        expect(yield* memory.reconcile()).toEqual({ indexed: 1, pruned: 0 })
+        expect((yield* memory.search({ query: "nativepathupdated" })).map((row) => row.path)).toEqual([globalFile])
+        yield* Effect.promise(() => fs.unlink(globalFile))
+        expect(yield* memory.reconcile()).toEqual({ indexed: 0, pruned: 1 })
+        expect(yield* memory.search({ query: "nativepathupdated" })).toEqual([])
+        expect(Database.use((db) => db.select().from(MemoryFtsTable).all())).toHaveLength(cases.length - 1)
+      }),
+    ),
+  )
+
   it.live("indexes a new file", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

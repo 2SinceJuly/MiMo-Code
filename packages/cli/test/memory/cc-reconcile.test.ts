@@ -84,7 +84,8 @@ describe("walkCcRoot", () => {
 })
 
 describe("reconcileMemory cross-root", () => {
-  itLive.live("indexes CC files under scope='cc' with frontmatter type", () =>
+  // Desktop engine-runtime [TP-R6-06]: the disk walker must retain native CC paths.
+  itLive.live("indexes CC files under scope='cc' with frontmatter type [TP-R6-06]", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const memory = yield* Memory.Service
@@ -112,6 +113,7 @@ Body about cache.`
         expect(rows.length).toBe(1)
         expect(rows[0].scope).toBe("cc")
         expect(rows[0].scope_id).toBe(slug)
+        expect(rows[0].path).toBe(path.join(ccDir, "feedback_cache_ttl.md"))
         expect(rows[0].type).toBe("feedback")
         expect(rows[0].body).toContain("Body about cache.")
       }),
