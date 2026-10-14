@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import path from "node:path"
 import { parsePath, buildPath, resolveProjectId } from "../../src/memory/paths"
 
 describe("parsePath", () => {
@@ -154,12 +155,12 @@ describe("buildPath", () => {
   test("session checkpoint", () => {
     expect(
       buildPath({ root: "/data/memory", scope: "sessions", scope_id: "ses_abc", key: "checkpoint" }),
-    ).toBe("/data/memory/sessions/ses_abc/checkpoint.md")
+    ).toBe(path.join("/data/memory", "sessions", "ses_abc", "checkpoint.md"))
   })
 
   test("global free", () => {
     expect(buildPath({ root: "/data/memory", scope: "global", key: "tooling" })).toBe(
-      "/data/memory/global/tooling.md",
+      path.join("/data/memory", "global", "tooling.md"),
     )
   })
 
@@ -191,6 +192,56 @@ describe("buildPath", () => {
     expect(() =>
       buildPath({ root: "/data/memory", scope: "sessions", scope_id: "ses_abc", key: "tasks/T1/notes/../sneak" }),
     ).toThrow(/invalid path component/)
+  })
+})
+
+// Desktop engine-runtime [TP-R6-06]: disk walkers pass native paths to the parser.
+describe("native memory paths [TP-R6-06]", () => {
+  const cases = [
+    ["global", "", "MEMORY", "memory"],
+    ["projects", "project-example", "MEMORY", "memory"],
+    ["sessions", "ses_example", "checkpoint", "checkpoint"],
+    ["sessions", "ses_example", "notes", "free"],
+    ["sessions", "ses_example", "tasks/T1/progress", "progress"],
+    ["sessions", "ses_example", "tasks/T1/notes", "notes"],
+    ["sessions", "ses_example", "tasks/T1/notes/draft", "free"],
+  ] as const
+
+  for (const [scope, scope_id, key, type] of cases) {
+    test(`Windows ${scope}/${key} preserves locator and type`, () => {
+      const input = path.win32.join("C:/example/memory", scope, scope_id, `${key}.md`)
+      expect(parsePath(input)).toEqual({ scope, scope_id, key, type })
+    })
+
+    test(`native buildPath round-trips ${scope}/${key}`, () => {
+      const input = buildPath({ root: path.resolve("/example/memory"), scope, scope_id, key })
+      expect(parsePath(input)).toEqual({ scope, scope_id, key, type })
+    })
+  }
+
+  test("UNC and mixed separators preserve nested task type", () => {
+    for (const input of [
+      String.raw`\\server\share\memory\sessions\ses_example\tasks\T1\progress.md`,
+      String.raw`C:\example/memory\sessions/ses_example\tasks/T1\progress.md`,
+    ]) {
+      expect(parsePath(input)).toEqual({
+        scope: "sessions", scope_id: "ses_example", key: "tasks/T1/progress", type: "progress",
+      })
+    }
+  })
+
+  test("Windows paths outside supported memory layouts stay excluded", () => {
+    for (const input of [
+      String.raw`C:\example\checkpoints\ses_example\checkpoint.md`,
+      String.raw`C:\example\memory\tasks\T1\progress.md`,
+      String.raw`\\server\share\memory\sessions\ses_example\notes.txt`,
+    ]) expect(parsePath(input)).toBeNull()
+  })
+
+  test.skipIf(process.platform === "win32")("POSIX backslash is a filename character", () => {
+    expect(parsePath(String.raw`/example/memory/sessions/ses_example/tasks\T1\progress.md`)).toEqual({
+      scope: "sessions", scope_id: "ses_example", key: String.raw`tasks\T1\progress`, type: "free",
+    })
   })
 })
 
