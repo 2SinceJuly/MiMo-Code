@@ -1602,7 +1602,7 @@ describe("main automatically waits for subagent executions", () => {
       let dispatches = 0
       yield* Effect.acquireRelease(Effect.sync(() => {
         const previous = inboxControllerRef.current
-        if (!previous) throw new Error("fixture did not initialize TurnQueue")
+        if (!previous) throw new Error("fixture did not initialize InboxController")
         inboxControllerRef.current = { ...previous, abortSession: (sessionID) => Effect.gen(function* () {
           const epoch = yield* previous.abortSession(sessionID)
           if (sessionID === session.id && !delayed) {

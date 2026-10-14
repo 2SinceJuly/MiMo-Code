@@ -2252,7 +2252,6 @@ export class Session2 extends HeyApiClient {
       sessionID: string
       directory?: string
       workspace?: string
-      queuedPolicy?: "drop" | "keep-suspended"
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -2264,7 +2263,6 @@ export class Session2 extends HeyApiClient {
             { in: "path", key: "sessionID" },
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
-            { in: "body", key: "queuedPolicy" },
           ],
         },
       ],
@@ -2273,11 +2271,6 @@ export class Session2 extends HeyApiClient {
       url: "/session/{sessionID}/abort",
       ...options,
       ...params,
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-        ...params.headers,
-      },
     })
   }
 
@@ -4218,41 +4211,25 @@ export class Sync extends HeyApiClient {
         sessionID: string
         receipts: Array<{
           id: string
-          session_id: string
-          agent_id: string
+          receiver_session_id: string
+          receiver_actor_id: string
+          sender_session_id: string | null
+          sender_actor_id: string | null
+          type: string
+          content: {
+            text?: string
+          } | null
+          message_id: string | null
           state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-          intent:
-            | {
-                kind: "prompt"
-                messageID: string
-              }
-            | {
-                kind: "resume"
-                assistantID: string
-                plan: "user-resume" | "tool-resume"
-                expectedAssistantStatus?: string
-              }
-            | {
-                kind: "wake"
-                receiverActorID: string
-                inboxWatermark: string
-              }
-            | {
-                kind: "shell"
-                command: string
-                cwd?: string
-              }
           epoch: number
           run_id: number | null
           claim_frontier: string | null
           consumed: boolean
-          suspended: boolean
           outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-          message_id: string | null
           delivery_message_id: string | null
           error: string | null
           idempotency_key: string
-          time_created: number
+          created_at: number
           time_updated: number
         }>
         lanes: Array<{
@@ -4265,12 +4242,6 @@ export class Sync extends HeyApiClient {
         epoch: {
           session_id: string
           epoch: number
-          time_updated: number
-        } | null
-        bootstrap: {
-          session_id: string
-          message_ids: Array<string>
-          completed: boolean
           time_updated: number
         } | null
       }

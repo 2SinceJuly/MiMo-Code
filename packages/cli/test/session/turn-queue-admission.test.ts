@@ -737,7 +737,7 @@ describe("InboxController admission and claim acceptance without child execution
 
   // [TP-overflow-replay-continue] Provider 400 context overflow → real
   // compaction.process writes summary + replay user. The replay is an internal
-  // continuation (no queueAdmission/receipt) and must stay visible so the run
+  // continuation (no inbox record) and must stay visible so the run
   // issues the next model request instead of stopping after the summary.
   it.live(
     "provider overflow compaction replays the user and issues another model request",

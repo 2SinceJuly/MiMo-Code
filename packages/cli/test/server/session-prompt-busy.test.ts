@@ -70,7 +70,7 @@ function client(directory: string) {
     request,
     post,
     async session() {
-      const response = await post("/session", { title: "HTTP TurnQueue contract" })
+      const response = await post("/session", { title: "HTTP inbox contract" })
       expect(response.status).toBe(200)
       return (await response.json()) as Session.Info
     },
@@ -188,7 +188,7 @@ describe("ErrorMiddleware → BusyError mapping", () => {
   })
 })
 
-describe("HTTP TurnQueue admission", () => {
+describe("HTTP Inbox admission", () => {
   for (const content of [
     { name: "whitespace-only", part: { type: "text", text: " \t\n  " } },
     { name: "ignored-only", part: { type: "text", text: "ignored scaffolding", ignored: true } },
@@ -416,7 +416,7 @@ describe("HTTP TurnQueue admission", () => {
 })
 
 describe("HTTP abort and transport ownership", () => {
-  for (const policy of [undefined, "drop", "keep-suspended"] as const) {
+  for (const policy of [undefined, "drop"] as const) {
     test(
       `abort ${policy ?? "bodyless default"} increments epoch exactly once and retains fenced receipts correctly`,
       () =>

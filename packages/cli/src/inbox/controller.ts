@@ -219,7 +219,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         if (duplicate) return { row: duplicate, kind: "existing" as const }
 
         const now = Date.now()
-        // Persist the accepted user message + parts (was sessions.persistQueuedUser).
+        // Persist the accepted user message + parts in the same transaction.
         if (input.message.role !== "user") throw new Error("Inbox.accept requires a user message")
         if (input.parts.some((part) => part.sessionID !== input.message.sessionID || part.messageID !== input.message.id))
           throw new Error("Inbox.accept parts must belong to the saved message")

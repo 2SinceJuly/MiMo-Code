@@ -1040,47 +1040,31 @@ export type EventWorkspaceStatus = {
   }
 }
 
-export type EventSessionTurnQueueDelta = {
-  type: "session.turn_queue.delta"
+export type EventSessionInboxDelta = {
+  type: "session.inbox.delta"
   properties: {
     sessionID: string
     receipts?: Array<{
       id: string
-      session_id: string
-      agent_id: string
+      receiver_session_id: string
+      receiver_actor_id: string
+      sender_session_id: string | null
+      sender_actor_id: string | null
+      type: string
+      content: {
+        text?: string
+      } | null
+      message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-      intent:
-        | {
-            kind: "prompt"
-            messageID: string
-          }
-        | {
-            kind: "resume"
-            assistantID: string
-            plan: "user-resume" | "tool-resume"
-            expectedAssistantStatus?: string
-          }
-        | {
-            kind: "wake"
-            receiverActorID: string
-            inboxWatermark: string
-          }
-        | {
-            kind: "shell"
-            command: string
-            cwd?: string
-          }
       epoch: number
       run_id: number | null
       claim_frontier: string | null
       consumed: boolean
-      suspended: boolean
       outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-      message_id: string | null
       delivery_message_id: string | null
       error: string | null
       idempotency_key: string
-      time_created: number
+      created_at: number
       time_updated: number
     }>
     deletedReceiptIDs?: Array<string>
@@ -1096,57 +1080,35 @@ export type EventSessionTurnQueueDelta = {
       epoch: number
       time_updated: number
     }
-    bootstrap?: {
-      session_id: string
-      message_ids: Array<string>
-      completed: boolean
-      time_updated: number
-    }
   }
 }
 
-export type EventSessionTurnQueueSnapshot = {
-  type: "session.turn_queue.snapshot"
+export type EventSessionInboxSnapshot = {
+  type: "session.inbox.snapshot"
   properties: {
     version: 1
     sessionID: string
     receipts: Array<{
       id: string
-      session_id: string
-      agent_id: string
+      receiver_session_id: string
+      receiver_actor_id: string
+      sender_session_id: string | null
+      sender_actor_id: string | null
+      type: string
+      content: {
+        text?: string
+      } | null
+      message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-      intent:
-        | {
-            kind: "prompt"
-            messageID: string
-          }
-        | {
-            kind: "resume"
-            assistantID: string
-            plan: "user-resume" | "tool-resume"
-            expectedAssistantStatus?: string
-          }
-        | {
-            kind: "wake"
-            receiverActorID: string
-            inboxWatermark: string
-          }
-        | {
-            kind: "shell"
-            command: string
-            cwd?: string
-          }
       epoch: number
       run_id: number | null
       claim_frontier: string | null
       consumed: boolean
-      suspended: boolean
       outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-      message_id: string | null
       delivery_message_id: string | null
       error: string | null
       idempotency_key: string
-      time_created: number
+      created_at: number
       time_updated: number
     }>
     lanes: Array<{
@@ -1159,12 +1121,6 @@ export type EventSessionTurnQueueSnapshot = {
     epoch: {
       session_id: string
       epoch: number
-      time_updated: number
-    } | null
-    bootstrap: {
-      session_id: string
-      message_ids: Array<string>
-      completed: boolean
       time_updated: number
     } | null
   }
@@ -1226,11 +1182,6 @@ export type UserMessage = {
     [key: string]: boolean
   }
   provenance?: Provenance
-  queueAdmission?: {
-    epoch: number
-    ready: true
-    dispatch: boolean
-  }
 }
 
 export type AssistantMessage = {
@@ -1694,9 +1645,9 @@ export type EventSessionDeleted = {
   }
 }
 
-export type SyncEventSessionTurnQueueDelta = {
+export type SyncEventSessionInboxDelta = {
   type: "sync"
-  name: "session.turn_queue.delta.1"
+  name: "session.inbox.delta.1"
   id: string
   seq: number
   aggregateID: "sessionID"
@@ -1704,41 +1655,25 @@ export type SyncEventSessionTurnQueueDelta = {
     sessionID: string
     receipts?: Array<{
       id: string
-      session_id: string
-      agent_id: string
+      receiver_session_id: string
+      receiver_actor_id: string
+      sender_session_id: string | null
+      sender_actor_id: string | null
+      type: string
+      content: {
+        text?: string
+      } | null
+      message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-      intent:
-        | {
-            kind: "prompt"
-            messageID: string
-          }
-        | {
-            kind: "resume"
-            assistantID: string
-            plan: "user-resume" | "tool-resume"
-            expectedAssistantStatus?: string
-          }
-        | {
-            kind: "wake"
-            receiverActorID: string
-            inboxWatermark: string
-          }
-        | {
-            kind: "shell"
-            command: string
-            cwd?: string
-          }
       epoch: number
       run_id: number | null
       claim_frontier: string | null
       consumed: boolean
-      suspended: boolean
       outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-      message_id: string | null
       delivery_message_id: string | null
       error: string | null
       idempotency_key: string
-      time_created: number
+      created_at: number
       time_updated: number
     }>
     deletedReceiptIDs?: Array<string>
@@ -1754,18 +1689,12 @@ export type SyncEventSessionTurnQueueDelta = {
       epoch: number
       time_updated: number
     }
-    bootstrap?: {
-      session_id: string
-      message_ids: Array<string>
-      completed: boolean
-      time_updated: number
-    }
   }
 }
 
-export type SyncEventSessionTurnQueueSnapshot = {
+export type SyncEventSessionInboxSnapshot = {
   type: "sync"
-  name: "session.turn_queue.snapshot.1"
+  name: "session.inbox.snapshot.1"
   id: string
   seq: number
   aggregateID: "sessionID"
@@ -1774,41 +1703,25 @@ export type SyncEventSessionTurnQueueSnapshot = {
     sessionID: string
     receipts: Array<{
       id: string
-      session_id: string
-      agent_id: string
+      receiver_session_id: string
+      receiver_actor_id: string
+      sender_session_id: string | null
+      sender_actor_id: string | null
+      type: string
+      content: {
+        text?: string
+      } | null
+      message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-      intent:
-        | {
-            kind: "prompt"
-            messageID: string
-          }
-        | {
-            kind: "resume"
-            assistantID: string
-            plan: "user-resume" | "tool-resume"
-            expectedAssistantStatus?: string
-          }
-        | {
-            kind: "wake"
-            receiverActorID: string
-            inboxWatermark: string
-          }
-        | {
-            kind: "shell"
-            command: string
-            cwd?: string
-          }
       epoch: number
       run_id: number | null
       claim_frontier: string | null
       consumed: boolean
-      suspended: boolean
       outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-      message_id: string | null
       delivery_message_id: string | null
       error: string | null
       idempotency_key: string
-      time_created: number
+      created_at: number
       time_updated: number
     }>
     lanes: Array<{
@@ -1821,12 +1734,6 @@ export type SyncEventSessionTurnQueueSnapshot = {
     epoch: {
       session_id: string
       epoch: number
-      time_updated: number
-    } | null
-    bootstrap: {
-      session_id: string
-      message_ids: Array<string>
-      completed: boolean
       time_updated: number
     } | null
   }
@@ -2035,8 +1942,8 @@ export type GlobalEvent = {
     | EventWorkspaceFailed
     | EventWorkspaceRestore
     | EventWorkspaceStatus
-    | EventSessionTurnQueueDelta
-    | EventSessionTurnQueueSnapshot
+    | EventSessionInboxDelta
+    | EventSessionInboxSnapshot
     | EventMessageUpdated
     | EventMessageRemoved
     | EventMessagePartUpdated
@@ -2044,8 +1951,8 @@ export type GlobalEvent = {
     | EventSessionUpdated
     | EventSessionCreated
     | EventSessionDeleted
-    | SyncEventSessionTurnQueueDelta
-    | SyncEventSessionTurnQueueSnapshot
+    | SyncEventSessionInboxDelta
+    | SyncEventSessionInboxSnapshot
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
@@ -3649,8 +3556,8 @@ export type Event =
   | EventWorkspaceFailed
   | EventWorkspaceRestore
   | EventWorkspaceStatus
-  | EventSessionTurnQueueDelta
-  | EventSessionTurnQueueSnapshot
+  | EventSessionInboxDelta
+  | EventSessionInboxSnapshot
   | EventMessageUpdated
   | EventMessageRemoved
   | EventMessagePartUpdated
@@ -5406,9 +5313,7 @@ export type SessionForkResponses = {
 export type SessionForkResponse = SessionForkResponses[keyof SessionForkResponses]
 
 export type SessionAbortData = {
-  body?: {
-    queuedPolicy?: "drop" | "keep-suspended"
-  }
+  body?: never
   path: {
     sessionID: string
   }
@@ -6154,29 +6059,14 @@ export type SessionReceiptResponses = {
       agentID: string
     }
     state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-    intent:
-      | {
-          kind: "prompt"
-          messageID: string
-        }
-      | {
-          kind: "resume"
-          assistantID: string
-          plan: "user-resume" | "tool-resume"
-        }
-      | {
-          kind: "wake"
-          receiverActorID: string
-          inboxWatermark: string
-        }
-      | {
-          kind: "shell"
-          command: string
-          cwd?: string
-        }
+    intent: {
+      messageID: string
+      type: string
+      senderSessionID?: string
+      senderActorID?: string
+    }
     epoch: number
     consumed: boolean
-    suspended: boolean
     outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
     messageId?: string
     deliveryMessageId?: string
@@ -7190,41 +7080,25 @@ export type SyncReplayData = {
       sessionID: string
       receipts: Array<{
         id: string
-        session_id: string
-        agent_id: string
+        receiver_session_id: string
+        receiver_actor_id: string
+        sender_session_id: string | null
+        sender_actor_id: string | null
+        type: string
+        content: {
+          text?: string
+        } | null
+        message_id: string | null
         state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-        intent:
-          | {
-              kind: "prompt"
-              messageID: string
-            }
-          | {
-              kind: "resume"
-              assistantID: string
-              plan: "user-resume" | "tool-resume"
-              expectedAssistantStatus?: string
-            }
-          | {
-              kind: "wake"
-              receiverActorID: string
-              inboxWatermark: string
-            }
-          | {
-              kind: "shell"
-              command: string
-              cwd?: string
-            }
         epoch: number
         run_id: number | null
         claim_frontier: string | null
         consumed: boolean
-        suspended: boolean
         outcome: "success" | "assistant_error" | "interrupted" | "never_ran" | null
-        message_id: string | null
         delivery_message_id: string | null
         error: string | null
         idempotency_key: string
-        time_created: number
+        created_at: number
         time_updated: number
       }>
       lanes: Array<{
@@ -7237,12 +7111,6 @@ export type SyncReplayData = {
       epoch: {
         session_id: string
         epoch: number
-        time_updated: number
-      } | null
-      bootstrap: {
-        session_id: string
-        message_ids: Array<string>
-        completed: boolean
         time_updated: number
       } | null
     }
