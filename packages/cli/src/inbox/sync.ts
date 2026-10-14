@@ -115,8 +115,13 @@ function validate(db: Database.TxOrDb, data: Delta | Snapshot) {
     if (row.claim_frontier) references.add(row.claim_frontier)
   }
   for (const id of references) {
-    const message = db.select({ sessionID: MessageTable.session_id }).from(MessageTable).where(eq(MessageTable.id, id)).get()
+    const message = db.select({ sessionID: MessageTable.session_id, agentID: MessageTable.agent_id }).from(MessageTable).where(eq(MessageTable.id, id)).get()
     if (message && message.sessionID !== data.sessionID) throw new QueueValidationError(`Inbox message belongs to another session: ${id}`)
+  }
+  for (const row of data.receipts ?? []) {
+    if (!row.message_id) continue
+    const message = db.select({ agentID: MessageTable.agent_id }).from(MessageTable).where(eq(MessageTable.id, row.message_id)).get()
+    if (message && message.agentID !== row.receiver_actor_id) throw new QueueValidationError(`Inbox message belongs to another lane: ${row.message_id}`)
   }
 }
 

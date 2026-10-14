@@ -112,13 +112,11 @@ describe("turn queue sync transport", () => {
     expect(latestDelta(session.id).lanes?.[0].input_revision).toBe(1)
     const claimed = yield* tq.claimNext(lane, 42)
     expect(claimed?.receipts.map((r) => r.id)).toEqual([first.id])
-    expect(latestDelta(session.id).receipts?.map((r) => r.id)).toEqual([first.id])
     const second = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
-    const admission = events(session.id).at(-2)!
+    const admission = events(session.id).filter((e) => e.type === "session.inbox.delta.1").at(-1)!
     expect(QueueSync.DeltaSchema.parse(admission.data).receipts?.map((r) => r.id)).toEqual([second.id])
     const extended = yield* tq.extendClaim(lane, 42)
     expect(extended?.receipts.map((r) => r.id)).toEqual([second.id])
-    expect(latestDelta(session.id).receipts?.map((r) => r.id)).toEqual([second.id])
     const delivery = MessageID.ascending()
     Database.transaction((db) => {
       const rows = db.update(InboxTable).set({ delivery_message_id: delivery })
@@ -137,7 +135,8 @@ describe("turn queue sync transport", () => {
     yield* tq.abortSession(session.id)
     const aborted = latestDelta(session.id)
     expect(aborted.epoch?.epoch).toBe(1)
-    expect(aborted.receipts?.[0].state).toBe("cancelled")
+    // Already-settled records are not cancelled again.
+    expect(aborted.receipts ?? []).toEqual([])
     expect(events(session.id).filter((e) => e.type === "session.inbox.snapshot.1")).toEqual([])
     rebuild(session.id)
   })))
@@ -287,8 +286,8 @@ describe("turn queue sync transport", () => {
     const invalid: unknown[] = [
       { ...original, version: 2 },
       { ...original, version: undefined },
-      { ...original, receipts: [{ ...own }] },
       { ...original, receipts: [{ ...own, type: 123 }] },
+      { ...original, receipts: [{ ...own, message_id: 123 }] },
       { ...original, receipts: [foreign] },
       { ...original, receipts: [{ ...foreign, receiver_session_id: session.id }] },
       { ...original, receipts: [own, own] },

@@ -304,6 +304,22 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       if (written === undefined) return yield* Effect.interrupt
       const receipt = toReceipt(written.row)
       if (written.kind === "inserted") {
+        // Wake observeInput waiters — any accept advances input_revision.
+        const waiters = inputWaiters.get(waiterKey(input.lane))
+        if (waiters) {
+          const rev = Database.use((db) =>
+            db.select().from(InboxLaneStateTable)
+              .where(and(eq(InboxLaneStateTable.session_id, input.lane.sessionID), eq(InboxLaneStateTable.agent_id, input.lane.agentID)))
+              .get(),
+          )?.input_revision ?? 0
+          for (const d of [...waiters]) {
+            waiters.delete(d)
+            const done = yield* Deferred.isDone(d)
+            if (done) continue
+            Deferred.doneUnsafe(d, Effect.succeed(rev))
+          }
+          if (waiters.size === 0) inputWaiters.delete(waiterKey(input.lane))
+        }
         yield* publish(receipt)
         yield* maybeKick(input.lane)
       } else if (!guard && (receipt.state === "accepted" || receipt.state === "claimed")) {

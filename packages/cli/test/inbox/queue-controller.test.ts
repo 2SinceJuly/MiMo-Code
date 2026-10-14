@@ -281,19 +281,14 @@ describe("Inbox controller", () => {
         const tq = yield* InboxController.Service
         const session = yield* sessions.create({ title: "observe-wait" })
         const lane = { sessionID: session.id, agentID: "main" }
-        const waiter = yield* Deferred.make<void>()
-        const observed = yield* Effect.gen(function* () {
-          yield* Deferred.succeed(waiter, undefined)
-          return yield* tq.observeInput(lane, 0)
-        }).pipe(Effect.forkChild)
-        yield* Deferred.await(waiter)
-        yield* Effect.sleep("50 millis")
+        const fiber = yield* tq.observeInput(lane, 0).pipe(Effect.forkChild)
+        yield* Effect.sleep("100 millis")
         const { message, parts } = userMessage(session.id)
         yield* tq.accept({
           lane, message, parts,
           intent: { messageID: message.id, type: "prompt" },
         })
-        const rev = yield* Fiber.join(observed)
+        const rev = yield* Fiber.join(fiber).pipe(Effect.timeout("5 seconds"))
         expect(rev).toBeGreaterThan(0)
       }),
     ),
