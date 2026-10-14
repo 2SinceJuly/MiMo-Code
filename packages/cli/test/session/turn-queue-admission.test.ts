@@ -732,6 +732,73 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
     30_000,
   )
 
+  // [TP-overflow-replay-continue] Provider 400 context overflow → real
+  // compaction.process writes summary + replay user. The replay is an internal
+  // continuation (no queueAdmission/receipt) and must stay visible so the run
+  // issues the next model request instead of stopping after the summary.
+  it.live(
+    "provider overflow compaction replays the user and issues another model request",
+    provideTmpdirServer(
+      ({ llm, dir }) =>
+        Effect.gen(function* () {
+          // Match the Desktop harness-context-overflow e2e: checkpoint disabled so
+          // provider overflow degrades to compaction (summary + replay) rather
+          // than rebuild-from-checkpoint.
+          const previousDisable = process.env.MIMOCODE_DISABLE_CHECKPOINT
+          process.env.MIMOCODE_DISABLE_CHECKPOINT = "1"
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previousDisable === undefined) delete process.env.MIMOCODE_DISABLE_CHECKPOINT
+              else process.env.MIMOCODE_DISABLE_CHECKPOINT = previousDisable
+            }),
+          )
+          const { session, sessions, prompt } = yield* setup("A overflow replay continue")
+          // Two real user turns so overflow on the second can replay it while the
+          // first still supplies pre-replay content (same shape as the Desktop
+          // harness-context-overflow e2e).
+          yield* llm.text("FIRST_TURN_ANSWER")
+          yield* prompt.prompt({
+            sessionID: session.id,
+            agent: "build",
+            parts: [{ type: "text", text: "FIRST_TURN_REQUEST" }],
+          })
+          yield* llm.tool("read", { file_path: dir })
+          yield* llm.error(400, { type: "error", error: { code: "context_length_exceeded" } })
+          yield* llm.text("COMPACT_SUMMARY_BODY")
+          yield* llm.text("AFTER_OVERFLOW_REPLY")
+
+          const result = yield* prompt
+            .prompt({
+              sessionID: session.id,
+              agent: "build",
+              parts: [{ type: "text", text: "OVERFLOW_USER_REQUEST" }],
+            })
+            .pipe(Effect.timeout("15 seconds"))
+
+          // 1 first turn + 1 tool-call step + 1 overflow 400 + 1 summary + 1 post-replay reply
+          expect(yield* llm.calls).toBe(5)
+          const messages = yield* sessions.messages({ sessionID: session.id })
+          expect(messages.some((m) => m.info.role === "assistant" && m.info.summary === true)).toBe(true)
+          expect(
+            messages.some((m) => m.info.role === "user" && m.parts.some((p) => p.type === "text" && p.text === "OVERFLOW_USER_REQUEST")),
+          ).toBe(true)
+          expect(result.info.role).toBe("assistant")
+          if (result.info.role !== "assistant") throw new Error("assistant result missing")
+          expect(result.info.error).toBeUndefined()
+          expect(result.parts.some((part) => part.type === "text" && part.text === "AFTER_OVERFLOW_REPLY")).toBe(true)
+          const inputs = yield* llm.inputs
+          const last = inputs[4] as { messages: { role: string; content: unknown }[] }
+          expect(JSON.stringify(last.messages)).toContain("OVERFLOW_USER_REQUEST")
+          expect(JSON.stringify(last.messages)).not.toContain("Continue if you have next steps")
+        }),
+      {
+        git: true,
+        config: (url) => ({ ...config(url), checkpoint: { thresholds: [] } }),
+      },
+    ),
+    30_000,
+  )
+
   it.live(
     "input admitted at extendClaim is claimed before and included in the immediately following model snapshot",
     provideTmpdirServer(

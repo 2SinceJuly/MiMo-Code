@@ -4711,8 +4711,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 visible.add(receipt.intent.messageID as MessageID)
             }
             // A high watermark does not authorize holes persisted before a later input.
+            // External queue users carry queueAdmission and need an owned/consumed
+            // receipt. Internal continuations (compaction replay, hook/spawn, imports
+            // without the marker) never received queueAdmission and stay visible.
             msgs = msgs.filter((msg) =>
               msg.info.sessionID !== sessionID || msg.info.role !== "user" || visible.has(msg.info.id) ||
+              !msg.info.queueAdmission ||
               !!msg.info.provenance ||
               (msg.parts.length > 0 && msg.parts.every((part) =>
                 (part.type === "text" && part.synthetic) || part.type === "compaction" || part.type === "checkpoint")),
