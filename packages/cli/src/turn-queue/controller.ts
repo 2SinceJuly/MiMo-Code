@@ -80,6 +80,7 @@ function toReceipt(row: typeof TurnReceiptTable.$inferSelect): Receipt {
     suspended: row.suspended,
     outcome: row.outcome ?? undefined,
     messageId: row.message_id ?? undefined,
+    deliveryMessageId: row.delivery_message_id ?? undefined,
     error: row.error ?? undefined,
     idempotencyKey: row.idempotency_key ? row.idempotency_key : undefined,
     time: { created: row.time_created, updated: row.time_updated },
@@ -163,6 +164,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           state: receipt.state,
           ...(receipt.outcome ? { outcome: receipt.outcome } : {}),
           ...(receipt.messageId ? { messageId: receipt.messageId } : {}),
+          ...(receipt.deliveryMessageId ? { deliveryMessageId: receipt.deliveryMessageId } : {}),
           epoch: receipt.epoch,
         })
         .pipe(Effect.ignore)

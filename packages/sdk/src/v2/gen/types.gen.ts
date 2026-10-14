@@ -18,6 +18,20 @@ export type EventGlobalDisposed = {
   }
 }
 
+export type EventSessionReceiptUpdated = {
+  type: "session.receipt.updated"
+  properties: {
+    sessionID: string
+    receiptId: string
+    agentID: string
+    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
+    messageId?: string
+    deliveryMessageId?: string
+    epoch: number
+  }
+}
+
 export type EventActorRegistered = {
   type: "actor.registered"
   properties: {
@@ -89,19 +103,6 @@ export type EventInboxArrived = {
     senderActorID?: string
     inboxID: string
     type: string
-  }
-}
-
-export type EventSessionReceiptUpdated = {
-  type: "session.receipt.updated"
-  properties: {
-    sessionID: string
-    receiptId: string
-    agentID: string
-    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-    outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
-    messageId?: string
-    epoch: number
   }
 }
 
@@ -1965,13 +1966,13 @@ export type GlobalEvent = {
   payload:
     | EventServerConnected
     | EventGlobalDisposed
+    | EventSessionReceiptUpdated
     | EventActorRegistered
     | EventActorStatus
     | EventActorStuck
     | EventActorStalled
     | EventWriterCachePerf
     | EventInboxArrived
-    | EventSessionReceiptUpdated
     | EventTaskCreated
     | EventTaskUpdated
     | EventTuiPromptAppend
@@ -3579,13 +3580,13 @@ export type File = {
 export type Event =
   | EventServerConnected
   | EventGlobalDisposed
+  | EventSessionReceiptUpdated
   | EventActorRegistered
   | EventActorStatus
   | EventActorStuck
   | EventActorStalled
   | EventWriterCachePerf
   | EventInboxArrived
-  | EventSessionReceiptUpdated
   | EventTaskCreated
   | EventTaskUpdated
   | EventTuiPromptAppend
@@ -6148,9 +6149,37 @@ export type SessionReceiptResponses = {
    */
   200: {
     id: string
+    lane: {
+      sessionID: string
+      agentID: string
+    }
     state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    intent:
+      | {
+          kind: "prompt"
+          messageID: string
+        }
+      | {
+          kind: "resume"
+          assistantID: string
+          plan: "user-resume" | "tool-resume"
+        }
+      | {
+          kind: "wake"
+          receiverActorID: string
+          inboxWatermark: string
+        }
+      | {
+          kind: "shell"
+          command: string
+          cwd?: string
+        }
+    epoch: number
+    consumed: boolean
+    suspended: boolean
     outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
     messageId?: string
+    deliveryMessageId?: string
     error?: string
   }
 }

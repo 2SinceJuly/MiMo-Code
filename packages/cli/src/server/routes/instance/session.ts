@@ -29,7 +29,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { Provider } from "@/provider"
 import { forkQuery } from "@/tool/session"
 import { spawnRef } from "@/actor/spawn-ref"
-import { turnQueueRef } from "@/turn-queue"
+import { turnQueueRef, toPublicReceipt, PublicReceipt } from "@/turn-queue"
 import { AppRuntime } from "@/effect/app-runtime"
 import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
@@ -1007,7 +1007,7 @@ export const SessionRoutes = lazy(() =>
         const body = c.req.valid("json")
         if (body.id !== params.partID || body.messageID !== params.messageID || body.sessionID !== params.sessionID) {
           throw new Error(
-            `Part mismatch: body.id='${body.id}' vs partID='${params.partID}', body.messageID='${body.messageID}' vs messageID='${params.messageID}', body.sessionID='${body.sessionID}' vs sessionID='${params.sessionID}'`,
+            `Part mismatch: body.id='${body.id}' vs partID='${params.partID}', body.messageID='${body.messageID}' vs messageID='${params.messageID}', body.sessionID='${params.sessionID}' vs sessionID='${params.sessionID}'`,
           )
         }
         return jsonRequest("SessionRoutes.updatePart", c, function* () {
@@ -1393,15 +1393,7 @@ export const SessionRoutes = lazy(() =>
             description: "Receipt",
             content: {
               "application/json": {
-                schema: resolver(
-                  z.object({
-                    id: z.string(),
-                    state: z.enum(["accepted", "claimed", "settled", "cancelled", "rejected"]),
-                    outcome: z.enum(["success", "assistant_error", "interrupted", "never_ran"]).optional(),
-                    messageId: z.string().optional(),
-                    error: z.string().optional(),
-                  }),
-                ),
+                schema: resolver(PublicReceipt),
               },
             },
           },
@@ -1423,7 +1415,7 @@ export const SessionRoutes = lazy(() =>
         try {
           const receipt = await AppRuntime.runPromise(tq.getReceipt(receiptId))
           if (receipt.lane.sessionID !== sessionID) return c.json({ error: "not found" }, 404)
-          return c.json(receipt)
+          return c.json(toPublicReceipt(receipt))
         } catch {
           return c.json({ error: "not found" }, 404)
         }

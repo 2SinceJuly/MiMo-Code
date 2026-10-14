@@ -10,7 +10,8 @@ import { MessageTable } from "../../src/session/session.sql"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { Database, eq } from "../../src/storage"
 import { TurnReceiptTable, TurnSessionEpochTable } from "../../src/turn-queue/turn-queue.sql"
-import type { Receipt } from "../../src/turn-queue/schema"
+import { PublicReceipt, type Receipt } from "../../src/turn-queue/schema"
+import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
 import { TestLLMServer } from "../lib/llm-server"
@@ -78,6 +79,12 @@ function client(directory: string) {
       expect(response.status).toBe(200)
       return (await response.json()) as Receipt
     },
+    async publicReceipt(sessionID: SessionID, receiptId: string) {
+      const response = await request(`/session/${sessionID}/receipt/${receiptId}`)
+      expect(response.status).toBe(200)
+      const raw = (await response.json()) as Record<string, unknown>
+      return { raw, parsed: PublicReceipt.parse(raw) }
+    },
     async messages(sessionID: SessionID) {
       const response = await request(`/session/${sessionID}/message`)
       expect(response.status).toBe(200)
@@ -135,6 +142,12 @@ async function started(llm: TestLLMServer["Service"], text: string) {
   await until(
     () => Effect.runPromise(llm.inputs),
     (inputs) => inputs.some((input) => JSON.stringify(input).includes(text)),
+  )
+}
+
+function answered(messages: MessageV2.WithParts[], text: string) {
+  return messages.find((message) =>
+    message.parts.some((part) => part.type === "text" && part.text === text),
   )
 }
 
@@ -330,6 +343,71 @@ describe("HTTP TurnQueue admission", () => {
           expect(rows(session.id).filter((row) => row.intent.messageID === messageID)).toHaveLength(1)
         } finally {
           first.release()
+        }
+      }),
+    30_000,
+  )
+
+  test(
+    "interjected prompt delivered to the model publishes deliveryMessageId and exposes it on the public GET receipt",
+    () =>
+      fixture(async (http, llm) => {
+        const session = await http.session()
+        const events: Array<{ deliveryMessageId?: string; receiptId: string; state: string }> = []
+        const listener = (event: GlobalEvent) => {
+          const payload = event.payload
+          if (payload.type !== "session.receipt.updated") return
+          if (payload.properties?.sessionID !== session.id) return
+          events.push({
+            receiptId: payload.properties.receiptId,
+            state: payload.properties.state,
+            deliveryMessageId: payload.properties.deliveryMessageId,
+          })
+        }
+        GlobalBus.on("event", listener)
+        try {
+          const first = await controlled(http, llm, session.id)
+          try {
+            const messageID = MessageID.ascending()
+            const text = `interjected delivery ${messageID}`
+            await Effect.runPromise(llm.text("interjected HTTP answer"))
+            const response = await http.post(`/session/${session.id}/message`, {
+              messageID,
+              model,
+              parts: [{ type: "text", text }],
+            })
+            const queued = await accepted(http, session.id, response, messageID)
+            expect(queued.deliveryMessageId).toBeUndefined()
+            first.release()
+            await started(llm, text)
+            // Wait for the answering assistant step to land before reading the anchor.
+            const answer = await until(
+              () => http.messages(session.id),
+              (messages) => answered(messages, "interjected HTTP answer") !== undefined,
+            ).then((messages) => answered(messages, "interjected HTTP answer")!)
+            const delivered = await until(
+              () => http.receipt(session.id, queued.id),
+              (value) => value.deliveryMessageId !== undefined,
+            )
+            // deliveryMessageId is the first assistant step that read this input.
+            expect(delivered.deliveryMessageId).toBe(answer.info.id)
+            const { raw, parsed } = await http.publicReceipt(session.id, queued.id)
+            expect(parsed.deliveryMessageId).toBe(answer.info.id)
+            for (const internal of ["runId", "claimFrontier", "idempotencyKey", "time"] as const)
+              expect(raw).not.toHaveProperty(internal)
+            await settled(http, session.id, queued.id)
+            await settled(http, session.id, first.receiptId)
+            const anchor = await until(
+              async () => events.find((event) => event.receiptId === queued.id && event.deliveryMessageId !== undefined),
+              (value) => value !== undefined,
+            )
+            expect(anchor!.deliveryMessageId).toBe(answer.info.id)
+            expect(anchor!.state).toBe("claimed")
+          } finally {
+            first.release()
+          }
+        } finally {
+          GlobalBus.off("event", listener)
         }
       }),
     30_000,

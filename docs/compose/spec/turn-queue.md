@@ -205,6 +205,7 @@ type Receipt = {
   consumed?: boolean
   outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
   messageId?: MessageID        // assistant result when settled success
+  deliveryMessageId?: MessageID // first model-step assistant that read this input
   error?: string
 }
 ```
@@ -249,7 +250,7 @@ Define **message frontier** on the lane’s main (or actor) slice using **`Messa
 
 1. Persist the complete user message, all resolved parts, and trusted `queueAdmission: { epoch, ready: true, dispatch }` in one synchronous SQLite transaction. Read the epoch inside that transaction. Internal hook/spawn messages do not receive this marker.
 2. **Immediately** `admit({ kind: "prompt", messageID }, { expectedEpoch })` in the same Effect (without awaiting execution). Live admission and crash recovery use the same captured epoch.
-3. If the process stops between those transactions, boot reconstructs the receipt from the durable ready intent. Current-epoch inputs become accepted; expired inputs become cancelled/never_ran. No partial multipart request may become executable.
+3. If the process stops between those transactions, boot reconstructs the receipt from the durable ready intent. Current-epoch inputs become accepted; expired intents become cancelled/never_ran. No partial multipart request may become executable.
 4. Only then may HTTP return 202/200-stream. `noReply` sets `dispatch:false` and stops after admission. Boot must not start a lane solely for such inputs, including after repeated restarts.
 
 **Oracle:** a complete trusted external input is always recoverable through its ready intent or represented by a receipt. A terminal cancelled receipt is valid; silently dropping the input is not. Unknown post-queue receipt-less messages have no implicit execution authorization.
@@ -305,11 +306,13 @@ Precedence: epoch fence always applies first; `keep-suspended` only changes **re
 |---|---|
 | `POST /session/:id/prompt_async` | **202** + `{ receiptId }` (preferred). One-release compat: **204** allowed with `Deprecation` header. TUI/App already fire-and-forget. |
 | `POST /session/:id/message` | `admit(prompt)`. **Never 409 for busy.** If claim starts in-request and client still connected → **200 stream**. Else **202** + `{ receiptId }` and **end the response**. No “202 then stream on same body”. |
-| `GET /session/:id/receipt/:receiptId` | **Required** (durable). Returns current Receipt. Clients that miss SSE must poll this after 202. |
+| `GET /session/:id/receipt/:receiptId` | **Required** (durable). Returns the `PublicReceipt` projection of the current receipt. Clients that miss SSE must poll this after 202. |
 | `POST /session/:id/abort` | body `{ queuedPolicy?: "drop" \| "keep-suspended" }`; response `{ epoch }`. |
-| Events | `session.receipt.updated` `{ receiptId, state, outcome?, messageId? }` — best-effort live; **GET is the source of truth**. |
+| Events | `session.receipt.updated` `{ receiptId, state, outcome?, messageId?, deliveryMessageId?, epoch }` — best-effort live; **GET is the source of truth**. |
 
-OpenAPI models 200/202/204 + Receipt schema; `packages/sdk` regen in the same change. Migration note: 202=queued → GET receipt / events; idempotency keys; abort explicit; disconnect ≠ abort.
+**Public receipt fields** (`PublicReceipt` in `packages/cli/src/turn-queue/schema.ts`): `id`, `lane`, `state`, `intent`, `epoch`, `consumed`, `suspended`, `outcome?`, `messageId?`, `deliveryMessageId?`, `error?`. Internal claim bookkeeping (`runId`, `claimFrontier`, `idempotencyKey`, `time`) and `intent.expectedAssistantStatus` are not part of the external contract.
+
+`deliveryMessageId` is the first model-step assistant message that read the input. It is written once (the anchor does not move on later tool continuations) and `session.receipt.updated` publishes it at that moment. The OpenAPI response schema and the HTTP body share one zod source (`PublicReceipt`); `packages/sdk` regen in the same change. Migration note: 202=queued → GET receipt / events; idempotency keys; abort explicit; disconnect ≠ abort.
 
 ### Mapping from current code
 
@@ -365,8 +368,9 @@ PR #2452 carries both A's scheduling foundation and B's dependent subagent waiti
 - **C-06** `reconcileOnBoot` on prompt entry + wake requeue kick; abort cancels receipts before runner teardown
 - **C-08** `/message` busy → admit + **202** (no assertNotBusy TOCTOU 409)
 - **C-09** TUI recover no longer blocks on status.busy
-- **C-10** OpenAPI: `/message` 202 schema, `prompt_async` 202, typed GET receipt
+- **C-10** OpenAPI: `/message` 202 schema, `prompt_async` 202, typed GET receipt via `PublicReceipt` (single source with the response body)
 - HTTP disconnect does not abort; abort `{ok,epoch}` + `queuedPolicy`
+- `deliveryMessageId` on the public receipt and `session.receipt.updated`, published at the first-delivery anchor write
 
 **Accepted residual**
 - Milliseconds-wide runner exit-tail race (from prior review) remains accepted.

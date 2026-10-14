@@ -3,6 +3,8 @@ import { Database, eq, NotFoundError } from "@/storage"
 import { SyncEvent } from "@/sync"
 import { MessageID, SessionID } from "@/session/schema"
 import { MessageTable, SessionTable } from "@/session/session.sql"
+import { Bus } from "@/bus"
+import { ReceiptUpdated } from "./events"
 import { TurnLaneStateTable, TurnLegacyBootstrapTable, TurnReceiptTable, TurnSessionEpochTable } from "./turn-queue.sql"
 
 export class QueueValidationError extends Error {
@@ -174,6 +176,26 @@ export function capture(sessionID: SessionID, db?: Database.TxOrDb): Snapshot {
   })
 }
 
+/**
+ * Publish session.receipt.updated for receipts whose delivery_message_id was
+ * just anchored (state stays claimed while the anchor is written). This is the
+ * only write path that sets delivery_message_id on a claimed row; later ack
+ * transitions the row to a terminal state and is published by the controller.
+ */
+function publishDeliveryAnchors(receipts: Array<typeof TurnReceiptTable.$inferSelect>) {
+  for (const row of receipts) {
+    if (row.state !== "claimed" || !row.delivery_message_id) continue
+    void Bus.publish(ReceiptUpdated, {
+      sessionID: row.session_id,
+      receiptId: row.id,
+      agentID: row.agent_id,
+      state: row.state,
+      deliveryMessageId: row.delivery_message_id,
+      epoch: row.epoch,
+    })
+  }
+}
+
 // Call inside the transaction that produced these after-images. Repeated rows retain their final image.
 export function record(delta: Delta): void {
   const data = parse(DeltaSchema, {
@@ -183,6 +205,7 @@ export function record(delta: Delta): void {
   })
   if (!data.receipts?.length && !data.deletedReceiptIDs?.length && !data.lanes?.length && !data.epoch && !data.bootstrap) return
   SyncEvent.run(Event.Delta, data)
+  publishDeliveryAnchors(data.receipts ?? [])
 }
 
 export function snapshot(sessionID: SessionID): Snapshot {
