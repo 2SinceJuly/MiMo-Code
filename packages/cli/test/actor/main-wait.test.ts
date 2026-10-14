@@ -128,6 +128,25 @@ const waiting = (sessionID: SessionID) =>
     ),
   )
 
+/** Snapshot the structured automatic-wait marker while main is parked on children. */
+const waitState = Effect.fn("test.waitState")(function* (sessionID: SessionID) {
+  const status = yield* SessionStatus.Service
+  const value = yield* status.get(sessionID)
+  return value.type === "busy" ? value.wait : undefined
+})
+
+const expectSubagentWait = (
+  wait: { kind: "subagents"; actorIDs: string[]; stalled: string[]; deadline: number } | undefined,
+  actorIDs: string[],
+) => {
+  expect(wait).toBeDefined()
+  if (!wait) throw new Error("wait marker missing")
+  expect(wait.kind).toBe("subagents")
+  expect([...wait.actorIDs].sort()).toEqual([...actorIDs].sort())
+  expect(wait.deadline).toBeGreaterThan(Date.now() - 1000)
+  for (const id of wait.stalled) expect(wait.actorIDs).toContain(id)
+}
+
 const busy = Effect.fn("test.mainBusy")(function* (sessionID: SessionID) {
   const state = yield* SessionRunState.Service
   const status = yield* SessionStatus.Service
@@ -238,6 +257,7 @@ describe("main automatically waits for subagent executions", () => {
           const main = yield* start(session.id)
           yield* waiting(session.id)
           yield* busy(session.id)
+          expectSubagentWait(yield* waitState(session.id), ["child-1"])
           expect(main.pollUnsafe()).toBeUndefined()
           expect(yield* llm.calls).toBe(1)
           const messages = yield* sessions.messages({ sessionID: session.id })
@@ -251,6 +271,9 @@ describe("main automatically waits for subagent executions", () => {
           yield* Deferred.await(held.terminal)
           yield* Effect.sleep("50 millis")
           yield* busy(session.id)
+          // Still parked on the child's execution until release, so the wait
+          // marker continues to list it.
+          expectSubagentWait(yield* waitState(session.id), ["child-1"])
           expect(main.pollUnsafe()).toBeUndefined()
           expect(yield* executions.current(session.id, "child-1")).toBe(held.execution)
           expect(yield* Deferred.isDone(held.execution.done)).toBe(false)
@@ -261,6 +284,8 @@ describe("main automatically waits for subagent executions", () => {
           const result = yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
           expect(result.parts.some((part) => part.type === "text" && part.text === "MAIN-FINAL")).toBe(true)
           yield* state.assertNotBusy(session.id, "main")
+          // Wait ended with the turn: no stale structured wait remains.
+          expect(yield* waitState(session.id)).toBeUndefined()
           yield* until(Effect.sync(() => idleBeforeRelease.length > 0))
           expect(idleBeforeRelease).toEqual([false])
           expect(yield* executions.current(session.id, "child-1")).toBeUndefined()
@@ -529,6 +554,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* llm.text("STEERED-FINAL")
           const main = yield* start(session.id)
           yield* waiting(session.id)
+          expectSubagentWait(yield* waitState(session.id), ["child-1"])
           expect(yield* llm.calls).toBe(2)
           yield* prompt.prompt({
             sessionID: session.id,
@@ -539,6 +565,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* llm.wait(3).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
           yield* busy(session.id)
+          expectSubagentWait(yield* waitState(session.id), ["child-1"])
           expect(main.pollUnsafe()).toBeUndefined()
           expect(held.fiber.pollUnsafe()).toBeUndefined()
           expect(held.execution.cancelled).toBe(false)
@@ -549,6 +576,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* complete(held)
           const result = yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
           expect(result.parts.some((part) => part.type === "text" && part.text === "STEERED-FINAL")).toBe(true)
+          expect(yield* waitState(session.id)).toBeUndefined()
           expect(yield* llm.calls).toBe(3)
         }),
       { git: true, config },

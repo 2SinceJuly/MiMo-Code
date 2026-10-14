@@ -457,6 +457,12 @@ export type SessionStatus =
   | {
       type: "busy"
       message?: string
+      wait?: {
+        kind: "subagents"
+        actorIDs: Array<string>
+        stalled: Array<string>
+        deadline: number
+      }
     }
 
 export type EventSessionStatus = {

@@ -4504,6 +4504,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // Partial completion notifications must not renew the remaining children's wait window.
         let subagentWait: { deadline: number; inputRevision: number } | undefined
         let subagentWaitUser: MessageV2.User | undefined
+        const clearSubagentWaitStatus = Effect.fn("SessionPrompt.clearSubagentWaitStatus")(function* () {
+          const current = yield* status.get(sessionID)
+          if (current.type === "busy" && current.wait)
+            yield* status.set(sessionID, { type: "busy", message: current.message })
+        })
         const waitForSubagents = Effect.fn("SessionPrompt.waitForSubagents")(function* (
           afterRevision: number,
           lastUser: MessageV2.User,
@@ -4566,14 +4571,22 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const tq = turnQueueRef.current
             if (tq && (yield* tq.observeInput(lane, -1)) > afterRevision) {
               subagentWait = undefined
+              yield* clearSubagentWaitStatus()
               return true
             }
-            if (!deferInbox && (yield* inbox.drain(sessionID, resolvedAgentID)) > 0) return true
-            if (waits.length === 0) return false
+            if (!deferInbox && (yield* inbox.drain(sessionID, resolvedAgentID)) > 0) {
+              yield* clearSubagentWaitStatus()
+              return true
+            }
+            if (waits.length === 0) {
+              yield* clearSubagentWaitStatus()
+              return false
+            }
             const remaining = subagentWait ? subagentWait.deadline - Date.now() : DEFAULT_TIMEOUT_MS
             if (remaining <= 0 && active.size > 0) {
               if (tq && (yield* tq.observeInput(lane, -1)) > afterRevision) {
                 subagentWait = undefined
+                yield* clearSubagentWaitStatus()
                 return true
               }
               // Reconcile children that exited or were replaced during the inbox/input checks first.
@@ -4604,6 +4617,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ].join("\n"),
               } satisfies MessageV2.TextPart)
               subagentWait = undefined
+              yield* clearSubagentWaitStatus()
               return true
             }
             yield* status.set(sessionID, {
@@ -4611,6 +4625,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               message: stalled.length
                 ? `Waiting for subagents; no recent activity: ${stalled.join(", ")}`
                 : `Waiting for ${waits.length} subagent(s)`,
+              wait: {
+                kind: "subagents",
+                actorIDs: [...active.keys()],
+                stalled: [...stalled],
+                deadline: subagentWait?.deadline ?? Date.now() + DEFAULT_TIMEOUT_MS,
+              },
             })
             if (tq) waits.push(tq.observeInput(lane, afterRevision))
             // Periodically refresh liveness display; silence alone is not proof of death.
