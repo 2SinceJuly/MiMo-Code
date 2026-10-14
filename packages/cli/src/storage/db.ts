@@ -16,6 +16,7 @@ import { InstanceState } from "@/effect"
 import { iife } from "@/util/iife"
 import { init } from "#db"
 import { startIndexMigration, stopIndexMigration } from "../history/migration"
+import { ensureHistorySearchColumns } from "../history/ensure-columns"
 
 declare const MIMOCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -96,6 +97,13 @@ export const Client = lazy(() => {
   db.run("PRAGMA foreign_keys = ON")
   db.run("PRAGMA wal_checkpoint(PASSIVE)")
 
+  // Idempotent column ensure: must run before migrate() so replayed ALTERs
+  // cannot abort startup on a desynced journal (see history/ensure-columns.ts).
+  ensureHistorySearchColumns({
+      run: (q) => db.run(q),
+      client: { prepare: (sql) => ({ all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all() }) },
+    })
+
   // Apply schema migrations
   const entries =
     typeof MIMOCODE_MIGRATIONS !== "undefined"
@@ -113,6 +121,12 @@ export const Client = lazy(() => {
     }
     migrate(db, entries)
   }
+  // After CREATE/DROP/ADD migrations settle: add search columns if a replay
+  // skipped the ALTER (desynced journal) or a prior DROP removed them.
+  ensureHistorySearchColumns({
+      run: (q) => db.run(q),
+      client: { prepare: (sql) => ({ all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all() }) },
+    })
 
   if (!Flag.MIMOCODE_SKIP_MIGRATIONS) startIndexMigration(db)
   return db

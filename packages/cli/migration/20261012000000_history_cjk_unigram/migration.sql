@@ -1,6 +1,6 @@
 -- Dual-column search: body = original preview (display), body_idx = CJK-isolated
 -- search form. FTS MATCH runs on body_idx so short CJK works without instr.
-ALTER TABLE history_fts ADD COLUMN body_idx text NOT NULL DEFAULT '';--> statement-breakpoint
+-- body_idx added by history/ensure-columns.ts after migrate (idempotent).
 
 DROP TRIGGER IF EXISTS `history_fts_ai`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `history_fts_ad`;--> statement-breakpoint
@@ -29,7 +29,7 @@ CREATE TRIGGER `history_fts_au` AFTER UPDATE ON `history_fts` BEGIN
 END;--> statement-breakpoint
 
 -- v8: background re-extract fills body_idx + kind (no sync rebuild).
-INSERT INTO history_index_migration
+INSERT OR IGNORE INTO history_index_migration
 SELECT 8, 'clean', 0,
   COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
   COALESCE((SELECT MAX(rowid) FROM part), 0);

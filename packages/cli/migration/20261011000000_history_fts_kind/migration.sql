@@ -1,12 +1,13 @@
 -- Restore content classification on history_fts for consumers outside History.search.
 -- History.search does not filter on kind; this column is write-side metadata only.
 -- Existing rows get a placeholder; index rebuild rewrites kind via extract().
-ALTER TABLE history_fts ADD COLUMN kind text NOT NULL DEFAULT '';--> statement-breakpoint
-CREATE INDEX history_fts_kind_idx ON history_fts (kind);--> statement-breakpoint
-
+--
+-- Column ensure is idempotent (SQLite has no ADD COLUMN IF NOT EXISTS): see
+-- history/ensure-columns.ts, which runs after migrate() and adds kind/body_idx
+-- when missing. Replaying a bare ALTER on a desynced journal aborts startup.
 -- Re-extract every part so kind is classified (user_text/assistant_text/reasoning/…).
 -- Start at clean so orphans are dropped even when upgrading past v6; repair rewrites bodies+kind.
-INSERT INTO history_index_migration
+INSERT OR IGNORE INTO history_index_migration
 SELECT 7, 'clean', 0,
   COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
   COALESCE((SELECT MAX(rowid) FROM part), 0);--> statement-breakpoint
