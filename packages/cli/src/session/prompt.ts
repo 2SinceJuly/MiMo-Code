@@ -56,6 +56,7 @@ import { Global } from "@/global"
 import { NotFoundError, Database, eq, and, inArray, isNull } from "@/storage"
 import { TurnReceiptTable } from "@/turn-queue/turn-queue.sql"
 import * as QueueSync from "@/turn-queue/sync"
+import { ReceiptUpdated } from "@/turn-queue/events"
 import { ExecutionOwnership } from "./execution-ownership"
 import { SessionTable } from "./session.sql"
 import { Bus } from "../bus"
@@ -4653,7 +4654,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             })
             if (pending.length > 0) {
               const identity = yield* ExecutionOwnership.captureIdentity
-              yield* Effect.sync(() => Database.transaction((db) => {
+              const anchored = yield* Effect.sync(() => Database.transaction((db) => {
                 ExecutionOwnership.assertOwnership(db, sessionID, identity)
                 const receipts = db.update(TurnReceiptTable).set({
                   delivery_message_id: messageID,
@@ -4665,7 +4666,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   isNull(TurnReceiptTable.delivery_message_id),
                 )).returning().all()
                 QueueSync.record({ sessionID, receipts })
+                return receipts
               }))
+              for (const row of anchored) {
+                yield* bus.publish(ReceiptUpdated, {
+                  sessionID: row.session_id,
+                  receiptId: row.id,
+                  agentID: row.agent_id,
+                  state: row.state,
+                  deliveryMessageId: messageID,
+                  epoch: row.epoch,
+                })
+              }
               for (const receipt of pending) {
                 if (receipt.intent.kind === "prompt") deliveredPrompts.add(receipt.intent.messageID)
               }
