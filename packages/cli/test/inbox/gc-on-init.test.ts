@@ -53,6 +53,7 @@ describe("gcInboxRows unit tests (Plan 2 / Task 7)", () => {
                     type: "text",
                     content: { text: "old message" },
                     created_at: eightDaysAgo,
+                    time_updated: eightDaysAgo,
                   })
                   .run()
                 db.insert(InboxTable)
@@ -65,6 +66,7 @@ describe("gcInboxRows unit tests (Plan 2 / Task 7)", () => {
                     type: "text",
                     content: { text: "fresh message" },
                     created_at: oneHourAgo,
+                    time_updated: oneHourAgo,
                   })
                   .run()
               }),
@@ -129,6 +131,7 @@ describe("gcInboxRows unit tests (Plan 2 / Task 7)", () => {
                     type: "text",
                     content: { text: "stale" },
                     created_at: twoWeeksAgo,
+                    time_updated: twoWeeksAgo,
                   })
                   .run(),
               ),

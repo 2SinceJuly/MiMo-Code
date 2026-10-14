@@ -182,6 +182,7 @@ export const layer: Layer.Layer<
         type: input.type ?? "text",
         content: { text: input.content },
         created_at: Date.now(),
+        time_updated: Date.now(),
       }
       yield* Effect.sync(() => Database.use((db) => db.insert(InboxTable).values(row).run()))
       yield* bus.publish(InboxArrived, {
