@@ -111,6 +111,32 @@ preparation retains the old usable model views, releases admission, and allows
 a later retry. Refresh does not emit instance-disposal events or replace Bus,
 SessionRunState, permission, question, MCP, or skill state.
 
+### Inbox wake ownership during ordinary disposal
+
+Ordinary configuration disposal uses the same Instance execution ledger. An
+inbox delivery that schedules a receiver loop holds an Instance claim before
+forking that loop. The claim belongs to the current service instance and lasts
+until the scheduled wake fiber actually exits; the receiver's existing Runner
+and ActorExecution keep their own execution ownership. This closes the gap
+between a child terminal notification and the receiver's asynchronous admission,
+so the last child releasing its claim cannot dispose the scope containing the
+already scheduled receiver work.
+
+The wake remains interruptible and detached from the sender. A registered fiber
+exit observer releases the claim even when the wake is interrupted before its
+body starts. Claim acquisition, wake scheduling and observer registration form
+one uninterruptible handoff; observer registration is synchronous and also
+handles an already completed fiber. Explicit `wake: false` and a missing receiver-loop
+binding persist the inbox row without taking a claim or scheduling work. No new
+message, retry, timeout, actor activity flag or configuration state is created.
+Concurrent deliveries retain independent scheduling claims and continue to use
+the existing Runner's pending-work and inbox-drain semantics.
+
+The regression boundary covers pending disposal during terminal delivery, real
+receiver model output, multiple concurrent deliveries, session abort, and the
+absence of automatic execution for quiet deliveries. The plain Node build and
+HTTP integration exercise the same implementation as Bun tests.
+
 Effect HTTP API handlers retain an instance claim for their actual operation,
 including asynchronous work, and release it on completion, failure, or
 interruption. This must not make existing lifecycle handlers reject their own

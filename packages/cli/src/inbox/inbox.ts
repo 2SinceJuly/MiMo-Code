@@ -8,6 +8,8 @@ import { MessageID, PartID } from "@/session/schema"
 import { InboxArrived } from "@/actor/events"
 import type { SessionID } from "@/session/schema"
 import { Log } from "@/util"
+import { Instance } from "@/project/instance"
+import * as InstanceState from "@/effect/instance-state"
 import { InboxTable } from "./inbox.sql"
 import { renderInboxRow } from "./render"
 import { sessionPromptRef, inboxServiceRef, defaultModelRef } from "./inbox-ref"
@@ -193,21 +195,36 @@ export const layer: Layer.Layer<
       if (input.wake === false) {
         // Row already persisted; skip auto-dispatch on purpose.
       } else if (promptRef) {
-        yield* promptRef
-          .loop({
-            sessionID: input.receiverSessionID,
-            agentID: input.receiverActorID,
-            // Woken turns notify their parent on completion. The spawn turn goes
-            // through SessionPrompt.prompt (no flag) so forkWork.notify remains
-            // the sole notifier for turn 1 — no double-notify.
-            notifyParentOnComplete: true,
-            inboxWake: true,
-            // Inbox wakes are internal machine scheduling (actor notifications / queued
-            // actor traffic). They must NOT be labeled user — real user turns enter via
-            // prompt()/Desktop/TUI/HTTP/command which default source to "user".
-            source: "spawn",
-          })
-          .pipe(Effect.ignore, Effect.forkIn(scope))
+        yield* Effect.gen(function* () {
+          const directory = yield* InstanceState.directory
+          let transferred = false
+          yield* Effect.acquireUseRelease(
+            Effect.sync(() => Instance.claim(directory)),
+            (release) =>
+              Effect.gen(function* () {
+                const fiber = yield* promptRef
+                  .loop({
+                    sessionID: input.receiverSessionID,
+                    agentID: input.receiverActorID,
+                    // Woken turns notify their parent on completion. The spawn turn goes
+                    // through SessionPrompt.prompt (no flag) so forkWork.notify remains
+                    // the sole notifier for turn 1 — no double-notify.
+                    notifyParentOnComplete: true,
+                    inboxWake: true,
+                    // Inbox wakes are internal machine scheduling (actor notifications / queued
+                    // actor traffic). They must NOT be labeled user — real user turns enter via
+                    // prompt()/Desktop/TUI/HTTP/command which default source to "user".
+                    source: "spawn",
+                  })
+                  .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true, uninterruptible: false }))
+                // A fiber exit observer also runs when interruption precedes its
+                // first step, unlike an ensuring attached only to the wake body.
+                fiber.addObserver(() => release())
+                transferred = true
+              }),
+            (release) => (transferred ? Effect.void : Effect.sync(release)),
+          )
+        }).pipe(Effect.uninterruptible)
       } else {
         // Test fixtures / renderer-only paths can run without SessionPrompt.
         // Row is durable; will be drained on next runLoop iteration.
