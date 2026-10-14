@@ -1,6 +1,6 @@
 -- Dual-column search: body = original preview (display), body_idx = CJK-isolated
 -- search form. FTS MATCH runs on body_idx so short CJK works without instr.
--- body_idx added by history/ensure-columns.ts after migrate (idempotent).
+ALTER TABLE history_fts ADD COLUMN body_idx text NOT NULL DEFAULT '';--> statement-breakpoint
 
 DROP TRIGGER IF EXISTS `history_fts_ai`;--> statement-breakpoint
 DROP TRIGGER IF EXISTS `history_fts_ad`;--> statement-breakpoint

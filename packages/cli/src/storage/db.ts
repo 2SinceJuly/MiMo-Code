@@ -1,5 +1,4 @@
 import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
 import { LocalContext } from "../util"
@@ -16,7 +15,7 @@ import { InstanceState } from "@/effect"
 import { iife } from "@/util/iife"
 import { init } from "#db"
 import { startIndexMigration, stopIndexMigration } from "../history/migration"
-import { ensureHistorySearchColumns } from "../history/ensure-columns"
+import { migrateReplaySafe } from "./migrate-replay-safe"
 
 declare const MIMOCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -97,14 +96,8 @@ export const Client = lazy(() => {
   db.run("PRAGMA foreign_keys = ON")
   db.run("PRAGMA wal_checkpoint(PASSIVE)")
 
-  // Idempotent column ensure: must run before migrate() so replayed ALTERs
-  // cannot abort startup on a desynced journal (see history/ensure-columns.ts).
-  ensureHistorySearchColumns({
-      run: (q) => db.run(q),
-      client: { prepare: (sql) => ({ all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all() }) },
-    })
-
-  // Apply schema migrations
+  // Schema = sum of migration/*.sql. The runner only treats ALTER ADD/DROP
+  // and CREATE INDEX replay-safe no-ops as already-applied on a desynced journal.
   const entries =
     typeof MIMOCODE_MIGRATIONS !== "undefined"
       ? MIMOCODE_MIGRATIONS
@@ -119,15 +112,19 @@ export const Client = lazy(() => {
         item.sql = "select 1;"
       }
     }
-    migrate(db, entries)
+    migrateReplaySafe(
+      {
+        run: (q) => db.run(q),
+        client: {
+          prepare: (sql) => ({
+            all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all(),
+            get: () => (db.$client.prepare(sql) as { get: () => unknown }).get(),
+          }),
+        },
+      },
+      entries,
+    )
   }
-  // After CREATE/DROP/ADD migrations settle: add search columns if a replay
-  // skipped the ALTER (desynced journal) or a prior DROP removed them.
-  ensureHistorySearchColumns({
-      run: (q) => db.run(q),
-      client: { prepare: (sql) => ({ all: () => (db.$client.prepare(sql) as { all: () => unknown[] }).all() }) },
-    })
-
   if (!Flag.MIMOCODE_SKIP_MIGRATIONS) startIndexMigration(db)
   return db
 })
