@@ -29,7 +29,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { Provider } from "@/provider"
 import { forkQuery } from "@/tool/session"
 import { spawnRef } from "@/actor/spawn-ref"
-import { turnQueueRef, toPublicReceipt, PublicReceipt } from "@/turn-queue"
+import { inboxControllerRef, toPublicReceipt, PublicReceipt } from "@/inbox"
 import { AppRuntime } from "@/effect/app-runtime"
 import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
@@ -522,21 +522,12 @@ export const SessionRoutes = lazy(() =>
           sessionID: SessionID.zod,
         }),
       ),
-      validator(
-        "json",
-        z
-          .object({
-            queuedPolicy: z.enum(["drop", "keep-suspended"]).optional(),
-          })
-          .optional(),
-      ),
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
-        const policy = c.req.valid("json")?.queuedPolicy ?? "drop"
         const epoch = await runRequest(
           "SessionRoutes.abort",
           c,
-          SessionPrompt.Service.use((svc) => svc.cancel(sessionID, policy)),
+          SessionPrompt.Service.use((svc) => svc.cancel(sessionID)),
         )
         return c.json({ ok: true, epoch })
       },
@@ -1410,7 +1401,7 @@ export const SessionRoutes = lazy(() =>
       async (c) => {
         const sessionID = c.req.valid("param").sessionID
         const receiptId = c.req.valid("param").receiptId
-        const tq = turnQueueRef.current
+        const tq = inboxControllerRef.current
         if (!tq) return c.json({ error: "turn queue unavailable" }, 404)
         try {
           const receipt = await AppRuntime.runPromise(tq.getReceipt(receiptId))

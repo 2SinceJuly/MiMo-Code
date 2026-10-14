@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test"
 import { Database, eq, sql } from "../../src/storage"
-import { TurnReceiptTable } from "../../src/turn-queue/turn-queue.sql"
+import { InboxTable } from "../../src/inbox/inbox.sql"
 import { Effect } from "effect"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -374,8 +374,8 @@ test("source model threads through persisted prompt, command user model and hist
           const delegated = messages.filter(message => message.parts.some(part => part.type === "tool" && part.tool === "actor"))
           expect(delegated).toHaveLength(1)
           expect(delegated[0].parts.find(part => part.type === "tool" && part.tool === "actor")).toMatchObject({ state: { status: "completed" } })
-          const receipt = Database.use(db => db.select().from(TurnReceiptTable).where(eq(TurnReceiptTable.session_id, session.id)).all())
-            .find(receipt => receipt.agent_id === "main" && receipt.intent.kind === "prompt")
+          const receipt = Database.use(db => db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, session.id)).all())
+            .find(receipt => receipt.receiver_actor_id === "main" && receipt.message_id !== null)
           expect(receipt).toMatchObject({ state: "settled", consumed: true, delivery_message_id: delegated[0].info.id })
           await run(SessionPrompt.Service.use(svc => svc.prompt({ sessionID: session.id, model: source, parts: [{ type: "text", text: "Follow up without repeating delegation" }] })))
           const later = await run(Session.Service.use(svc => svc.messages({ sessionID: session.id, agentID: "main" })))

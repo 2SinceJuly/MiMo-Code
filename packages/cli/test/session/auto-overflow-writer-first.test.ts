@@ -8,7 +8,7 @@ import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
-import { TurnQueue } from "../../src/turn-queue"
+import { InboxController } from "../../src/inbox"
 import { MessageTable, SessionTable } from "../../src/session/session.sql"
 import { checkpointPath } from "../../src/session/checkpoint-paths"
 import { spawnRef } from "../../src/actor/spawn-ref"
@@ -33,7 +33,7 @@ function run<A, E>(fx: Effect.Effect<A, E, SessionPrompt.Service | Session.Servi
   return Effect.runPromise(
     fx.pipe(
       Effect.scoped,
-      Effect.provide(Layer.mergeAll(SessionPrompt.defaultLayer, Session.defaultLayer, TurnQueue.defaultLayer)),
+      Effect.provide(Layer.mergeAll(SessionPrompt.defaultLayer, Session.defaultLayer, InboxController.defaultLayer)),
     ),
   )
 }

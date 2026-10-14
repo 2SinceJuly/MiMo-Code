@@ -73,8 +73,8 @@ import {
   hintGitProbeBarrier,
 } from "../../src/session/prompt/uncommitted-hint"
 import { SessionPrefixSnapshotTable } from "../../src/session/session.sql"
-import { TurnQueue } from "../../src/turn-queue/controller"
-import { TurnReceiptTable } from "../../src/turn-queue/turn-queue.sql"
+import * as InboxController from "../../src/inbox/controller"
+import { InboxTable } from "../../src/inbox/inbox.sql"
 
 void Log.init({ print: false })
 
@@ -4166,7 +4166,7 @@ unix("shell captures stdout and stderr in completed tool output", () =>
 unix("shell keeps exclusive ownership with a mounted queue and repeated commands", () =>
   provideTmpdirInstance(
     () => Effect.gen(function* () {
-      const queue = yield* TurnQueue.Service
+      const queue = yield* InboxController.Service
       const { prompt, run, chat } = yield* boot()
       const first = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "printf once" })
       const second = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "printf once" })
@@ -4174,12 +4174,12 @@ unix("shell keeps exclusive ownership with a mounted queue and repeated commands
       expect(completedTool(first.parts)?.state.output).toContain("once")
       expect(completedTool(second.parts)?.state.output).toContain("once")
       expect(yield* queue.listAccepted({ sessionID: chat.id, agentID: "main" })).toEqual([])
-      expect(Database.use((db) => db.select().from(TurnReceiptTable)
-        .where(eq(TurnReceiptTable.session_id, chat.id)).all())).toEqual([])
+      expect(Database.use((db) => db.select().from(InboxTable)
+        .where(eq(InboxTable.receiver_session_id, chat.id)).all())).toEqual([])
       const messages = yield* (yield* Session.Service).messages({ sessionID: chat.id, agentID: "main" })
       expect(messages.filter((message) => message.info.role === "assistant")).toHaveLength(2)
       yield* run.assertNotBusy(chat.id)
-    }).pipe(Effect.provide(TurnQueue.defaultLayer)),
+    }).pipe(Effect.provide(InboxController.defaultLayer)),
     { git: true, config: cfg },
   ),
 )
@@ -5809,9 +5809,9 @@ describe("trailing-user resume integration", () => {
           before.flatMap((m) => m.parts).filter((p) => p.type === "tool"),
         )
         expect(yield* llm.calls).toBe(1)
-        expect(Database.use((db) => db.select().from(TurnReceiptTable)
-          .where(eq(TurnReceiptTable.session_id, chat.id)).all())).toEqual([])
-      }).pipe(Effect.provide(TurnQueue.defaultLayer)),
+        expect(Database.use((db) => db.select().from(InboxTable)
+          .where(eq(InboxTable.receiver_session_id, chat.id)).all())).toEqual([])
+      }).pipe(Effect.provide(InboxController.defaultLayer)),
       { git: true, config: providerCfg },
     ),
   )
@@ -5821,7 +5821,7 @@ describe("trailing-user resume integration", () => {
       ({ llm, dir }) => Effect.gen(function* () {
         const prompt = yield* SessionPrompt.Service
         const sessions = yield* Session.Service
-        const queue = yield* TurnQueue.Service
+        const queue = yield* InboxController.Service
         const chat = yield* sessions.create({ title: "resume-epoch-fence" })
         const { user2 } = yield* seedTail(chat.id, dir, {})
         const before = yield* sessions.messages({ sessionID: chat.id, agentID: "main" })
@@ -5845,7 +5845,7 @@ describe("trailing-user resume integration", () => {
         expect(yield* llm.calls).toBe(0)
         expect(yield* sessions.messages({ sessionID: chat.id, agentID: "main" })).toEqual(before)
         yield* (yield* SessionRunState.Service).assertNotBusy(chat.id)
-      }).pipe(Effect.provide(TurnQueue.defaultLayer)),
+      }).pipe(Effect.provide(InboxController.defaultLayer)),
       { git: true, config: providerCfg },
     ),
   )

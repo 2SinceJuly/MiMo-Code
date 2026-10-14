@@ -5,7 +5,7 @@ import { MessageID, PartID, SessionID } from "@/session/schema"
 import { MessageTable, PartTable, SessionTable } from "@/session/session.sql"
 import { EventSequenceTable, EventTable } from "./event.sql"
 import { SyncEvent } from "."
-import * as QueueSync from "@/turn-queue/sync"
+import * as QueueSync from "@/inbox/sync"
 
 export const ReplayEventSchema = z.object({
   id: z.string(),

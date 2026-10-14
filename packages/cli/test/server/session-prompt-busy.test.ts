@@ -9,8 +9,8 @@ import { MessageID, type SessionID } from "../../src/session/schema"
 import { MessageTable } from "../../src/session/session.sql"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { Database, eq } from "../../src/storage"
-import { TurnReceiptTable, TurnSessionEpochTable } from "../../src/turn-queue/turn-queue.sql"
-import { PublicReceipt, type Receipt } from "../../src/turn-queue/schema"
+import { InboxTable, InboxSessionEpochTable } from "../../src/inbox/inbox.sql"
+import { PublicReceipt, type Receipt } from "../../src/inbox/schema"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
@@ -97,14 +97,14 @@ type Http = ReturnType<typeof client>
 
 function rows(sessionID: SessionID) {
   return Database.use((db) =>
-    db.select().from(TurnReceiptTable).where(eq(TurnReceiptTable.session_id, sessionID)).all(),
+    db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, sessionID)).all(),
   )
 }
 
 function epoch(sessionID: SessionID) {
   return (
     Database.use((db) =>
-      db.select().from(TurnSessionEpochTable).where(eq(TurnSessionEpochTable.session_id, sessionID)).get(),
+      db.select().from(InboxSessionEpochTable).where(eq(InboxSessionEpochTable.session_id, sessionID)).get(),
     )?.epoch ?? 0
   )
 }
@@ -112,7 +112,7 @@ function epoch(sessionID: SessionID) {
 async function accepted(http: Http, sessionID: SessionID, response: Response, messageID: MessageID) {
   expect(response.status).toBe(202)
   // Check SQLite without yielding after the response: background admission must not repair a premature 202.
-  const persisted = rows(sessionID).filter((row) => row.intent.kind === "prompt" && row.intent.messageID === messageID)
+  const persisted = rows(sessionID).filter((row) => row.message_id === messageID)
   expect(persisted).toHaveLength(1)
   const message = Database.use((db) => db.select().from(MessageTable).where(eq(MessageTable.id, messageID)).get())
   expect(message?.session_id).toBe(sessionID)
@@ -124,7 +124,8 @@ async function accepted(http: Http, sessionID: SessionID, response: Response, me
   const receipt = await http.receipt(sessionID, body.receiptId)
   expect(receipt.id).toBe(body.receiptId)
   expect(receipt.lane).toEqual({ sessionID, agentID: "main" })
-  expect(receipt.intent).toEqual({ kind: "prompt", messageID })
+  expect(receipt.intent.messageID).toBe(messageID)
+  expect(receipt.intent.type).toBe("prompt")
   return receipt
 }
 
@@ -167,7 +168,7 @@ async function controlled(http: Http, llm: TestLLMServer["Service"], sessionID: 
   )
   expect([200, 202]).toContain(response.status)
   await started(llm, text)
-  const persisted = rows(sessionID).filter((row) => row.intent.messageID === messageID)
+  const persisted = rows(sessionID).filter((row) => row.message_id === messageID)
   expect(persisted).toHaveLength(1)
   expect(persisted[0].state).toBe("claimed")
   return { response, release: () => gate.resolve(), receiptId: persisted[0].id, messageID }
@@ -306,7 +307,7 @@ describe("HTTP TurnQueue admission", () => {
             .flatMap((message) => message.parts)
             .some((part) => part.type === "text" && part.text === "async HTTP answer"),
         ).toBe(true)
-        expect(rows(session.id).filter((row) => row.intent.messageID === messageID)).toHaveLength(1)
+        expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
       }),
     30_000,
   )
@@ -340,7 +341,7 @@ describe("HTTP TurnQueue admission", () => {
               .flatMap((message) => message.parts)
               .some((part) => part.type === "text" && part.text === "queued HTTP answer"),
           ).toBe(true)
-          expect(rows(session.id).filter((row) => row.intent.messageID === messageID)).toHaveLength(1)
+          expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
         } finally {
           first.release()
         }
@@ -444,12 +445,10 @@ describe("HTTP abort and transport ownership", () => {
             const cancelled = await http.receipt(session.id, receipt.id)
             expect(cancelled.state).toBe("cancelled")
             expect(cancelled.outcome).toBe("never_ran")
-            expect(cancelled.suspended).toBe(policy === "keep-suspended")
             expect(cancelled.consumed).toBe(false)
             expect(cancelled.epoch).toBe(before)
             const interrupted = await http.receipt(session.id, first.receiptId)
             expect(interrupted.state).toBe("cancelled")
-            expect(interrupted.suspended).toBe(policy === "keep-suspended")
             expect(interrupted.epoch).toBe(before)
             first.release()
             await first.response.text()
@@ -465,7 +464,7 @@ describe("HTTP abort and transport ownership", () => {
             await settled(http, session.id, current.id)
             // A later successful turn must not claim or unsuspend an old-epoch receipt.
             expect(await http.receipt(session.id, receipt.id)).toEqual(cancelled)
-            expect(rows(session.id).filter((row) => row.intent.messageID === messageID)).toHaveLength(1)
+            expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
           } finally {
             first.release()
           }

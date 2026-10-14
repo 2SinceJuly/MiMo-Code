@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Scope, Schema, Option } from "effect"
 import { ulid } from "ulid"
-import { Database, eq, and, lte, inArray } from "@/storage"
+import { Database, eq, and, lte, inArray, isNotNull } from "@/storage"
 import { Bus } from "@/bus"
 import { ActorRegistry } from "@/actor/registry"
 import { Session } from "@/session"
@@ -13,7 +13,6 @@ import * as InstanceState from "@/effect/instance-state"
 import { InboxTable } from "./inbox.sql"
 import { renderInboxRow } from "./render"
 import { sessionPromptRef, inboxServiceRef, defaultModelRef } from "./inbox-ref"
-import { turnQueueRef } from "@/turn-queue"
 import type { ProviderID, ModelID } from "@/provider/schema"
 
 const log = Log.create({ service: "inbox" })
@@ -198,27 +197,11 @@ export const layer: Layer.Layer<
       // wake fiber lives in the service scope, so sender lifecycle does
       // not affect delivery. `wake: false` keeps the durable row without
       // scheduling a new turn (session abort / process-group kill).
+      //
+      // Phase-1 minimal wake: agent rows still arrive as content rows and are
+      // drained inside the loop. Wake is a force-run (no claim required) so
+      // drain can convert them; phase 2 unifies this through inbox.accept.
       const promptRef = sessionPromptRef.current
-      // Durable wake Intent (turn-queue). Wake dispatch is promptRef.loop —
-      // no Controller kick (that would race the explicit loop and steal the turn).
-      const tq = turnQueueRef.current
-      let wakeEpoch = input.wakeEpoch
-      if (tq && input.wake !== false && !input.isWakeCancelled?.()) {
-        const admitted = yield* tq
-          .admit({
-            lane: { sessionID: input.receiverSessionID, agentID: input.receiverActorID },
-            intent: {
-              kind: "wake",
-              receiverActorID: input.receiverActorID,
-              inboxWatermark: row.id,
-            },
-          }, input.isWakeCancelled || input.wakeEpoch !== undefined
-            ? { isCancelled: input.isWakeCancelled, expectedEpoch: input.wakeEpoch }
-            : undefined)
-          .pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-        if (!admitted) return { inboxID: row.id, wakeSuppressed: true }
-        wakeEpoch = admitted.epoch
-      }
       if (input.wake === false || input.isWakeCancelled?.()) {
         return { inboxID: row.id, wakeSuppressed: true }
       } else if (promptRef) {
@@ -241,7 +224,7 @@ export const layer: Layer.Layer<
                     // actor traffic). They must NOT be labeled user — real user turns enter via
                     // prompt()/Desktop/TUI/HTTP/command which default source to "user".
                     source: "spawn",
-                    ...(tq ? { requireClaim: true, expectedEpoch: wakeEpoch } : {}),
+                    ...(input.wakeEpoch !== undefined ? { expectedEpoch: input.wakeEpoch } : {}),
                   })).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true, uninterruptible: false }))
                 // A fiber exit observer also runs when interruption precedes its
                 // first step, unlike an ensuring attached only to the wake body.
@@ -276,6 +259,9 @@ export const layer: Layer.Layer<
               and(
                 eq(InboxTable.receiver_session_id, sessionID),
                 eq(InboxTable.receiver_actor_id, actorID),
+                // Prompt records (message_id set) are claimed by the controller;
+                // drain only converts legacy content rows.
+                isNotNull(InboxTable.content),
               ),
             )
             .orderBy(InboxTable.id)

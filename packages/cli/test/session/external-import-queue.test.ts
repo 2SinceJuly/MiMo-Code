@@ -15,15 +15,15 @@ import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, SessionID } from "../../src/session/schema"
-import { TurnQueue } from "../../src/turn-queue"
-import * as QueueSync from "../../src/turn-queue/sync"
+import { InboxController } from "../../src/inbox"
+import * as QueueSync from "../../src/inbox/sync"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { captureExportData } from "../../src/cli/cmd/export"
 import { storeImportedSession } from "../../src/cli/cmd/import"
 import { ProviderID, ModelID } from "../../src/provider/schema"
-import { schedulerRef } from "../../src/turn-queue/scheduler"
+import { schedulerRef } from "../../src/inbox/scheduler"
 
 const it = testEffect(Layer.mergeAll(AppLayer, CrossSpawnSpawner.defaultLayer, TestLLMServer.layer))
 const config = (url: string) => ({
@@ -142,7 +142,7 @@ describe("external imported history execution", () => {
       const sessionID = yield* Effect.sync(() => Database.use((db) => db.select().from(ExternalImportTable)
         .where(and(eq(ExternalImportTable.source, source), eq(ExternalImportTable.source_key, sourceKey))).get()!.session_id))
       const prompt = yield* SessionPrompt.Service
-      const tq = yield* TurnQueue.Service
+      const tq = yield* InboxController.Service
       const state = yield* SessionRunState.Service
       yield* Effect.addFinalizer(() => prompt.cancel(sessionID))
       const history = yield* Effect.sync(() => QueueSync.capture(sessionID))

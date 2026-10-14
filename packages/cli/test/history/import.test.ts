@@ -14,7 +14,7 @@ import { MessageTable, PartTable, SessionTable } from "../../src/session/session
 import { ProjectTable } from "../../src/project/project.sql"
 import { stopIndexMigration } from "../../src/history/migration"
 import { tmpdir } from "../fixture/fixture"
-import * as QueueSync from "../../src/turn-queue/sync"
+import * as QueueSync from "../../src/inbox/sync"
 import { MessageID, SessionID } from "../../src/session/schema"
 
 const files: string[] = []
@@ -106,7 +106,6 @@ async function acceptEmptyOwnership(sessionID: SessionID, run: () => Promise<{ e
   expect(after.queue.receipts.filter((receipt) => oldReceipts.has(receipt.id))).toEqual(before.queue.receipts)
   expect(after.queue.epoch).toEqual(before.queue.epoch)
   expect(after.queue.lanes).toEqual(before.queue.lanes)
-  expect(after.queue.bootstrap).toEqual(before.queue.bootstrap)
   expect(after.sessions[0].title).toBe(before.sessions[0].title)
   expect(after.mappings[0].message_ids!.length).toBeGreaterThan(0)
   expect(after.mappings[0].message_ids!.every((id) => !oldMessages.has(id))).toBe(true)

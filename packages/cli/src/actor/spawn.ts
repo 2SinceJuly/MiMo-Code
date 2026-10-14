@@ -23,7 +23,7 @@ import { parseReturnHeader, type ReturnStatus } from "./return-header"
 import { Log } from "@/util"
 import { Instance, type InstanceContext } from "@/project/instance"
 import { InstanceRef } from "@/effect/instance-ref"
-import { turnQueueRef } from "@/turn-queue"
+import { inboxControllerRef } from "@/inbox"
 
 const log = Log.create({ service: "actor.spawn" })
 
@@ -841,7 +841,7 @@ export const layer = Layer.effect(
     })
 
     const spawn = Effect.fn("Actor.spawn")(function* (input: SpawnInput) {
-      const tq = turnQueueRef.current
+      const tq = inboxControllerRef.current
       // Bind delivery to the parent's epoch before any child execution can exist.
       const wakeEpoch = tq ? yield* tq.getEpoch(input.parentSessionID ?? input.sessionID) : undefined
       if (input.mode === "peer") return yield* spawnPeer(input, wakeEpoch)

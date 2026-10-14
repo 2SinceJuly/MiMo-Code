@@ -13,7 +13,7 @@ import { ShareNext } from "../../share"
 import { EOL } from "os"
 import { Filesystem } from "../../util"
 import { AppRuntime } from "@/effect/app-runtime"
-import * as QueueSync from "../../turn-queue/sync"
+import * as QueueSync from "../../inbox/sync"
 
 /** Discriminated union returned by the ShareNext API (GET /api/shares/:id/data) */
 export type ShareData =
@@ -89,7 +89,6 @@ export function storeImportedSession(
   const partIDs = new Set<string>()
   const parsed = messages.map((message) => {
     const msg = MessageV2.Info.parse(message.info)
-    if (!snapshot && msg.role === "user") delete msg.queueAdmission
     if (msg.sessionID !== info.id || messageIDs.has(msg.id)) throw new Error(`Invalid imported message: ${msg.id}`)
     messageIDs.add(msg.id)
     const parts = message.parts.map((value) => {
@@ -116,8 +115,8 @@ export function storeImportedSession(
           lanes: [...snapshot.lanes].sort((a, b) => a.agent_id.localeCompare(b.agent_id)),
         })
         : currentQueue.receipts.length === parsed.filter((message) => message.info.role === "user").length &&
-          currentQueue.receipts.every((receipt) => receipt.intent.kind === "prompt" && receipt.state === "settled" && receipt.consumed && receipt.outcome === null &&
-            receipt.idempotency_key === QueueSync.historyReceiptKey("cli", info.id, receipt.intent.messageID as string))
+          currentQueue.receipts.every((receipt) => receipt.state === "settled" && receipt.consumed && receipt.outcome === null &&
+            receipt.idempotency_key === QueueSync.historyReceiptKey("cli", info.id, receipt.message_id as string))
       if (!isDeepStrictEqual(Session.toRow(Session.fromRow(existing)), row) || !isDeepStrictEqual(current, parsed) || !queueMatches)
         throw new Error(`Imported session conflicts with existing session: ${info.id}`)
       return

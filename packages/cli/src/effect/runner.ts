@@ -26,7 +26,7 @@ interface RunHandle<A, E> {
   done: Deferred.Deferred<A, E | Cancelled>
   fiber: Fiber.Fiber<A, E>
   /**
-   * (Removed) pending-attach dual owner. TurnQueue Controller is the sole
+   * (Removed) pending-attach dual owner. Inbox Controller is the sole
    * admission/mailbox owner; ensureRunning serializes behind a live run and
    * the Controller kicks remaining accepted receipts on idle.
    */
@@ -126,7 +126,7 @@ export const make = <A, E = never, B = never>(
           ] as const
         }
         if (st._tag !== "Running" || st.run.id !== id) return [complete(done, exit), st] as const
-        // No pending-attach: remaining work is owned by TurnQueue receipts;
+        // No pending-attach: remaining work is owned by Inbox receipts;
         // onIdle kicks the Controller scheduler for leftover accepted work.
         return [
           Effect.gen(function* () {

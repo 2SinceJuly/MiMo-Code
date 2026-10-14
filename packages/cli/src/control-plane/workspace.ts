@@ -30,8 +30,8 @@ import { Instance } from "@/project/instance"
 import { SessionRunState } from "@/session/run-state"
 import { ActorExecution } from "@/actor/execution"
 import { ExecutionOwnership } from "@/session/execution-ownership"
-import * as QueueSync from "@/turn-queue/sync"
-import { TurnReceiptTable } from "@/turn-queue/turn-queue.sql"
+import * as QueueSync from "@/inbox/sync"
+import { InboxTable } from "@/inbox/inbox.sql"
 
 export const Info = WorkspaceInfo.meta({
   ref: "Workspace",
@@ -195,7 +195,7 @@ export const sessionRestore = fn(SessionRestoreInput, async (input) => {
         const current = db.select().from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get()
         if (current?.workspace_id !== input.workspaceID) throw new Error("Session owner changed before retry")
       }
-      if (db.select().from(TurnReceiptTable).where(eq(TurnReceiptTable.session_id, input.sessionID)).all()
+      if (db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, input.sessionID)).all()
         .some((receipt) => receipt.state === "claimed")) throw new Error("Cannot transfer unresolved execution claims")
       if (source) {
         SyncEvent.run(Session.Event.Updated, { sessionID: input.sessionID, info: { workspaceID: input.workspaceID } })

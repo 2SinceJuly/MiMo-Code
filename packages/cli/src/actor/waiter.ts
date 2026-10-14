@@ -8,7 +8,7 @@ import { Session } from "@/session"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorStatusChanged } from "@/actor/events"
 import { parseReturnHeader, type ReturnStatus } from "@/actor/return-header"
-import { turnQueueRef } from "@/turn-queue"
+import { inboxControllerRef } from "@/inbox"
 
 export type ExecutionState = "running" | "completed" | "failed" | "cancelled" | "stopped"
 
@@ -191,7 +191,7 @@ export const layer: Layer.Layer<
       const entry = yield* reg.get(input.sessionID, input.actor_id)
       if (!entry) return { status: "unknown" as const, actor_id: input.actor_id }
       const deadline = Date.now() + (input.timeout_ms ?? DEFAULT_TIMEOUT_MS)
-      const tq = turnQueueRef.current
+      const tq = inboxControllerRef.current
       const lane = { sessionID: input.sessionID, agentID: "main" as const }
       const afterRev = input.afterRevision ?? (tq ? yield* tq.observeInput(lane, -1) : 0)
       const interrupted = yield* Deferred.make<void>()

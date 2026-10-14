@@ -20,7 +20,7 @@ import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { TaskID } from "@/task/schema"
 import { EffectBridge } from "@/effect"
 import { inboxServiceRef } from "@/inbox/inbox-ref"
-import { turnQueueRef } from "@/turn-queue"
+import { inboxControllerRef } from "@/inbox"
 import { Effect, Deferred } from "effect"
 
 export interface ActorPromptOps {
@@ -519,7 +519,7 @@ export const ActorTool = Tool.define(
             () => Effect.sync(() => ctx.abort.removeEventListener("abort", cancelHandler)),
           )
           if (ctx.abort.aborted) return yield* Effect.interrupt
-          const tq = turnQueueRef.current
+          const tq = inboxControllerRef.current
           if (tq) afterRevision = yield* tq.observeInput({ sessionID: ctx.sessionID, agentID: "main" }, -1)
         }
         const spawnResult = yield* actor.spawn({

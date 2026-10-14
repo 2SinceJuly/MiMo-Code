@@ -7,7 +7,6 @@ import { ActorExecution } from "../../src/actor/execution"
 import { spawnRef } from "../../src/actor/spawn-ref"
 import { inboxServiceRef, sessionPromptRef } from "../../src/inbox/inbox-ref"
 import { InboxTable } from "../../src/inbox/inbox.sql"
-import { TurnReceiptTable } from "../../src/turn-queue/turn-queue.sql"
 import { ActorTool } from "../../src/tool/actor"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { ActorRegistry } from "../../src/actor/registry"
@@ -20,7 +19,7 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRunState } from "../../src/session/run-state"
 import { SessionStatus } from "../../src/session/status"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
-import { TurnQueue, turnQueueRef } from "../../src/turn-queue"
+import { InboxController, inboxControllerRef } from "../../src/inbox"
 import { Database, NotFoundError, and, eq } from "../../src/storage"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -92,6 +91,21 @@ const until = <E, R>(condition: Effect.Effect<boolean, E, R>) =>
   Effect.gen(function* () {
     while (!(yield* condition)) yield* Effect.sleep("10 millis")
   }).pipe(Effect.timeout("5 seconds"))
+
+const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
+  const tq = yield* InboxController.Service
+  return yield* tq.accept({
+    lane: { sessionID, agentID: "main" },
+    message: {
+      id: messageID, sessionID, agentID: "main", role: "user",
+      time: { created: Date.now() },
+      agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
+    },
+    parts: [],
+    intent: { messageID, type: "prompt" },
+    idempotencyKey: messageID,
+  })
+})
 
 const trackTerminalNotifications = (sessionID: SessionID) => Effect.gen(function* () {
   const inbox = inboxServiceRef.current
@@ -357,7 +371,7 @@ describe("main automatically waits for subagent executions", () => {
         Effect.gen(function* () {
           const sessions = yield* Session.Service
           const prompt = yield* SessionPrompt.Service
-          const tq = yield* TurnQueue.Service
+          const tq = yield* InboxController.Service
           const session = yield* sessions.create({ title: "monotonic claimed frontier" })
           yield* llm.text("U0-ANSWER")
           yield* prompt.prompt({
@@ -372,8 +386,8 @@ describe("main automatically waits for subagent executions", () => {
           let first = true
           yield* Effect.acquireRelease(
             Effect.sync(() => {
-              const previous = turnQueueRef.current
-              turnQueueRef.current = {
+              const previous = inboxControllerRef.current
+              inboxControllerRef.current = {
                 ...tq,
                 extendClaim: (lane, runId) =>
                   Effect.gen(function* () {
@@ -389,7 +403,7 @@ describe("main automatically waits for subagent executions", () => {
             }),
             (previous) =>
               Effect.sync(() => {
-                turnQueueRef.current = previous
+                inboxControllerRef.current = previous
               }),
           )
           yield* llm.text("U1-ANSWER")
@@ -398,10 +412,7 @@ describe("main automatically waits for subagent executions", () => {
             .prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "Current claimed U1." }] })
             .pipe(Effect.forkChild)
           yield* Deferred.await(entered).pipe(Effect.timeout("5 seconds"))
-          const wake = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "wake", receiverActorID: "main", inboxWatermark: "test-wake" },
-          })
+          const wake = yield* admitPrompt(session.id, MessageID.ascending())
           yield* Deferred.succeed(release, undefined)
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
@@ -425,7 +436,7 @@ describe("main automatically waits for subagent executions", () => {
       ({ llm }) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
-          const tq = yield* TurnQueue.Service
+          const tq = yield* InboxController.Service
           const session = yield* sessions.create({ title: "late admission before assistant id" })
           const held = yield* child(session.id)
           const entered = yield* Deferred.make<void>()
@@ -435,8 +446,8 @@ describe("main automatically waits for subagent executions", () => {
           let first = true
           yield* Effect.acquireRelease(
             Effect.sync(() => {
-              const previous = turnQueueRef.current
-              turnQueueRef.current = {
+              const previous = inboxControllerRef.current
+              inboxControllerRef.current = {
                 ...tq,
                 extendClaim: (lane, runId) =>
                   Effect.gen(function* () {
@@ -452,7 +463,7 @@ describe("main automatically waits for subagent executions", () => {
             }),
             (previous) =>
               Effect.sync(() => {
-                turnQueueRef.current = previous
+                inboxControllerRef.current = previous
               }),
           )
           yield* llm.hold("ANSWER-ONLY-ORIGINAL", response.promise)
@@ -481,10 +492,7 @@ describe("main automatically waits for subagent executions", () => {
           if (!assistant || assistant.info.role !== "assistant") throw new Error("initial assistant missing")
           expect(messageID < assistant.info.id).toBe(true)
           expect(assistant.info.parentID).toBe(original.info.id)
-          const receipt = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "prompt", messageID },
-          })
+          const receipt = yield* admitPrompt(session.id, messageID)
           response.resolve()
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
@@ -590,7 +598,7 @@ describe("main automatically waits for subagent executions", () => {
       ({ llm }) =>
         Effect.gen(function* () {
           const sessions = yield* Session.Service
-          const tq = yield* TurnQueue.Service
+          const tq = yield* InboxController.Service
           const session = yield* sessions.create({ title: "persistence before admission" })
           const held = yield* child(session.id)
           const release = Promise.withResolvers<void>()
@@ -617,10 +625,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* busy(session.id)
           expect(main.pollUnsafe()).toBeUndefined()
           expect(yield* llm.calls).toBe(1)
-          const receipt = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "prompt", messageID },
-          })
+          const receipt = yield* admitPrompt(session.id, messageID)
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
           expect(JSON.stringify((yield* llm.inputs)[1]?.messages)).toContain("Persisted before admission.")
@@ -644,7 +649,7 @@ describe("main automatically waits for subagent executions", () => {
         Effect.gen(function* () {
           const sessions = yield* Session.Service
           const prompt = yield* SessionPrompt.Service
-          const tq = yield* TurnQueue.Service
+          const tq = yield* InboxController.Service
           const session = yield* sessions.create({ title: "claim before snapshot" })
           const held = yield* child(session.id)
           const entered = yield* Deferred.make<void>()
@@ -652,8 +657,8 @@ describe("main automatically waits for subagent executions", () => {
           let first = true
           yield* Effect.acquireRelease(
             Effect.sync(() => {
-              const previous = turnQueueRef.current
-              turnQueueRef.current = {
+              const previous = inboxControllerRef.current
+              inboxControllerRef.current = {
                 ...tq,
                 extendClaim: (lane, runId) =>
                   Effect.gen(function* () {
@@ -669,7 +674,7 @@ describe("main automatically waits for subagent executions", () => {
             }),
             (previous) =>
               Effect.sync(() => {
-                turnQueueRef.current = previous
+                inboxControllerRef.current = previous
               }),
           )
           yield* llm.text("BOTH-INPUTS-ANSWERED")
@@ -727,7 +732,7 @@ describe("main automatically waits for subagent executions", () => {
           const owners = {
             actor: spawnRef.current,
             prompt: sessionPromptRef.current,
-            queue: turnQueueRef.current,
+            queue: inboxControllerRef.current,
           }
           expect(owners.actor).toBeDefined()
           expect(owners.prompt).toBeDefined()
@@ -737,7 +742,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* busy(session.id)
           expect(spawnRef.current).toBe(owners.actor)
           expect(sessionPromptRef.current).toBe(owners.prompt)
-          expect(turnQueueRef.current).toBe(owners.queue)
+          expect(inboxControllerRef.current).toBe(owners.queue)
           expect(yield* llm.calls).toBe(3)
           const actor = (yield* registry.listBySession(session.id)).find((actor) => actor.agent === "general")
           expect(actor?.status).toBe("running")
@@ -963,7 +968,7 @@ describe("main automatically waits for subagent executions", () => {
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const prompt = yield* SessionPrompt.Service
-      const tq = yield* TurnQueue.Service
+      const tq = yield* InboxController.Service
       const inbox = inboxServiceRef.current
       if (!inbox) throw new Error("main fixture did not initialize Inbox")
       const session = yield* sessions.create({ title: `late-admitted format ${formatChange}` })
@@ -1014,9 +1019,7 @@ describe("main automatically waits for subagent executions", () => {
           && part.text.includes("LATE-ADMISSION-NOTIFICATION")))
       if (!notification) throw new Error("notification synthetic user missing")
       expect(messageID < notification.info.id).toBe(true)
-      const receipt = yield* tq.admit({
-        lane: { sessionID: session.id, agentID: "main" }, intent: { kind: "prompt", messageID },
-      })
+      const receipt = yield* admitPrompt(session.id, messageID)
       second.resolve()
       yield* llm.wait(3).pipe(Effect.timeout("5 seconds"))
       const admitted = (yield* llm.inputs)[2]!
@@ -1503,7 +1506,7 @@ describe("main automatically waits for subagent executions", () => {
       const executions = yield* ActorExecution.Service
       const inbox = inboxServiceRef.current
       if (!inbox) throw new Error("fixture did not initialize Inbox")
-      const tq = yield* TurnQueue.Service
+      const tq = yield* InboxController.Service
       const session = yield* sessions.create({
         title: "abort during run notification delivery", permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
@@ -1554,10 +1557,10 @@ describe("main automatically waits for subagent executions", () => {
       yield* Fiber.join(cancellation).pipe(Effect.timeout("5 seconds"))
       yield* Deferred.await(execution.done).pipe(Effect.timeout("5 seconds"))
       yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
-      const receipts = Database.use((db) => db.select().from(TurnReceiptTable).where(and(
-        eq(TurnReceiptTable.session_id, session.id), eq(TurnReceiptTable.agent_id, "main"),
+      const receipts = Database.use((db) => db.select().from(InboxTable).where(and(
+        eq(InboxTable.receiver_session_id, session.id), eq(InboxTable.receiver_actor_id, "main"),
       )).all())
-      expect(receipts.filter((receipt) => receipt.epoch > epoch && receipt.intent.kind === "wake")).toHaveLength(0)
+      expect(receipts.filter((receipt) => receipt.epoch > epoch)).toHaveLength(0)
       expect(yield* llm.calls).toBe(3)
       expect(yield* executions.current(session.id, "general-1")).toBeUndefined()
       expect(JSON.stringify(yield* sessions.messages({ sessionID: session.id }))).not.toContain("MUST-NOT-WAKE-AFTER-ABORT")
@@ -1574,7 +1577,7 @@ describe("main automatically waits for subagent executions", () => {
       const sessions = yield* Session.Service
       const prompt = yield* SessionPrompt.Service
       const executions = yield* ActorExecution.Service
-      const tq = yield* TurnQueue.Service
+      const tq = yield* InboxController.Service
       const session = yield* sessions.create({
         title: "run notification at abort epoch boundary", permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
@@ -1598,10 +1601,10 @@ describe("main automatically waits for subagent executions", () => {
       let delayed = false
       let dispatches = 0
       yield* Effect.acquireRelease(Effect.sync(() => {
-        const previous = turnQueueRef.current
+        const previous = inboxControllerRef.current
         if (!previous) throw new Error("fixture did not initialize TurnQueue")
-        turnQueueRef.current = { ...previous, abortSession: (sessionID, policy) => Effect.gen(function* () {
-          const epoch = yield* previous.abortSession(sessionID, policy)
+        inboxControllerRef.current = { ...previous, abortSession: (sessionID) => Effect.gen(function* () {
+          const epoch = yield* previous.abortSession(sessionID)
           if (sessionID === session.id && !delayed) {
             delayed = true
             yield* Deferred.succeed(epochBumped, undefined)
@@ -1610,7 +1613,7 @@ describe("main automatically waits for subagent executions", () => {
           return epoch
         }) }
         return previous
-      }), (previous) => Effect.sync(() => { turnQueueRef.current = previous }))
+      }), (previous) => Effect.sync(() => { inboxControllerRef.current = previous }))
       yield* Effect.acquireRelease(Effect.sync(() => {
         const previous = sessionPromptRef.current
         if (!previous) throw new Error("fixture did not initialize SessionPrompt")
@@ -1656,9 +1659,9 @@ describe("main automatically waits for subagent executions", () => {
       expect(yield* Deferred.isDone(execution.done)).toBe(false)
       releaseChild.resolve()
       yield* Deferred.await(execution.done).pipe(Effect.timeout("5 seconds"))
-      const newEpochWakes = () => Database.use((db) => db.select().from(TurnReceiptTable).where(and(
-        eq(TurnReceiptTable.session_id, session.id), eq(TurnReceiptTable.agent_id, "main"),
-      )).all()).filter((receipt) => receipt.epoch > oldEpoch && receipt.intent.kind === "wake")
+      const newEpochWakes = () => Database.use((db) => db.select().from(InboxTable).where(and(
+        eq(InboxTable.receiver_session_id, session.id), eq(InboxTable.receiver_actor_id, "main"),
+      )).all()).filter((receipt) => receipt.epoch > oldEpoch)
       if (newEpochWakes().length > 0) yield* Deferred.await(dispatchEntered).pipe(Effect.timeout("5 seconds"))
       expect(yield* llm.calls).toBe(3)
       yield* Deferred.succeed(resumeCancel, undefined)

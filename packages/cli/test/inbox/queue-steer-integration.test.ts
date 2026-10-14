@@ -3,10 +3,11 @@ import { Deferred, Effect, Fiber, Layer } from "effect"
 import { Bus } from "../../src/bus"
 import { Session as SessionNs } from "../../src/session"
 import { MessageID } from "../../src/session/schema"
+import { ProviderID, ModelID } from "../../src/provider/schema"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { ActorExecution } from "../../src/actor/execution"
-import { TurnQueue, turnQueueRef } from "../../src/turn-queue"
+import { InboxController, inboxControllerRef } from "../../src/inbox"
 import { Instance } from "../../src/project/instance"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -24,7 +25,7 @@ const env = Layer.mergeAll(
   CrossSpawnSpawner.defaultLayer,
   Bus.layer,
   ActorRegistry.defaultLayer,
-  TurnQueue.defaultLayer,
+  InboxController.defaultLayer,
   ActorWaiter.layer.pipe(
     Layer.provide(ActorRegistry.defaultLayer),
     Layer.provide(Bus.layer),
@@ -42,7 +43,7 @@ describe("turn-queue + actor wait steer", () => {
         const sessions = yield* SessionNs.Service
         const registry = yield* ActorRegistry.Service
         const waiter = yield* ActorWaiter.Service
-        const tq = yield* TurnQueue.Service
+        const tq = yield* InboxController.Service
 
         const parent = yield* sessions.create({ title: "steer-wait" })
         yield* registry.register({
@@ -68,9 +69,16 @@ describe("turn-queue + actor wait steer", () => {
           .wait({ sessionID: parent.id, actor_id: "explore-9", timeout_ms: 5000 })
           .pipe(Effect.forkChild)
         yield* Effect.sleep("30 millis")
-        yield* tq.admit({
+        const u = MessageID.ascending()
+        yield* tq.accept({
           lane: { sessionID: parent.id, agentID: "main" },
-          intent: { kind: "prompt", messageID: MessageID.ascending() },
+          message: {
+            id: u, sessionID: parent.id, agentID: "main", role: "user",
+            time: { created: Date.now() },
+            agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
+          },
+          parts: [],
+          intent: { messageID: u, type: "prompt" },
         })
         const snap = yield* Fiber.join(waitFiber)
         expect(snap.status).toBe("interrupted")
@@ -94,15 +102,15 @@ describe("turn-queue + actor wait steer", () => {
           const registry = yield* ActorRegistry.Service
           const executions = yield* ActorExecution.Service
           const waiter = yield* ActorWaiter.Service
-          const tq = yield* TurnQueue.Service
+          const tq = yield* InboxController.Service
           const parent = yield* sessions.create({ title: "wait observer cleanup" })
           let active = 0
           let started = 0
           let observing = Deferred.makeUnsafe<void>()
           yield* Effect.acquireRelease(
             Effect.sync(() => {
-              const previous = turnQueueRef.current
-              turnQueueRef.current = {
+              const previous = inboxControllerRef.current
+              inboxControllerRef.current = {
                 ...tq,
                 observeInput: (lane, revision) =>
                   revision < 0
@@ -124,7 +132,7 @@ describe("turn-queue + actor wait steer", () => {
             }),
             (previous) =>
               Effect.sync(() => {
-                turnQueueRef.current = previous
+                inboxControllerRef.current = previous
               }),
           )
 
@@ -173,11 +181,20 @@ describe("turn-queue + actor wait steer", () => {
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const sessions = yield* SessionNs.Service
-        const tq = yield* TurnQueue.Service
+        const tq = yield* InboxController.Service
         const parent = yield* sessions.create({ title: "settle" })
         const lane = { sessionID: parent.id, agentID: "main" }
         const mid = MessageID.ascending()
-        const r = yield* tq.admit({ lane, intent: { kind: "prompt", messageID: mid } })
+        const r = yield* tq.accept({
+          lane,
+          message: {
+            id: mid, sessionID: parent.id, agentID: "main", role: "user",
+            time: { created: Date.now() },
+            agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
+          },
+          parts: [],
+          intent: { messageID: mid, type: "prompt" },
+        })
         const claim = yield* tq.claimNext(lane, 42)
         expect(claim?.claimFrontier).toBe(mid)
         yield* tq.ack(lane, mid, [{ receiptId: r.id, outcome: "success", messageId: MessageID.ascending() }])

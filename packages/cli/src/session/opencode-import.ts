@@ -10,7 +10,7 @@ import { resolveMainGitDir, resolveProjectId } from "../project/project-id"
 import { SessionTable, MessageTable, PartTable } from "./session.sql"
 import { ExternalImportTable } from "./external-import.sql"
 import type { SessionID, MessageID, PartID } from "./schema"
-import * as QueueSync from "../turn-queue/sync"
+import * as QueueSync from "../inbox/sync"
 import { isDeepStrictEqual } from "node:util"
 
 const log = Log.create({ service: "opencode-import" })
@@ -154,24 +154,44 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
           continue
         }
 
+        // External opencode DB keeps its historical turn_* table names. Rows are
+        // converted into the inbox snapshot shape on the way in: only prompt
+        // intents become inbox records (message_id = the accepted user message).
         const queue = hasQueue ? QueueSync.SnapshotSchema.parse({
           version: 1, sessionID: sess.id,
           receipts: (srcDb.all("SELECT * FROM turn_receipt WHERE session_id = ? ORDER BY id", sess.id) as Record<string, unknown>[])
-            .map((row) => ({ ...row, intent: typeof row.intent === "string" ? JSON.parse(row.intent) : row.intent,
-              consumed: !!row.consumed, suspended: !!row.suspended })),
+            .flatMap((row) => {
+              const intent = typeof row.intent === "string" ? JSON.parse(row.intent) : row.intent
+              if (intent?.kind !== "prompt") return []
+              return [{
+                id: row.id,
+                receiver_session_id: row.session_id,
+                receiver_actor_id: row.agent_id,
+                sender_session_id: null,
+                sender_actor_id: null,
+                type: "prompt",
+                content: null,
+                message_id: intent.messageID,
+                state: row.state,
+                epoch: row.epoch,
+                run_id: row.run_id ?? null,
+                claim_frontier: row.claim_frontier ?? null,
+                consumed: !!row.consumed,
+                outcome: row.outcome ?? null,
+                delivery_message_id: row.delivery_message_id ?? null,
+                error: row.error ?? null,
+                idempotency_key: row.idempotency_key ?? "",
+                created_at: row.time_created,
+                time_updated: row.time_updated,
+              }]
+            }),
           lanes: srcDb.all("SELECT * FROM turn_lane_state WHERE session_id = ? ORDER BY agent_id", sess.id),
           epoch: srcDb.get("SELECT * FROM turn_session_epoch WHERE session_id = ?", sess.id),
-          bootstrap: (() => {
-            const row = srcDb.get("SELECT * FROM turn_legacy_bootstrap WHERE session_id = ?", sess.id) as Record<string, unknown> | null
-            return row ? { ...row, message_ids: typeof row.message_ids === "string" ? JSON.parse(row.message_ids) : row.message_ids,
-              completed: !!row.completed } : null
-          })(),
         }) : undefined
         const parsedMessages = messages.map((message) => {
           const data = typeof message.data === "string" ? JSON.parse(message.data) : message.data
           const agentID = message.agent_id ?? data.agentID ?? "main"
           delete data.agentID
-          if (!queue && data.role === "user") delete data.queueAdmission
           return { ...message, agent_id: agentID as string, data }
         })
         const messageIds = messages.map((m) => m.id as MessageID)

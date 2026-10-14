@@ -10,7 +10,7 @@ import { EOL } from "os"
 import { Log } from "../../util"
 import { Database, eq, NotFoundError } from "../../storage"
 import { SessionTable } from "../../session/session.sql"
-import * as QueueSync from "../../turn-queue/sync"
+import * as QueueSync from "../../inbox/sync"
 
 function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
@@ -202,11 +202,6 @@ export function sanitize(data: ReturnType<typeof captureExportData>) {
       ...data.queue,
       receipts: data.queue.receipts.map((row) => ({
         ...row,
-        intent: row.intent.kind === "shell" ? {
-          ...row.intent,
-          command: typeof row.intent.command === "string" ? redact("shell-command", row.id, row.intent.command) : row.intent.command,
-          ...(typeof row.intent.cwd === "string" ? { cwd: redact("shell-cwd", row.id, row.intent.cwd) } : {}),
-        } : row.intent,
         error: row.error === null ? null : redact("receipt-error", row.id, row.error),
         idempotency_key: redact("receipt-key", row.id, row.idempotency_key),
       })),

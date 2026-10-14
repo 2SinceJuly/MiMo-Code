@@ -7,9 +7,10 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { ProviderID, ModelID } from "../../src/provider/schema"
 import { Database, and, eq } from "../../src/storage"
-import { TurnQueue, turnQueueRef } from "../../src/turn-queue"
-import { TurnLaneStateTable, TurnReceiptTable } from "../../src/turn-queue/turn-queue.sql"
+import { InboxController, inboxControllerRef } from "../../src/inbox"
+import { InboxLaneStateTable, InboxTable } from "../../src/inbox/inbox.sql"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
@@ -24,7 +25,7 @@ const config = (url: string) => ({
 const setup = Effect.fn(function* (title: string) {
   const sessions = yield* Session.Service
   const prompt = yield* SessionPrompt.Service
-  const tq = yield* TurnQueue.Service
+  const tq = yield* InboxController.Service
   const session = yield* sessions.create({ title })
   yield* Effect.addFinalizer(() => prompt.cancel(session.id))
   return { sessions, prompt, tq, session }
@@ -37,14 +38,14 @@ const responseGate = Effect.fn(function* () {
 })
 
 const pauseFirstExtension = Effect.fn(function* (sessionID: SessionID) {
-  const tq = yield* TurnQueue.Service
+  const tq = yield* InboxController.Service
   const entered = yield* Deferred.make<void>()
   const release = yield* Deferred.make<void>()
   let first = true
   yield* Effect.acquireRelease(
     Effect.sync(() => {
-      const previous = turnQueueRef.current
-      turnQueueRef.current = {
+      const previous = inboxControllerRef.current
+      inboxControllerRef.current = {
         ...tq,
         extendClaim: (...args) =>
           Effect.gen(function* () {
@@ -60,7 +61,7 @@ const pauseFirstExtension = Effect.fn(function* (sessionID: SessionID) {
     }),
     (previous) =>
       Effect.sync(() => {
-        turnQueueRef.current = previous
+        inboxControllerRef.current = previous
       }),
   )
   yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined))
@@ -81,9 +82,25 @@ const persistUser = Effect.fn(function* (
   return messageID
 })
 
+// Bridge to InboxController.accept — message body is already persisted by persistUser.
+const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
+  const tq = yield* InboxController.Service
+  return yield* tq.accept({
+    lane: { sessionID, agentID: "main" },
+    message: {
+      id: messageID, sessionID, agentID: "main", role: "user",
+      time: { created: Date.now() },
+      agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
+    },
+    parts: [],
+    intent: { messageID, type: "prompt" },
+    idempotencyKey: messageID,
+  })
+})
+
 function receipts(sessionID: SessionID) {
   return Database.use((db) =>
-    db.select().from(TurnReceiptTable).where(eq(TurnReceiptTable.session_id, sessionID)).all(),
+    db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, sessionID)).all(),
   )
 }
 
@@ -91,21 +108,21 @@ function frontier(sessionID: SessionID) {
   return Database.use((db) =>
     db
       .select()
-      .from(TurnLaneStateTable)
-      .where(and(eq(TurnLaneStateTable.session_id, sessionID), eq(TurnLaneStateTable.agent_id, "main")))
+      .from(InboxLaneStateTable)
+      .where(and(eq(InboxLaneStateTable.session_id, sessionID), eq(InboxLaneStateTable.agent_id, "main")))
       .get(),
   )?.consumed_frontier
 }
 
 const receiptFor = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
-  const tq = yield* TurnQueue.Service
-  const found = receipts(sessionID).filter((row) => row.intent.kind === "prompt" && row.intent.messageID === messageID)
+  const tq = yield* InboxController.Service
+  const found = receipts(sessionID).filter((row) => row.message_id === messageID)
   expect(found).toHaveLength(1)
   return yield* tq.getReceipt(found[0].id)
 })
 
 const successful = Effect.fn(function* (receiptId: string) {
-  const tq = yield* TurnQueue.Service
+  const tq = yield* InboxController.Service
   const receipt = yield* tq.getReceipt(receiptId)
   expect(receipt.state).toBe("settled")
   expect(receipt.outcome).toBe("success")
@@ -126,7 +143,7 @@ function structuredTool(input: Record<string, unknown>) {
   )
 }
 
-describe("TurnQueue admission and claim acceptance without child execution", () => {
+describe("InboxController admission and claim acceptance without child execution", () => {
   it.live(
     "failed delegated subtask anchors its delivery once and is not replayed by the next prompt",
     provideTmpdirServer(
@@ -218,16 +235,13 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
               expect(yield* llm.calls).toBe(2)
               expect(JSON.stringify((yield* llm.inputs)[1]!.messages).includes(lowerText)).toBe(false)
               expect(structuredTool((yield* llm.inputs)[1]!)?.function.parameters).toEqual(schema)
-              expect(receipts(session.id).filter((row) => row.intent.messageID === lowerID)).toHaveLength(0)
+              expect(receipts(session.id).filter((row) => row.message_id === lowerID)).toHaveLength(0)
               if (persisted === "after U2 ack") {
                 yield* persistUser(session.id, lowerText, lowerFormat, lowerID)
               }
 
               const epoch = yield* tq.getEpoch(session.id)
-              const receipt = yield* tq.admit({
-                lane: { sessionID: session.id, agentID: "main" },
-                intent: { kind: "prompt", messageID: lowerID },
-              })
+              const receipt = yield* admitPrompt(session.id, lowerID)
               expect(receipt.state).toBe("accepted")
               expect(receipt.epoch).toBe(epoch)
               if (change === "replace") yield* llm.tool("StructuredOutput", { summary: "U1-NEW-ANSWER" })
@@ -373,10 +387,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
           yield* successful((yield* receiptFor(session.id, upperID)).id)
           expect(frontier(session.id)).toBe(upperID)
           yield* persistUser(session.id, "PROJECTION-LATE-U1", undefined, lowerID)
-          const receipt = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "prompt", messageID: lowerID },
-          })
+          const receipt = yield* admitPrompt(session.id, lowerID)
           yield* llm.tool("read", { file_path: dir })
           yield* llm.text("PROJECTION-U1-COMPLETED")
           const result = yield* prompt
@@ -465,10 +476,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
               parts: [{ type: "text", text: "BEFORE-BOUNDARY-USER" }],
             })
             const pendingID = yield* persistUser(session.id, "PENDING-BEHIND-BOUNDARY")
-            const receipt = yield* tq.admit({
-              lane: { sessionID: session.id, agentID: "main" },
-              intent: { kind: "prompt", messageID: pendingID },
-            })
+            const receipt = yield* admitPrompt(session.id, pendingID)
             expect(receipt.state).toBe("accepted")
             const original = MessageV2.get({ sessionID: session.id, messageID: initialID })
             if (original.info.role !== "user") throw new Error("initial user missing")
@@ -588,7 +596,8 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
       30_000,
     )
 
-  it.live(
+  // Wake intents removed with the inbox queue (spec: intent is prompt-only).
+  it.live.skip(
     "wake-only extension preserves the current claim and advances the consumed frontier monotonically",
     provideTmpdirServer(
       ({ llm }) =>
@@ -618,10 +627,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
             })
             .pipe(Effect.forkChild)
           yield* Deferred.await(expansion.entered).pipe(Effect.timeout("5 seconds"))
-          const wake = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "wake", receiverActorID: "main", inboxWatermark: "A-wake" },
-          })
+          const wake = yield* admitPrompt(session.id, MessageID.ascending())
           yield* Deferred.succeed(expansion.release, undefined)
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           const input = (yield* llm.inputs)[1]!
@@ -678,10 +684,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
             throw new Error("initial assistant missing")
           expect(lateID < initialAssistant.info.id).toBe(true)
           expect(initialAssistant.info.parentID).toBe(originalID)
-          const receipt = yield* tq.admit({
-            lane: { sessionID: session.id, agentID: "main" },
-            intent: { kind: "prompt", messageID: lateID },
-          })
+          const receipt = yield* admitPrompt(session.id, lateID)
           first.resolve()
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           expect(JSON.stringify((yield* llm.inputs)[1]!.messages)).toContain("LATE-PERSISTED-USER")
@@ -723,7 +726,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
           answer(yield* Fiber.join(main).pipe(Effect.timeout("5 seconds")), "ONLY-ADMITTED-ANSWER", originalID)
           expect(yield* llm.calls).toBe(1)
           expect(JSON.stringify(yield* llm.inputs)).not.toContain("UNADMITTED-MUST-NOT-BE-CONSUMED")
-          expect(receipts(session.id).filter((row) => row.intent.messageID === unadmittedID)).toHaveLength(0)
+          expect(receipts(session.id).filter((row) => row.message_id === unadmittedID)).toHaveLength(0)
           expect(frontier(session.id)).toBe(originalID)
           yield* successful((yield* receiptFor(session.id, originalID)).id)
         }),
@@ -880,10 +883,7 @@ describe("TurnQueue admission and claim acceptance without child execution", () 
               `ADMITTED-FORMAT-${change}`,
               change === "replace" ? { type: "json_schema", schema: replacement, retryCount: 0 } : undefined,
             )
-            const receipt = yield* tq.admit({
-              lane: { sessionID: session.id, agentID: "main" },
-              intent: { kind: "prompt", messageID: lateID },
-            })
+            const receipt = yield* admitPrompt(session.id, lateID)
             first.resolve()
             yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
             const input = (yield* llm.inputs)[1]!

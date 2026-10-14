@@ -5,10 +5,10 @@ import { MessageID, PartID } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
 import { ProviderID, ModelID } from "../../src/provider/schema"
 import { captureExportData, sanitize } from "../../src/cli/cmd/export"
-import * as QueueSync from "../../src/turn-queue/sync"
+import * as QueueSync from "../../src/inbox/sync"
 import { Database, eq } from "../../src/storage"
 import { SessionTable, MessageTable, PartTable } from "../../src/session/session.sql"
-import { TurnReceiptTable } from "../../src/turn-queue/turn-queue.sql"
+import { InboxTable } from "../../src/inbox/inbox.sql"
 import { storeImportedSession } from "../../src/cli/cmd/import"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { provideTmpdirInstance } from "../fixture/fixture"
@@ -42,7 +42,6 @@ const queuedFixture = Effect.fn("test.queuedExportFixture")(function* () {
     session_id: session.id, agent_id, consumed_frontier: data.messages.find((message) => message.info.agentID === agent_id)!.info.id,
     input_revision: 7, time_updated: 100,
   }))
-  queue.bootstrap = { session_id: session.id, message_ids: data.messages.map((message) => message.info.id), completed: true, time_updated: 100 }
   const answer = yield* sessions.updateMessage({
     id: MessageID.ascending(), sessionID: session.id, agentID: "main", role: "assistant",
     parentID: main.id, time: { created: Date.now(), completed: Date.now() },
@@ -142,15 +141,12 @@ describe("CLI session transport", () => {
   it.live("legacy imports strip markers and explicitly authorize history without claiming success", provideTmpdirInstance(() => Effect.gen(function* () {
     const { sessions, session } = yield* fixture()
     const data = yield* Effect.sync(() => captureExportData(session.id))
-    for (const message of data.messages) if (message.info.role === "user") message.info.queueAdmission = { epoch: 8, ready: true, dispatch: true }
     yield* sessions.remove(session.id)
     yield* Effect.sync(() => storeImportedSession(data.info, data.messages))
     const imported = yield* Effect.sync(() => captureExportData(session.id))
-    expect(imported.messages.every((message) => !("queueAdmission" in message.info))).toBe(true)
     expect(imported.queue.receipts).toHaveLength(2)
     expect(imported.queue.receipts.every((row) => row.state === "settled" && row.consumed && row.outcome === null && row.run_id === null)).toBe(true)
     expect(imported.queue.lanes).toEqual([])
-    expect(imported.queue.bootstrap?.completed).toBe(true)
     yield* Effect.sync(() => storeImportedSession(data.info, data.messages))
     expect(yield* Effect.sync(() => captureExportData(session.id))).toEqual(imported)
   })))
@@ -164,7 +160,7 @@ describe("CLI session transport", () => {
       expect(Database.use((db) => db.select().from(SessionTable).where(eq(SessionTable.id, session.id)).get())).toBeUndefined()
       expect(Database.use((db) => db.select().from(MessageTable).where(eq(MessageTable.session_id, session.id)).all())).toEqual([])
       expect(Database.use((db) => db.select().from(PartTable).where(eq(PartTable.session_id, session.id)).all())).toEqual([])
-      expect(Database.use((db) => db.select().from(TurnReceiptTable).where(eq(TurnReceiptTable.session_id, session.id)).all())).toEqual([])
+      expect(Database.use((db) => db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, session.id)).all())).toEqual([])
     } finally {
       Database.Client().$client.exec("DROP TRIGGER reject_transport_receipt")
     }

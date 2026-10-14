@@ -16,7 +16,7 @@ import { SessionRunState } from "@/session/run-state"
 import { ActorExecution } from "@/actor/execution"
 import { SessionID } from "@/session/schema"
 import { WorkspaceID } from "@/control-plane/schema"
-import { QueueValidationError, SnapshotSchema } from "@/turn-queue/sync"
+import { QueueValidationError, SnapshotSchema } from "@/inbox/sync"
 import { ReplayEventSchema, installRestore, RestoreConflict, RestorePayloadError } from "@/sync/restore"
 
 const ReplayEvent = ReplayEventSchema

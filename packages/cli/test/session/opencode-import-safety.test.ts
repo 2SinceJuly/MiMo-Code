@@ -3,7 +3,7 @@ import { Database as SQLite } from "bun:sqlite"
 import path from "node:path"
 import { Database, eq } from "../../src/storage"
 import * as OpencodeImport from "../../src/session/opencode-import"
-import * as QueueSync from "../../src/turn-queue/sync"
+import * as QueueSync from "../../src/inbox/sync"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { SessionTable } from "../../src/session/session.sql"
 import { stopIndexMigration } from "../../src/history/migration"
@@ -129,10 +129,9 @@ for (const withShell of [false, true]) test(`OpenCode imports an empty native tr
     expect(result.errors).toEqual([])
     expect(result.imported).toBe(1)
     const queue = QueueSync.capture(SessionID.make("ses_import_a"))
-    if (withShell) expect(queue.receipts[0]).toMatchObject({ state: "accepted", intent: { kind: "shell", command: "pwd" }, run_id: null })
-    else expect(queue.receipts).toEqual([])
+    // Shell intents no longer map to inbox records (spec: exclusive entry points).
+    expect(queue.receipts).toEqual([])
     expect(queue.epoch?.epoch).toBe(4)
-    expect(queue.bootstrap?.completed).toBe(true)
     expect((await OpencodeImport.run({ dbPath: file })).skipped).toBe(1)
   } finally { src.close() }
 })

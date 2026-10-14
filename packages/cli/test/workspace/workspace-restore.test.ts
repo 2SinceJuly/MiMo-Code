@@ -14,12 +14,12 @@ import { Session as SessionNs } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionRunState } from "../../src/session/run-state"
 import { SessionTable } from "../../src/session/session.sql"
-import * as QueueSync from "../../src/turn-queue/sync"
+import * as QueueSync from "../../src/inbox/sync"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { Database, asc, eq } from "../../src/storage"
 import { SyncEvent } from "../../src/sync"
 import { installRestore } from "../../src/sync/restore"
-import { schedulerRef } from "../../src/turn-queue/scheduler"
+import { schedulerRef } from "../../src/inbox/scheduler"
 import { EventTable } from "../../src/sync/event.sql"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
@@ -95,27 +95,28 @@ function seedQueue(sessionID: SessionID, messageID: MessageID) {
     receipts: [
       {
         id: `${sessionID}-pending`,
-        session_id: sessionID,
-        agent_id: "main",
+        receiver_session_id: sessionID,
+        receiver_actor_id: "main",
+        sender_session_id: null,
+        sender_actor_id: null,
+        type: "prompt",
+        content: null,
+        message_id: messageID,
         state: "accepted",
-        intent: { kind: "prompt", messageID },
         epoch: 3,
         run_id: null,
         claim_frontier: null,
         consumed: false,
-        suspended: true,
         outcome: null,
-        message_id: null,
         delivery_message_id: null,
         error: null,
         idempotency_key: messageID,
-        time_created: 100,
+        created_at: 100,
         time_updated: 101,
       },
     ],
     lanes: [{ session_id: sessionID, agent_id: "main", consumed_frontier: null, input_revision: 4, time_updated: 101 }],
     epoch: { session_id: sessionID, epoch: 3, time_updated: 101 },
-    bootstrap: { session_id: sessionID, message_ids: [messageID], completed: true, time_updated: 101 },
   }
   Database.transaction((db) => QueueSync.applySnapshot(snapshot, db))
   return snapshot

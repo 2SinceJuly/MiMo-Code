@@ -24,8 +24,8 @@ import * as Session from "./session"
 import { Agent, resolveStoredAgent } from "../agent/agent"
 import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { makeTerminalNotifier } from "@/actor/notification"
-import { turnQueueRef, schedulerRef, type Lane } from "@/turn-queue"
-import type { Receipt, AbortPolicy } from "@/turn-queue/schema"
+import { inboxControllerRef, schedulerRef, type Lane } from "@/inbox"
+import type { Receipt } from "@/inbox/schema"
 import { ActorExecution } from "@/actor/execution"
 import { DEFAULT_LIVENESS_STALL_MS } from "@/actor/schema"
 import { DEFAULT_TIMEOUT_MS, WAIT_TIMEOUT_HINT } from "@/actor/waiter"
@@ -54,9 +54,9 @@ import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { Global } from "@/global"
 import { NotFoundError, Database, eq, and, inArray, isNull } from "@/storage"
-import { TurnReceiptTable } from "@/turn-queue/turn-queue.sql"
-import * as QueueSync from "@/turn-queue/sync"
-import { ReceiptUpdated } from "@/turn-queue/events"
+import { InboxTable } from "@/inbox/inbox.sql"
+import * as QueueSync from "@/inbox/sync"
+import { ReceiptUpdated } from "@/inbox/events"
 import { ExecutionOwnership } from "./execution-ownership"
 import { SessionTable } from "./session.sql"
 import { Bus } from "../bus"
@@ -592,7 +592,7 @@ function isExtensionPath(filePath: string): boolean {
 const elog = EffectLogger.create({ service: "session.prompt" })
 
 export interface Interface {
-  readonly cancel: (sessionID: SessionID, policy?: AbortPolicy) => Effect.Effect<number>
+  readonly cancel: (sessionID: SessionID) => Effect.Effect<number>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
   readonly promptAsync: (input: PromptInput) => Effect.Effect<{ message: MessageV2.WithParts; receiptId?: string }>
   readonly recovery: (input: { sessionID: SessionID; agentID?: string; allowBusy?: boolean }) => Effect.Effect<RecoveryCandidate[]>
@@ -811,7 +811,7 @@ export const layer = Layer.effect(
     //
     // Registry status is NOT a pre-filter: an idle registry row can still hold an
     // ActorExecution. Actor.cancel checks the execution registry first.
-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID, policy: AbortPolicy = "drop") {
+    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* elog.info("cancel", { sessionID })
       // Invalidate any delayed uncommitted-hint follow-up still waiting to claim.
       cancelPendingHints(sessionID)
@@ -819,8 +819,8 @@ export const layer = Layer.effect(
       cascadeEpochBySession.set(sessionID, (cascadeEpochBySession.get(sessionID) ?? 0) + 1)
       // C-01/cancel-epoch: bump persisted epoch and drop queued receipts FIRST so
       // a kick cannot start pre-abort work after runners go Idle.
-      const tqCancel = turnQueueRef.current
-      const epoch = tqCancel ? yield* tqCancel.abortSession(sessionID, policy) : 0
+      const tqCancel = inboxControllerRef.current
+      const epoch = tqCancel ? yield* tqCancel.abortSession(sessionID) : 0
       const actors = yield* actorRegistry.listBySession(sessionID)
       const nonMain = actors.filter((actor) => actor.actorID !== "main")
       // Phase 1 — mark executions before interrupt (terminal handlers read this flag).
@@ -3318,9 +3318,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       })
 
-      if (turnQueueRef.current && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main") {
-        message = yield* sessions.persistQueuedUser({ message, parts, dispatch: input.noReply !== true })
-      } else {
+      // Queued user prompts persist through Inbox.accept (same transaction as
+      // the inbox record + input_revision bump). Everything else saves here.
+      if (!(inboxControllerRef.current && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main")) {
         yield* sessions.updateMessage(message)
         for (const part of parts) yield* sessions.updatePart(part)
       }
@@ -3505,27 +3505,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
         const eligibleTitle = input.source !== "hook" && input.source !== "spawn" && !input.provenance && session.titleSource === "fallback" && session.titleRevision === 0 && !session.parentID && (input.agentID ?? "main") === "main"
         const previous = eligibleTitle ? yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" }) : []
-        const tqBoot = turnQueueRef.current
+        const tqBoot = inboxControllerRef.current
         if (tqBoot && (input.agentID ?? "main") === "main") {
           yield* tqBoot.reconcileOnBoot(input.sessionID)
         }
         const message = yield* createUserMessage(input)
         yield* sessions.touch(input.sessionID)
-        // TurnQueue: durable admit for user-facing prompts (T5). spawn/hook
-        // slices are scheduled by the actor system, not the user mailbox.
-        const tq = turnQueueRef.current
+        // Inbox.accept: one transaction persists the user message + inbox
+        // record + input_revision. spawn/hook slices are scheduled by the
+        // actor system, not the user mailbox.
+        const tq = inboxControllerRef.current
         let promptReceiptId: string | undefined
         let promptEpoch: number | undefined
         if (message.parts.length > 0 && tq && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main") {
-          const receipt = yield* tq.admit({
+          const receipt = yield* tq.accept({
             lane: { sessionID: input.sessionID, agentID: "main" },
-            intent: { kind: "prompt", messageID: message.info.id },
-            // Stable per-message key so a second admit (HTTP route) cannot
+            message: message.info as MessageV2.User,
+            parts: message.parts,
+            intent: { messageID: message.info.id, type: "prompt" },
+            // Stable per-message key so a second accept (HTTP route) cannot
             // insert a second live receipt for the same user message.
             idempotencyKey: message.info.id,
-          }, message.info.role === "user" && message.info.queueAdmission
-            ? { expectedEpoch: message.info.queueAdmission.epoch }
-            : undefined)
+          })
           promptReceiptId = receipt.id
           promptEpoch = receipt.epoch
         }
@@ -3729,7 +3730,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
        */
       strictParentTail?: boolean,
       /**
-       * TurnQueue claim frontier (C-01). Mid-turn pickup of a newer user requires
+       * Inbox claim frontier (C-01). Mid-turn pickup of a newer user requires
        * extendClaim before treating `id > claimFrontier` as part of this run.
        */
       claimFrontier?: MessageID,
@@ -4569,7 +4570,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             if (waits.length === 0) subagentWait = undefined
             if (active.size > 0)
               subagentWait ??= { deadline: Date.now() + DEFAULT_TIMEOUT_MS, inputRevision: afterRevision }
-            const tq = turnQueueRef.current
+            const tq = inboxControllerRef.current
             if (tq && (yield* tq.observeInput(lane, -1)) > afterRevision) {
               subagentWait = undefined
               yield* clearSubagentWaitStatus()
@@ -4640,7 +4641,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
         })
 
-        let unprocessedPrompt = claimOwner?.receipts.some((receipt) => receipt.intent.kind === "prompt") ?? false
+        let unprocessedPrompt = (claimOwner?.receipts.length ?? 0) > 0
         const deliveredPrompts = new Set<MessageID>()
         const recordDelivery = Effect.fn("SessionPrompt.recordDelivery")(function* (
           messageID: MessageID,
@@ -4648,46 +4649,45 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         ) {
           if (claimOwner) {
             const pending = claimOwner.receipts.filter((receipt) => {
-              const intent = receipt.intent
-              return intent.kind === "prompt" && !deliveredPrompts.has(intent.messageID) &&
-                msgs.some((msg) => msg.info.id === intent.messageID)
+              return !deliveredPrompts.has(receipt.intent.messageID) &&
+                msgs.some((msg) => msg.info.id === receipt.intent.messageID)
             })
             if (pending.length > 0) {
               const identity = yield* ExecutionOwnership.captureIdentity
               const anchored = yield* Effect.sync(() => Database.transaction((db) => {
                 ExecutionOwnership.assertOwnership(db, sessionID, identity)
-                const receipts = db.update(TurnReceiptTable).set({
+                const receipts = db.update(InboxTable).set({
                   delivery_message_id: messageID,
                 }).where(and(
-                  inArray(TurnReceiptTable.id, pending.map((receipt) => receipt.id)),
-                  eq(TurnReceiptTable.state, "claimed"),
-                  eq(TurnReceiptTable.run_id, claimOwner.runId),
-                  eq(TurnReceiptTable.epoch, pending[0].epoch),
-                  isNull(TurnReceiptTable.delivery_message_id),
+                  inArray(InboxTable.id, pending.map((receipt) => receipt.id)),
+                  eq(InboxTable.state, "claimed"),
+                  eq(InboxTable.run_id, claimOwner.runId),
+                  eq(InboxTable.epoch, pending[0].epoch),
+                  isNull(InboxTable.delivery_message_id),
                 )).returning().all()
                 QueueSync.record({ sessionID, receipts })
                 return receipts
               }))
               for (const row of anchored) {
                 yield* bus.publish(ReceiptUpdated, {
-                  sessionID: row.session_id,
+                  sessionID: row.receiver_session_id,
                   receiptId: row.id,
-                  agentID: row.agent_id,
+                  agentID: row.receiver_actor_id,
                   state: row.state,
                   deliveryMessageId: messageID,
                   epoch: row.epoch,
                 })
               }
               for (const receipt of pending) {
-                if (receipt.intent.kind === "prompt") deliveredPrompts.add(receipt.intent.messageID)
+                deliveredPrompts.add(receipt.intent.messageID)
               }
             }
           }
           unprocessedPrompt = false
         })
         while (true) {
-          const inputRevision = turnQueueRef.current
-            ? yield* turnQueueRef.current.observeInput({ sessionID, agentID: resolvedAgentID }, -1)
+          const inputRevision = inboxControllerRef.current
+            ? yield* inboxControllerRef.current.observeInput({ sessionID, agentID: resolvedAgentID }, -1)
             : 0
           // Per-iteration: a streak crop on this turn must suppress a duplicate
           // text-loop recovery user, but must not block a later re-crop if the
@@ -4712,15 +4712,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // design would see the parent's full conversation here and drift
           // off-task. agentID === "main" => main agent slice (agent_id = 'main'
           // in DB), agentID === "explore-1" => only explore-1's slice.
-          if (claimOwner && turnQueueRef.current) {
-            const extended = yield* turnQueueRef.current.extendClaim(
+          if (claimOwner && inboxControllerRef.current) {
+            const extended = yield* inboxControllerRef.current.extendClaim(
               { sessionID, agentID: resolvedAgentID },
               claimOwner.runId,
               claimOwner.receipts[0]?.epoch,
             )
             if (extended) {
               claimOwner.receipts.push(...extended.receipts)
-              unprocessedPrompt ||= extended.receipts.some((receipt) => receipt.intent.kind === "prompt")
+              unprocessedPrompt ||= extended.receipts.length > 0
               if (extended.claimFrontier && (!claimFrontier || extended.claimFrontier > claimFrontier))
                 claimFrontier = extended.claimFrontier
               claimOwner.frontier = claimFrontier
@@ -4732,33 +4732,37 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             agentID: agentID ?? "main",
           })
           if (claimOwner) {
-            const receipts = yield* Effect.sync(() => Database.use((db) => db.select().from(TurnReceiptTable).where(and(
-              eq(TurnReceiptTable.session_id, sessionID),
-              eq(TurnReceiptTable.agent_id, resolvedAgentID),
+            const receipts = yield* Effect.sync(() => Database.use((db) => db.select().from(InboxTable).where(and(
+              eq(InboxTable.receiver_session_id, sessionID),
+              eq(InboxTable.receiver_actor_id, resolvedAgentID),
             )).all()))
             const owned = new Set(claimOwner.receipts.map((receipt) => receipt.id))
-            const visible = new Set<MessageID>()
+            // Visibility: hide only still-queued inputs. accepted (unclaimed) or
+            // claimed by another run stay hidden; cancelled/settled and messages
+            // without an inbox record (history, imports, compaction replay) show.
+            const hidden = new Set<MessageID>()
             for (const receipt of receipts) {
-              if (receipt.intent.kind === "prompt" && (receipt.consumed || owned.has(receipt.id)))
-                visible.add(receipt.intent.messageID as MessageID)
+              if (!receipt.message_id) continue
+              if (receipt.state === "accepted") {
+                hidden.add(receipt.message_id)
+                continue
+              }
+              if (receipt.state === "claimed" && !owned.has(receipt.id)) {
+                hidden.add(receipt.message_id)
+              }
             }
-            // A high watermark does not authorize holes persisted before a later input.
-            // External queue users carry queueAdmission and need an owned/consumed
-            // receipt. Internal continuations (compaction replay, hook/spawn, imports
-            // without the marker) never received queueAdmission and stay visible.
             msgs = msgs.filter((msg) =>
-              msg.info.sessionID !== sessionID || msg.info.role !== "user" || visible.has(msg.info.id) ||
-              !msg.info.queueAdmission ||
+              msg.info.sessionID !== sessionID || msg.info.role !== "user" || !hidden.has(msg.info.id) ||
               !!msg.info.provenance ||
               (msg.parts.length > 0 && msg.parts.every((part) =>
                 (part.type === "text" && part.synthetic) || part.type === "compaction" || part.type === "checkpoint")),
             )
             const deliveries = new Map<MessageID, MessageID[]>()
             for (const receipt of receipts.sort((a, b) => a.id.localeCompare(b.id))) {
-              if (receipt.intent.kind !== "prompt" || !receipt.delivery_message_id ||
+              if (!receipt.message_id || !receipt.delivery_message_id ||
                   (!receipt.consumed && !owned.has(receipt.id))) continue
               const ids = deliveries.get(receipt.delivery_message_id) ?? []
-              ids.push(receipt.intent.messageID as MessageID)
+              ids.push(receipt.message_id)
               deliveries.set(receipt.delivery_message_id, ids)
             }
             // First delivery, not final settlement, fixes each batch before its own tool/assistant steps.
@@ -4771,7 +4775,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               msgs.splice(msgs.findIndex((msg) => msg.info.id === responseID), 0, ...inputs)
             }
             const pending = claimOwner.receipts.flatMap((receipt) =>
-              receipt.intent.kind === "prompt" && !deliveredPrompts.has(receipt.intent.messageID)
+              !deliveredPrompts.has(receipt.intent.messageID)
                 ? [receipt.intent.messageID] : [],
             )
             const compacting = msgs.findLast((msg) => msg.info.role === "user")?.parts.some((part) =>
@@ -6106,7 +6110,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )(function* (input: z.infer<typeof LoopInput>) {
       const agentID = input.agentID ?? "main"
       const lane: Lane = { sessionID: input.sessionID, agentID }
-      const tq = turnQueueRef.current
+      const tq = inboxControllerRef.current
       const epoch = input.expectedEpoch ?? (tq ? yield* tq.getEpoch(input.sessionID) : undefined)
       // C-01: claim eligible receipts for this run; ack/settle at end.
       // Receipt membership gates input; claimFrontier is only a monotonic progress watermark.
@@ -6138,7 +6142,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
         // Only prompt claims bound the consume frontier. A wake/shell-only claim
         // must still process inbox-drained users (extendClaim would fail).
-        const promptClaimed = claimed.some((r) => r.intent.kind === "prompt")
+        const promptClaimed = claimed.length > 0
         const claimFrontier = promptClaimed ? claim?.claimFrontier : undefined
         const claimOwner = { runId, receipts: claimed, frontier: claimFrontier }
         const final = yield* runLoop(
@@ -6273,7 +6277,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const leaseGuard = Effect.fn("SessionPrompt.leaseGuard")(function* (sessionID: SessionID) {
       const generation = cascadeEpochBySession.get(sessionID) ?? 0
-      const queue = turnQueueRef.current
+      const queue = inboxControllerRef.current
       const epoch = queue ? yield* queue.getEpoch(sessionID) : undefined
       return Effect.gen(function* () {
         if ((cascadeEpochBySession.get(sessionID) ?? 0) !== generation) return yield* Effect.interrupt
@@ -7319,24 +7323,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       predict,
     })
     yield* bindScopedRef(sessionPromptRef, { loop: impl.loop })
-    // C-02/C-06: Controller.admit → kick starts a lease when idle; onIdle also
+    // C-02/C-06: Controller.accept → kick starts a lease when idle; onIdle also
     // re-kicks leftover accepted receipts (lost-wake replacement for pending-attach).
     const laneKick: (lane: Lane) => Effect.Effect<void> = (lane) =>
       Effect.gen(function* () {
-        const accepted = yield* (turnQueueRef.current?.listAccepted(lane) ?? Effect.succeed([]))
+        const accepted = yield* (inboxControllerRef.current?.listAccepted(lane) ?? Effect.succeed([]))
         if (accepted.length === 0) return
-        const top = accepted[0]
-        if (!top) return
-        const kind = top.intent.kind
-        // Shell and resume retain exclusive, non-queued admission.
-        if (kind === "resume" || kind === "shell") return
-        // prompt / wake → normal turn. wake drains inbox inside loop.
         yield* loop({
           sessionID: lane.sessionID,
           agentID: lane.agentID,
           notifyParentOnComplete: lane.agentID !== "main",
-          inboxWake: kind === "wake",
-          source: kind === "wake" ? "spawn" : "user",
+          source: "user",
           requireClaim: true,
         }).pipe(Effect.catchCause(() => Effect.void))
       }).pipe(Effect.catchCause(() => Effect.void))

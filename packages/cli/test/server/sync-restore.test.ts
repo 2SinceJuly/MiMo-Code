@@ -20,9 +20,9 @@ import { ActorRegistryTable } from "../../src/actor/actor.sql"
 import { Database, eq } from "../../src/storage"
 import { SyncEvent } from "../../src/sync"
 import { EventSequenceTable, EventTable } from "../../src/sync/event.sql"
-import { schedulerRef } from "../../src/turn-queue/scheduler"
-import * as QueueSync from "../../src/turn-queue/sync"
-import { TurnLaneStateTable, TurnReceiptTable, TurnSessionEpochTable } from "../../src/turn-queue/turn-queue.sql"
+import { schedulerRef } from "../../src/inbox/scheduler"
+import * as QueueSync from "../../src/inbox/sync"
+import { InboxLaneStateTable, InboxTable, InboxSessionEpochTable } from "../../src/inbox/inbox.sql"
 import { tmpdir } from "../fixture/fixture"
 import { TestLLMServer } from "../lib/llm-server"
 
@@ -96,7 +96,6 @@ function envelope(http: Http, template: Session.Info) {
       time: { created: 100 },
       agent: "build",
       model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
-      queueAdmission: { epoch: 7, ready: true, dispatch: true },
     }
     const part: MessageV2.TextPart = {
       id: PartID.ascending(),
@@ -150,21 +149,23 @@ function envelope(http: Http, template: Session.Info) {
     sessionID,
     receipts: (["accepted", "claimed", "settled", "cancelled", "rejected"] as const).map((state, index) => ({
       id: `${sessionID}-receipt-${index}`,
-      session_id: sessionID,
-      agent_id: "main",
+      receiver_session_id: sessionID,
+      receiver_actor_id: "main",
+      sender_session_id: null,
+      sender_actor_id: null,
+      type: "prompt",
+      content: null,
+      message_id: users[index].info.id,
       state: state === "claimed" ? "cancelled" : state,
-      intent: { kind: "prompt", messageID: users[index].info.id },
       epoch: state === "cancelled" ? 6 : 7,
       run_id: state === "claimed" || state === "settled" ? 31 + index : null,
       claim_frontier: state === "claimed" || state === "settled" ? users[index].info.id : null,
       consumed: state === "settled",
-      suspended: state === "cancelled",
       outcome: state === "settled" ? "success" : state === "cancelled" || state === "claimed" ? "never_ran" : null,
-      message_id: state === "settled" ? assistants[1].info.id : null,
       delivery_message_id: state === "settled" ? assistants[0].info.id : null,
       error: state === "rejected" ? "fixture rejection" : null,
       idempotency_key: users[index].info.id,
-      time_created: 100,
+      created_at: 100,
       time_updated: 102,
     })),
     lanes: [
@@ -178,7 +179,6 @@ function envelope(http: Http, template: Session.Info) {
       { session_id: sessionID, agent_id: "worker", consumed_frontier: null, input_revision: 3, time_updated: 101 },
     ],
     epoch: { session_id: sessionID, epoch: 7, time_updated: 102 },
-    bootstrap: { session_id: sessionID, message_ids: [users[2].info.id], completed: true, time_updated: 99 },
   }
   return {
     payload: {
@@ -286,17 +286,17 @@ describe("POST /sync/replay atomic session restore", () => {
         await restored(http, data)
         expect(state(data.info.id)).toEqual(installed)
         Database.transaction((db) => {
-          db.update(TurnSessionEpochTable)
+          db.update(InboxSessionEpochTable)
             .set({ epoch: 8, time_updated: 200 })
-            .where(eq(TurnSessionEpochTable.session_id, data.info.id))
+            .where(eq(InboxSessionEpochTable.session_id, data.info.id))
             .run()
-          db.update(TurnReceiptTable)
-            .set({ state: "cancelled", outcome: "never_ran", suspended: true, time_updated: 200 })
-            .where(eq(TurnReceiptTable.id, data.payload.queueSnapshot.receipts[0].id))
+          db.update(InboxTable)
+            .set({ state: "cancelled", outcome: "never_ran", time_updated: 200 })
+            .where(eq(InboxTable.id, data.payload.queueSnapshot.receipts[0].id))
             .run()
-          db.update(TurnLaneStateTable)
+          db.update(InboxLaneStateTable)
             .set({ input_revision: 20, time_updated: 200 })
-            .where(eq(TurnLaneStateTable.session_id, data.info.id))
+            .where(eq(InboxLaneStateTable.session_id, data.info.id))
             .run()
         })
         const progressed = state(data.info.id)
@@ -333,7 +333,7 @@ describe("POST /sync/replay atomic session restore", () => {
           if (invalid === "mixed aggregates") payload.events[1].aggregateID = foreign
           if (invalid === "foreign payload session")
             payload.events[1].data = { ...payload.events[1].data, sessionID: foreign }
-          if (invalid === "foreign queue session") payload.queueSnapshot.receipts[0].session_id = foreign
+          if (invalid === "foreign queue session") payload.queueSnapshot.receipts[0].receiver_session_id = foreign
           if (invalid === "foreign message session")
             Object.assign(payload.events[1].data.info as object, { sessionID: foreign })
           if (invalid === "missing finalSeq") Reflect.deleteProperty(payload, "finalSeq")
@@ -352,10 +352,9 @@ describe("POST /sync/replay atomic session restore", () => {
     "message ID",
     "part ID",
     "receipt ID",
-    "intent reference",
+    "message reference",
     "delivery reference",
     "part parent",
-    "bootstrap reference",
   ] as const) {
     test(
       `rejects a foreign ${collision} without mutating either session`,
@@ -376,14 +375,12 @@ describe("POST /sync/replay atomic session restore", () => {
             )
           if (collision === "receipt ID")
             payload.queueSnapshot.receipts[0].id = foreign.payload.queueSnapshot.receipts[0].id
-          if (collision === "intent reference")
-            payload.queueSnapshot.receipts[0].intent = { kind: "prompt", messageID: foreign.users[0].info.id }
+          if (collision === "message reference")
+            payload.queueSnapshot.receipts[0].message_id = foreign.users[0].info.id
           if (collision === "delivery reference")
             payload.queueSnapshot.receipts[2].delivery_message_id = foreign.assistants[0].info.id
           if (collision === "part parent")
             Object.assign(payload.events[2].data.part as object, { messageID: foreign.users[0].info.id })
-          if (collision === "bootstrap reference")
-            payload.queueSnapshot.bootstrap!.message_ids = [foreign.users[0].info.id]
           const response = await http.post("/sync/replay", payload)
           expect(state(data.info.id)).toEqual(before)
           expect(state(foreign.info.id)).toEqual(foreignBefore)
@@ -706,7 +703,7 @@ describe("POST /sync/replay atomic session restore", () => {
         await restored(http, data)
         const before = state(data.info.id)
         const conflict = structuredClone(data.payload)
-        conflict.queueSnapshot.receipts[0].suspended = true
+        conflict.queueSnapshot.receipts[0].consumed = true
         await rejected(http, conflict, 409)
         expect(state(data.info.id)).toEqual(before)
       }),
