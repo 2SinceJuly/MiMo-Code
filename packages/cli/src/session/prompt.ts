@@ -4663,6 +4663,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ExecutionOwnership.assertOwnership(db, sessionID, identity)
                 const receipts = db.update(InboxTable).set({
                   delivery_message_id: messageID,
+                  consumed: true,
                 }).where(and(
                   inArray(InboxTable.id, pending.map((receipt) => receipt.id)),
                   eq(InboxTable.state, "claimed"),

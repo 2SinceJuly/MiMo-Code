@@ -2,7 +2,7 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, describe, expect } from "bun:test"
 import { Deferred, Effect, Layer } from "effect"
-import { and, eq } from "drizzle-orm"
+import { and, eq, isNotNull } from "drizzle-orm"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
 import { Command } from "../../src/command"
@@ -797,13 +797,18 @@ describe("SessionPrompt.cancel — process-group kill", () => {
             .filter((text) => text.includes("<actor-notification>"))
           expect(notes.length).toBeGreaterThanOrEqual(2)
           expect(notes.filter((text) => text.includes("was cancelled")).length).toBeGreaterThanOrEqual(2)
-          // Drain consumed the quiet inbox rows — no leftover durable wake backlog.
+          // Drain consumed the quiet notification rows — no leftover durable wake
+          // backlog. Prompt receipts are settled records and stay until GC.
           const inboxLeft = yield* Effect.sync(() =>
             Database.use((db) =>
               db
                 .select({ id: InboxTable.id })
                 .from(InboxTable)
-                .where(and(eq(InboxTable.receiver_session_id, parent.id), eq(InboxTable.receiver_actor_id, "main")))
+                .where(and(
+                  eq(InboxTable.receiver_session_id, parent.id),
+                  eq(InboxTable.receiver_actor_id, "main"),
+                  isNotNull(InboxTable.content),
+                ))
                 .all(),
             ),
           )

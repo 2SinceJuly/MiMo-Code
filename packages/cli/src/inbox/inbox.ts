@@ -13,6 +13,7 @@ import * as InstanceState from "@/effect/instance-state"
 import { InboxTable } from "./inbox.sql"
 import { renderInboxRow } from "./render"
 import { sessionPromptRef, inboxServiceRef, defaultModelRef } from "./inbox-ref"
+import { inboxControllerRef } from "./controller-ref"
 import type { ProviderID, ModelID } from "@/provider/schema"
 
 const log = Log.create({ service: "inbox" })
@@ -202,7 +203,15 @@ export const layer: Layer.Layer<
       // drained inside the loop. Wake is a force-run (no claim required) so
       // drain can convert them; phase 2 unifies this through inbox.accept.
       const promptRef = sessionPromptRef.current
-      if (input.wake === false || input.isWakeCancelled?.()) {
+      // A stop bumps the epoch before it marks the process group, so a sender
+      // finishing in between still sees isWakeCancelled() false; the epoch is
+      // the authoritative fence.
+      const tq = inboxControllerRef.current
+      const staleEpoch = () => Effect.gen(function* () {
+        if (input.wakeEpoch === undefined || !tq) return false
+        return (yield* tq.getEpoch(input.receiverSessionID)) !== input.wakeEpoch
+      })
+      if (input.wake === false || input.isWakeCancelled?.() || (yield* staleEpoch())) {
         return { inboxID: row.id, wakeSuppressed: true }
       } else if (promptRef) {
         yield* Effect.gen(function* () {
@@ -212,7 +221,9 @@ export const layer: Layer.Layer<
             Effect.sync(() => Instance.claim(directory)),
             (release) =>
               Effect.gen(function* () {
-                const fiber = yield* Effect.suspend(() => input.isWakeCancelled?.() ? Effect.void : promptRef.loop({
+                const fiber = yield* Effect.gen(function* () {
+                  if (input.isWakeCancelled?.() || (yield* staleEpoch())) return
+                  yield* promptRef.loop({
                     sessionID: input.receiverSessionID,
                     agentID: input.receiverActorID,
                     // Woken turns notify their parent on completion. The spawn turn goes
@@ -225,7 +236,8 @@ export const layer: Layer.Layer<
                     // prompt()/Desktop/TUI/HTTP/command which default source to "user".
                     source: "spawn",
                     ...(input.wakeEpoch !== undefined ? { expectedEpoch: input.wakeEpoch } : {}),
-                  })).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true, uninterruptible: false }))
+                  })
+                }).pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true, uninterruptible: false }))
                 // A fiber exit observer also runs when interruption precedes its
                 // first step, unlike an ensuring attached only to the wake body.
                 fiber.addObserver(() => release())

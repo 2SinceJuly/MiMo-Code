@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { AppLayer } from "../../src/effect/app-runtime"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Session } from "../../src/session"
@@ -191,6 +191,33 @@ describe("inbox queue spec test points", () => {
         expect(rows[0]!.state).toBe("settled")
         // deliveryMessageId is the first model-step assistant message that read the input.
         expect(rows[0]!.delivery_message_id).toBeTruthy()
+      }),
+      { git: true, config },
+    ),
+    15_000,
+  )
+
+  // (d) 已被模型读入后停止：consumed 在写 delivery 时置位，停止结算为 interrupted
+  it.live(
+    "(d) stop after the model read a prompt settles it as interrupted",
+    provideTmpdirServer(({ llm }) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const prompt = yield* SessionPrompt.Service
+        const session = yield* sessions.create({ title: "spec-d-read" })
+        yield* llm.hang
+        const messageID = MessageID.ascending()
+        const run = yield* prompt.prompt({
+          sessionID: session.id, messageID, agent: "build",
+          parts: [{ type: "text", text: "READ-THEN-STOPPED" }],
+        }).pipe(Effect.forkChild)
+        yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
+        const read = receiptRows(session.id).find((row) => row.input_message_id === messageID)!
+        expect([read.state, read.consumed, !!read.delivery_message_id]).toEqual(["claimed", true, true])
+        yield* prompt.cancel(session.id)
+        yield* Fiber.join(run).pipe(Effect.ignore)
+        const stopped = receiptRows(session.id).find((row) => row.input_message_id === messageID)!
+        expect([stopped.state, stopped.outcome, stopped.consumed]).toEqual(["cancelled", "interrupted", true])
       }),
       { git: true, config },
     ),

@@ -120,7 +120,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 ## 读取
 
-每个步骤边界认领该 lane 的 `accepted` 记录（`claimNext`），单次最多 100 条（`MAX_CLAIM_PER_STEP`），对应消息对模型可见并记录 delivery（`delivery_message_id`，事件在事务提交后发布）。多条输入在同一边界一起读到。`inbox.drain` 及其手工回滚逻辑删除。`extendClaim` 在同一运行内认领边界到达的新输入。
+每个步骤边界认领该 lane 的 `accepted` 记录（`claimNext`），单次最多 100 条（`MAX_CLAIM_PER_STEP`），对应消息对模型可见并记录 delivery（`delivery_message_id`，事件在事务提交后发布）。写入 `delivery_message_id` 的同一事务把 `consumed` 置为 `true`：从这一刻起输入已被模型读入，之后停止结算为 `interrupted`。多条输入在同一边界一起读到。`inbox.drain` 及其手工回滚逻辑删除。`extendClaim` 在同一运行内认领边界到达的新输入。
 
 ## 可见性
 
