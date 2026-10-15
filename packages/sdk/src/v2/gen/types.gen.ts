@@ -100,8 +100,8 @@ export type EventSessionReceiptUpdated = {
     agentID: string
     state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
     outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
-    messageId?: string
-    deliveryMessageId?: string
+    inputMessageID: string
+    deliveryMessageID?: string
     epoch: number
   }
 }
@@ -1054,7 +1054,7 @@ export type EventSessionInboxDelta = {
       content: {
         text?: string
       } | null
-      message_id: string | null
+      input_message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
       epoch: number
       run_id: number | null
@@ -1098,7 +1098,7 @@ export type EventSessionInboxSnapshot = {
       content: {
         text?: string
       } | null
-      message_id: string | null
+      input_message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
       epoch: number
       run_id: number | null
@@ -1663,7 +1663,7 @@ export type SyncEventSessionInboxDelta = {
       content: {
         text?: string
       } | null
-      message_id: string | null
+      input_message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
       epoch: number
       run_id: number | null
@@ -1711,7 +1711,7 @@ export type SyncEventSessionInboxSnapshot = {
       content: {
         text?: string
       } | null
-      message_id: string | null
+      input_message_id: string | null
       state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
       epoch: number
       run_id: number | null
@@ -6059,17 +6059,14 @@ export type SessionReceiptResponses = {
       agentID: string
     }
     state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
-    intent: {
-      messageID: string
-      type: string
-      senderSessionID?: string
-      senderActorID?: string
-    }
+    type: string
+    senderSessionID?: string
+    senderActorID?: string
     epoch: number
     consumed: boolean
     outcome?: "success" | "assistant_error" | "interrupted" | "never_ran"
-    messageId?: string
-    deliveryMessageId?: string
+    inputMessageID: string
+    deliveryMessageID?: string
     error?: string
   }
 }
@@ -7088,7 +7085,7 @@ export type SyncReplayData = {
         content: {
           text?: string
         } | null
-        message_id: string | null
+        input_message_id: string | null
         state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
         epoch: number
         run_id: number | null

@@ -101,7 +101,7 @@ function seedQueue(sessionID: SessionID, messageID: MessageID) {
         sender_actor_id: null,
         type: "prompt",
         content: null,
-        message_id: messageID,
+        input_message_id: messageID,
         state: "accepted",
         epoch: 3,
         run_id: null,

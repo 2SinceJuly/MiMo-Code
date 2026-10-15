@@ -33,7 +33,7 @@ export const ReceiptRowSchema = z.object({
   sender_actor_id: z.string().nullable(),
   type: z.string(),
   content: z.object({ text: z.string().optional() }).nullable(),
-  message_id: MessageID.zod.nullable(),
+  input_message_id: MessageID.zod.nullable(),
   state: z.enum(["accepted", "claimed", "settled", "cancelled", "rejected"]),
   epoch: z.number().int().nonnegative(),
   run_id: z.number().int().nullable(),
@@ -110,7 +110,7 @@ function validate(db: Database.TxOrDb, data: Delta | Snapshot) {
   const references = new Set<MessageID>()
   for (const row of data.lanes ?? []) if (row.consumed_frontier) references.add(row.consumed_frontier)
   for (const row of data.receipts ?? []) {
-    if (row.message_id) references.add(row.message_id)
+    if (row.input_message_id) references.add(row.input_message_id)
     if (row.delivery_message_id) references.add(row.delivery_message_id)
     if (row.claim_frontier) references.add(row.claim_frontier)
   }
@@ -119,9 +119,9 @@ function validate(db: Database.TxOrDb, data: Delta | Snapshot) {
     if (message && message.sessionID !== data.sessionID) throw new QueueValidationError(`Inbox message belongs to another session: ${id}`)
   }
   for (const row of data.receipts ?? []) {
-    if (!row.message_id) continue
-    const message = db.select({ agentID: MessageTable.agent_id }).from(MessageTable).where(eq(MessageTable.id, row.message_id)).get()
-    if (message && message.agentID !== row.receiver_actor_id) throw new QueueValidationError(`Inbox message belongs to another lane: ${row.message_id}`)
+    if (!row.input_message_id) continue
+    const message = db.select({ agentID: MessageTable.agent_id }).from(MessageTable).where(eq(MessageTable.id, row.input_message_id)).get()
+    if (message && message.agentID !== row.receiver_actor_id) throw new QueueValidationError(`Inbox message belongs to another lane: ${row.input_message_id}`)
   }
 }
 
@@ -197,8 +197,8 @@ export function materializeHistory(input: {
   const current = capture(input.sessionID, db)
   const replaced = new Set(input.replacedMessageIDs ?? [])
   const deletedReceiptIDs = current.receipts.filter((row) =>
-    row.message_id && replaced.has(row.message_id) &&
-    row.idempotency_key === historyReceiptKey(input.source, input.sourceKey, row.message_id as string),
+    row.input_message_id && replaced.has(row.input_message_id) &&
+    row.idempotency_key === historyReceiptKey(input.source, input.sourceKey, row.input_message_id as string),
   ).map((row) => row.id)
   const now = Date.now()
   const receipts: Snapshot["receipts"] = input.messages.filter((message) => message.role === "user").map((message) => {
@@ -211,7 +211,7 @@ export function materializeHistory(input: {
       sender_actor_id: null,
       type: "prompt",
       content: null,
-      message_id: message.id,
+      input_message_id: message.id,
       state: "settled",
       epoch: current.epoch?.epoch ?? 0,
       run_id: null,

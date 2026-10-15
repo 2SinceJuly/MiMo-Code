@@ -71,7 +71,7 @@ function receipt(sessionID: SessionID, id = "receipt"): QueueSync.Snapshot["rece
     sender_actor_id: null,
     type: "prompt",
     content: null,
-    message_id: MessageID.ascending(),
+    input_message_id: MessageID.ascending(),
     state: "accepted",
     epoch: 0,
     run_id: null,
@@ -108,11 +108,11 @@ describe("turn queue sync transport", () => {
     const tq = yield* InboxController.Service
     const session = yield* sessions.create({ title: "delta lifecycle" })
     const lane = { sessionID: session.id, agentID: "main" }
-    const first = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
+    const first = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, type: "prompt" }) })()
     expect(latestDelta(session.id).lanes?.[0].input_revision).toBe(1)
     const claimed = yield* tq.claimNext(lane, 42)
     expect(claimed?.receipts.map((r) => r.id)).toEqual([first.id])
-    const second = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
+    const second = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, type: "prompt" }) })()
     const admission = events(session.id).filter((e) => e.type === "session.inbox.delta.1").at(-1)!
     expect(QueueSync.DeltaSchema.parse(admission.data).receipts?.map((r) => r.id)).toEqual([second.id])
     const extended = yield* tq.extendClaim(lane, 42)
@@ -125,7 +125,7 @@ describe("turn queue sync transport", () => {
     })
     expect(latestDelta(session.id).receipts?.[0].delivery_message_id).toBe(delivery)
     yield* tq.ack(lane, extended!.claimFrontier, [
-      { receiptId: first.id, outcome: "success", messageId: delivery },
+      { receiptId: first.id, outcome: "success" },
       { receiptId: second.id, outcome: "assistant_error", error: "provider error" },
     ], 42)
     const ack = latestDelta(session.id)
@@ -151,9 +151,9 @@ describe("turn queue sync transport", () => {
       const tq = yield* InboxController.Service
       const session = yield* sessions.create({ title: `ownership ${operation}` })
       const lane = { sessionID: session.id, agentID: "main" }
-      const first = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
+      const first = yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, type: "prompt" }) })()
       const claim = operation === "ack" || operation === "extend" ? yield* tq.claimNext(lane, 1) : undefined
-      if (operation === "extend") yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
+      if (operation === "extend") yield* (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, type: "prompt" }) })()
       const before = QueueSync.capture(session.id)
       const history = events(session.id)
       const transaction = Database.transaction
@@ -166,7 +166,7 @@ describe("turn queue sync transport", () => {
         return transaction(callback, options)
       })
       try {
-        const action = operation === "admit" ? (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, intent: { messageID: u.messageID, type: "prompt" } }) })()
+        const action = operation === "admit" ? (() => { const u = makeUser(session.id); return tq.accept({ lane, message: u.message, parts: u.parts, type: "prompt" }) })()
           : operation === "claim" ? tq.claimNext(lane, 2)
           : operation === "extend" ? tq.extendClaim(lane, 1)
           : operation === "ack" ? tq.ack(lane, claim?.claimFrontier, [{ receiptId: first.id, outcome: "success" }], 1)
@@ -237,7 +237,7 @@ describe("turn queue sync transport", () => {
     })
     try {
       const gu = makeUser(session.id)
-      const result = yield* tq.accept({ lane: { sessionID: session.id, agentID: "main" }, message: gu.message, parts: gu.parts, intent: { messageID: gu.messageID, type: "prompt" } }).pipe(Effect.exit)
+      const result = yield* tq.accept({ lane: { sessionID: session.id, agentID: "main" }, message: gu.message, parts: gu.parts, type: "prompt" }).pipe(Effect.exit)
       expect(Exit.isFailure(result)).toBe(true)
       expect(QueueSync.capture(session.id)).toEqual(empty(session.id))
       expect(events(session.id)).toEqual(before)
@@ -287,7 +287,7 @@ describe("turn queue sync transport", () => {
       { ...original, version: 2 },
       { ...original, version: undefined },
       { ...original, receipts: [{ ...own, type: 123 }] },
-      { ...original, receipts: [{ ...own, message_id: 123 }] },
+      { ...original, receipts: [{ ...own, input_message_id: 123 }] },
       { ...original, receipts: [foreign] },
       { ...original, receipts: [{ ...foreign, receiver_session_id: session.id }] },
       { ...original, receipts: [own, own] },
@@ -311,8 +311,8 @@ describe("turn queue sync transport", () => {
     const own = receipt(session.id, "refs-owned")
     const base = { ...empty(session.id), receipts: [own] }
     const candidates: QueueSync.Snapshot[] = [
-      { ...base, receipts: [{ ...own, message_id: messageID }] },
-      ...(["message_id", "delivery_message_id", "claim_frontier"] as const).map((field) => ({ ...base, receipts: [{ ...own, [field]: messageID }] })),
+      { ...base, receipts: [{ ...own, input_message_id: messageID }] },
+      ...(["input_message_id", "delivery_message_id", "claim_frontier"] as const).map((field) => ({ ...base, receipts: [{ ...own, [field]: messageID }] })),
       { ...base, lanes: [{ session_id: session.id, agent_id: "main", consumed_frontier: messageID, input_revision: 0, time_updated: 1 }] },
     ]
     for (const value of candidates) {
@@ -331,7 +331,7 @@ describe("turn queue sync transport", () => {
     const session = yield* sessions.create({ title: "lane ownership" })
     const messageID = MessageID.ascending()
     yield* sessions.updateMessage({ id: messageID, sessionID: session.id, agentID: "actor-other", role: "user", agent: "build", time: { created: 1 }, model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") } })
-    const row = { ...receipt(session.id, "lane-owned"), message_id: messageID, receiver_actor_id: "main" }
+    const row = { ...receipt(session.id, "lane-owned"), input_message_id: messageID, receiver_actor_id: "main" }
     expect(() => Database.transaction(() => QueueSync.record({ sessionID: session.id, receipts: [row] }))).toThrow(QueueSync.QueueValidationError)
     Database.transaction(() => QueueSync.record({ sessionID: session.id, receipts: [{ ...row, receiver_actor_id: "actor-other" }] }))
     expect(QueueSync.capture(session.id).receipts[0].receiver_actor_id).toBe("actor-other")

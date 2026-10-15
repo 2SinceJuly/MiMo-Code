@@ -10,8 +10,8 @@ export const ReceiptUpdated = BusEvent.define(
     agentID: z.string(),
     state: z.enum(["accepted", "claimed", "settled", "cancelled", "rejected"]),
     outcome: z.enum(["success", "assistant_error", "interrupted", "never_ran"]).optional(),
-    messageId: z.string().optional(),
-    deliveryMessageId: z.string().optional(),
+    inputMessageID: z.string(),
+    deliveryMessageID: z.string().optional(),
     epoch: z.number(),
   }),
 )

@@ -116,7 +116,7 @@ export function storeImportedSession(
         })
         : currentQueue.receipts.length === parsed.filter((message) => message.info.role === "user").length &&
           currentQueue.receipts.every((receipt) => receipt.state === "settled" && receipt.consumed && receipt.outcome === null &&
-            receipt.idempotency_key === QueueSync.historyReceiptKey("cli", info.id, receipt.message_id as string))
+            receipt.idempotency_key === QueueSync.historyReceiptKey("cli", info.id, receipt.input_message_id as string))
       if (!isDeepStrictEqual(Session.toRow(Session.fromRow(existing)), row) || !isDeepStrictEqual(current, parsed) || !queueMatches)
         throw new Error(`Imported session conflicts with existing session: ${info.id}`)
       return

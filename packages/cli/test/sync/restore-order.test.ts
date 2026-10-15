@@ -37,7 +37,7 @@ function envelope(template: Session.Info, withLanes: boolean) {
       sender_actor_id: null,
       type: "prompt",
       content: null,
-      message_id: MessageID.ascending(),
+      input_message_id: MessageID.ascending(),
       state: "accepted",
       epoch: 0,
       run_id: null,

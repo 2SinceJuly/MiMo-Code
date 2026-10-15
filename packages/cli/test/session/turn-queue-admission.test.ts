@@ -93,7 +93,7 @@ const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: Messag
       agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
     },
     parts: [],
-    intent: { messageID, type: "prompt" },
+    type: "prompt",
     idempotencyKey: messageID,
   })
 })
@@ -116,7 +116,7 @@ function frontier(sessionID: SessionID) {
 
 const receiptFor = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
   const tq = yield* InboxController.Service
-  const found = receipts(sessionID).filter((row) => row.message_id === messageID)
+  const found = receipts(sessionID).filter((row) => row.input_message_id === messageID)
   expect(found).toHaveLength(1)
   return yield* tq.getReceipt(found[0].id)
 })
@@ -235,7 +235,7 @@ describe("InboxController admission and claim acceptance without child execution
               expect(yield* llm.calls).toBe(2)
               expect(JSON.stringify((yield* llm.inputs)[1]!.messages).includes(lowerText)).toBe(false)
               expect(structuredTool((yield* llm.inputs)[1]!)?.function.parameters).toEqual(schema)
-              expect(receipts(session.id).filter((row) => row.message_id === lowerID)).toHaveLength(0)
+              expect(receipts(session.id).filter((row) => row.input_message_id === lowerID)).toHaveLength(0)
               if (persisted === "after U2 ack") {
                 yield* persistUser(session.id, lowerText, lowerFormat, lowerID)
               }
@@ -726,7 +726,7 @@ describe("InboxController admission and claim acceptance without child execution
           answer(yield* Fiber.join(main).pipe(Effect.timeout("5 seconds")), "ONLY-ADMITTED-ANSWER", originalID)
           expect(yield* llm.calls).toBe(1)
           expect(JSON.stringify(yield* llm.inputs)).not.toContain("UNADMITTED-MUST-NOT-BE-CONSUMED")
-          expect(receipts(session.id).filter((row) => row.message_id === unadmittedID)).toHaveLength(0)
+          expect(receipts(session.id).filter((row) => row.input_message_id === unadmittedID)).toHaveLength(0)
           expect(frontier(session.id)).toBe(originalID)
           yield* successful((yield* receiptFor(session.id, originalID)).id)
         }),

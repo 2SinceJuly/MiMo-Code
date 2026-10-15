@@ -12,7 +12,6 @@ import { ReceiptUpdated } from "./events"
 import {
   MAX_CLAIM_PER_STEP,
   type AcceptInput,
-  type Intent,
   type Lane,
   type Receipt,
   type ReceiptOutcome,
@@ -54,7 +53,7 @@ export interface Interface {
   readonly ack: (
     lane: Lane,
     claimFrontier: MessageID | undefined,
-    settled: Array<{ receiptId: string; outcome: ReceiptOutcome; messageId?: MessageID; error?: string }>,
+    settled: Array<{ receiptId: string; outcome: ReceiptOutcome; error?: string }>,
     expectedRunId?: number,
   ) => Effect.Effect<void>
   readonly extendClaim: (
@@ -75,29 +74,24 @@ function toReceipt(row: typeof InboxTable.$inferSelect): Receipt {
     id: row.id,
     lane: { sessionID: row.receiver_session_id, agentID: row.receiver_actor_id },
     state: row.state,
-    intent: {
-      messageID: row.message_id!,
-      type: row.type,
-      ...(row.sender_session_id ? { senderSessionID: row.sender_session_id } : {}),
-      ...(row.sender_actor_id ? { senderActorID: row.sender_actor_id } : {}),
-    },
+    type: row.type,
+    ...(row.sender_session_id ? { senderSessionID: row.sender_session_id } : {}),
+    ...(row.sender_actor_id ? { senderActorID: row.sender_actor_id } : {}),
     epoch: row.epoch,
     runId: row.run_id ?? undefined,
     claimFrontier: row.claim_frontier ?? undefined,
     consumed: row.consumed,
     outcome: row.outcome ?? undefined,
-    // `message_id` is the accepted user message (spec table). PublicReceipt.messageId
-    // surfaces it; the old settle-assistant meaning of this field has no column.
-    messageId: row.message_id ?? undefined,
-    deliveryMessageId: row.delivery_message_id ?? undefined,
+    inputMessageID: row.input_message_id!,
+    deliveryMessageID: row.delivery_message_id ?? undefined,
     error: row.error ?? undefined,
     idempotencyKey: row.idempotency_key ? row.idempotency_key : undefined,
     time: { created: row.created_at, updated: row.time_updated },
   }
 }
 
-/** Prompt records only: message_id set, content not used for queueing. */
-const promptOnly = sql`${InboxTable.message_id} is not null`
+/** Prompt records only: input_message_id set, content not used for queueing. */
+const promptOnly = sql`${InboxTable.input_message_id} is not null`
 
 export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
   Service,
@@ -175,8 +169,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           agentID: receipt.lane.agentID,
           state: receipt.state,
           ...(receipt.outcome ? { outcome: receipt.outcome } : {}),
-          ...(receipt.messageId ? { messageId: receipt.messageId } : {}),
-          ...(receipt.deliveryMessageId ? { deliveryMessageId: receipt.deliveryMessageId } : {}),
+          inputMessageID: String(receipt.inputMessageID),
+          ...(receipt.deliveryMessageID ? { deliveryMessageID: String(receipt.deliveryMessageID) } : {}),
           epoch: receipt.epoch,
         })
         .pipe(Effect.ignore)
@@ -206,7 +200,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         const duplicate = db.select().from(InboxTable).where(and(
           eq(InboxTable.receiver_session_id, input.lane.sessionID),
           eq(InboxTable.receiver_actor_id, input.lane.agentID),
-          eq(InboxTable.message_id, input.intent.messageID),
+          eq(InboxTable.input_message_id, input.message.id),
           promptOnly,
           or(
             and(eq(InboxTable.state, "settled"), eq(InboxTable.consumed, true)),
@@ -240,11 +234,11 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             id,
             receiver_session_id: input.lane.sessionID,
             receiver_actor_id: input.lane.agentID,
-            sender_session_id: input.intent.senderSessionID ?? null,
-            sender_actor_id: input.intent.senderActorID ?? null,
-            type: input.intent.type,
+            sender_session_id: input.senderSessionID ?? null,
+            sender_actor_id: input.senderActorID ?? null,
+            type: input.type,
             content: null,
-            message_id: input.intent.messageID,
+            input_message_id: input.message.id,
             state: "accepted",
             epoch,
             idempotency_key: idempotencyKey,
@@ -382,7 +376,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             if (row.claim_frontier && (!claimFrontier || row.claim_frontier > claimFrontier)) claimFrontier = row.claim_frontier
           }
           for (const r of eligible) {
-            if (!claimFrontier || r.intent.messageID > claimFrontier) claimFrontier = r.intent.messageID
+            if (!claimFrontier || r.inputMessageID > claimFrontier) claimFrontier = r.inputMessageID
           }
           const rows = db.update(InboxTable).set({
             state: "claimed",
@@ -414,7 +408,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     const ack = Effect.fn("Inbox.ack")(function* (
       lane: Lane,
       claimFrontier: MessageID | undefined,
-      settled: Array<{ receiptId: string; outcome: ReceiptOutcome; messageId?: MessageID; error?: string }>,
+      settled: Array<{ receiptId: string; outcome: ReceiptOutcome; error?: string }>,
       expectedRunId?: number,
     ) {
       const identity = yield* ExecutionOwnership.captureIdentity
@@ -434,9 +428,6 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
               .set({
                 state,
                 outcome: s.outcome,
-                // First delivery wins; ack's messageId is only a fallback when
-                // the model step never recorded a delivery.
-                delivery_message_id: sql`coalesce(${InboxTable.delivery_message_id}, ${s.messageId ?? null})`,
                 error: s.error ?? null,
                 consumed: s.outcome !== "never_ran",
                 time_updated: now,

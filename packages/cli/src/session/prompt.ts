@@ -3522,7 +3522,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lane: { sessionID: input.sessionID, agentID: "main" },
             message: message.info as MessageV2.User,
             parts: message.parts,
-            intent: { messageID: message.info.id, type: "prompt" },
+            type: "prompt",
             // Stable per-message key so a second accept (HTTP route) cannot
             // insert a second live receipt for the same user message.
             idempotencyKey: message.info.id,
@@ -4649,8 +4649,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         ) {
           if (claimOwner) {
             const pending = claimOwner.receipts.filter((receipt) => {
-              return !deliveredPrompts.has(receipt.intent.messageID) &&
-                msgs.some((msg) => msg.info.id === receipt.intent.messageID)
+              return !deliveredPrompts.has(receipt.inputMessageID) &&
+                msgs.some((msg) => msg.info.id === receipt.inputMessageID)
             })
             if (pending.length > 0) {
               const identity = yield* ExecutionOwnership.captureIdentity
@@ -4674,12 +4674,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   receiptId: row.id,
                   agentID: row.receiver_actor_id,
                   state: row.state,
-                  deliveryMessageId: messageID,
+                  inputMessageID: String(row.input_message_id),
+                  deliveryMessageID: messageID,
                   epoch: row.epoch,
                 })
               }
               for (const receipt of pending) {
-                deliveredPrompts.add(receipt.intent.messageID)
+                deliveredPrompts.add(receipt.inputMessageID)
               }
             }
           }
@@ -4742,13 +4743,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // without an inbox record (history, imports, compaction replay) show.
             const hidden = new Set<MessageID>()
             for (const receipt of receipts) {
-              if (!receipt.message_id) continue
+              if (!receipt.input_message_id) continue
               if (receipt.state === "accepted") {
-                hidden.add(receipt.message_id)
+                hidden.add(receipt.input_message_id)
                 continue
               }
               if (receipt.state === "claimed" && !owned.has(receipt.id)) {
-                hidden.add(receipt.message_id)
+                hidden.add(receipt.input_message_id)
               }
             }
             msgs = msgs.filter((msg) =>
@@ -4759,10 +4760,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
             const deliveries = new Map<MessageID, MessageID[]>()
             for (const receipt of receipts.sort((a, b) => a.id.localeCompare(b.id))) {
-              if (!receipt.message_id || !receipt.delivery_message_id ||
+              if (!receipt.input_message_id || !receipt.delivery_message_id ||
                   (!receipt.consumed && !owned.has(receipt.id))) continue
               const ids = deliveries.get(receipt.delivery_message_id) ?? []
-              ids.push(receipt.message_id)
+              ids.push(receipt.input_message_id)
               deliveries.set(receipt.delivery_message_id, ids)
             }
             // First delivery, not final settlement, fixes each batch before its own tool/assistant steps.
@@ -4775,8 +4776,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               msgs.splice(msgs.findIndex((msg) => msg.info.id === responseID), 0, ...inputs)
             }
             const pending = claimOwner.receipts.flatMap((receipt) =>
-              !deliveredPrompts.has(receipt.intent.messageID)
-                ? [receipt.intent.messageID] : [],
+              !deliveredPrompts.has(receipt.inputMessageID)
+                ? [receipt.inputMessageID] : [],
             )
             const compacting = msgs.findLast((msg) => msg.info.role === "user")?.parts.some((part) =>
               part.type === "compaction" && !part.projection,

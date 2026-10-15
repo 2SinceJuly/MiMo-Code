@@ -156,7 +156,7 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
 
         // External opencode DB keeps its historical turn_* table names. Rows are
         // converted into the inbox snapshot shape on the way in: only prompt
-        // intents become inbox records (message_id = the accepted user message).
+        // intents become inbox records (input_message_id = the accepted user message).
         const queue = hasQueue ? QueueSync.SnapshotSchema.parse({
           version: 1, sessionID: sess.id,
           receipts: (srcDb.all("SELECT * FROM turn_receipt WHERE session_id = ? ORDER BY id", sess.id) as Record<string, unknown>[])
@@ -171,7 +171,7 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
                 sender_actor_id: null,
                 type: "prompt",
                 content: null,
-                message_id: intent.messageID,
+                input_message_id: intent.messageID,
                 state: row.state,
                 epoch: row.epoch,
                 run_id: row.run_id ?? null,

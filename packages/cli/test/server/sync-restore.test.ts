@@ -155,7 +155,7 @@ function envelope(http: Http, template: Session.Info) {
       sender_actor_id: null,
       type: "prompt",
       content: null,
-      message_id: users[index].info.id,
+      input_message_id: users[index].info.id,
       state: state === "claimed" ? "cancelled" : state,
       epoch: state === "cancelled" ? 6 : 7,
       run_id: state === "claimed" || state === "settled" ? 31 + index : null,
@@ -376,7 +376,7 @@ describe("POST /sync/replay atomic session restore", () => {
           if (collision === "receipt ID")
             payload.queueSnapshot.receipts[0].id = foreign.payload.queueSnapshot.receipts[0].id
           if (collision === "message reference")
-            payload.queueSnapshot.receipts[0].message_id = foreign.users[0].info.id
+            payload.queueSnapshot.receipts[0].input_message_id = foreign.users[0].info.id
           if (collision === "delivery reference")
             payload.queueSnapshot.receipts[2].delivery_message_id = foreign.assistants[0].info.id
           if (collision === "part parent")

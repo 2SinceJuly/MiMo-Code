@@ -39,7 +39,7 @@ const acceptPrompt = Effect.fn(function* (
     parts: [{
       id: PartID.ascending(), sessionID, messageID, type: "text", text,
     }],
-    intent: { messageID, type: "prompt" },
+    type: "prompt",
     idempotencyKey: messageID,
   })
 })

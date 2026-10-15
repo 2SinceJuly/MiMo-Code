@@ -6,7 +6,7 @@ CREATE TABLE `inbox_new` (
   `sender_actor_id` text,
   `type` text NOT NULL DEFAULT 'text',
   `content` text,
-  `message_id` text,
+  `input_message_id` text,
   `state` text NOT NULL DEFAULT 'accepted',
   `epoch` integer NOT NULL DEFAULT 0,
   `run_id` integer,
@@ -19,7 +19,7 @@ CREATE TABLE `inbox_new` (
   `created_at` integer NOT NULL,
   `time_updated` integer NOT NULL
 );--> statement-breakpoint
-INSERT INTO `inbox_new` (`id`, `receiver_session_id`, `receiver_actor_id`, `sender_session_id`, `sender_actor_id`, `type`, `content`, `message_id`, `state`, `epoch`, `run_id`, `claim_frontier`, `consumed`, `outcome`, `delivery_message_id`, `error`, `idempotency_key`, `created_at`, `time_updated`)
+INSERT INTO `inbox_new` (`id`, `receiver_session_id`, `receiver_actor_id`, `sender_session_id`, `sender_actor_id`, `type`, `content`, `input_message_id`, `state`, `epoch`, `run_id`, `claim_frontier`, `consumed`, `outcome`, `delivery_message_id`, `error`, `idempotency_key`, `created_at`, `time_updated`)
 SELECT `id`, `receiver_session_id`, `receiver_actor_id`, `sender_session_id`, `sender_actor_id`, `type`, `content`, NULL, 'accepted', 0, NULL, NULL, 0, NULL, NULL, NULL, '', `created_at`, `created_at` FROM `inbox`;--> statement-breakpoint
 DROP TABLE `inbox`;--> statement-breakpoint
 ALTER TABLE `inbox_new` RENAME TO `inbox`;--> statement-breakpoint

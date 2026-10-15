@@ -78,7 +78,7 @@ describe("turn-queue + actor wait steer", () => {
             agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
           },
           parts: [],
-          intent: { messageID: u, type: "prompt" },
+          type: "prompt",
         })
         const snap = yield* Fiber.join(waitFiber)
         expect(snap.status).toBe("interrupted")
@@ -193,11 +193,11 @@ describe("turn-queue + actor wait steer", () => {
             agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
           },
           parts: [],
-          intent: { messageID: mid, type: "prompt" },
+          type: "prompt",
         })
         const claim = yield* tq.claimNext(lane, 42)
         expect(claim?.claimFrontier).toBe(mid)
-        yield* tq.ack(lane, mid, [{ receiptId: r.id, outcome: "success", messageId: MessageID.ascending() }])
+        yield* tq.ack(lane, mid, [{ receiptId: r.id, outcome: "success" }])
         const after = yield* tq.getReceipt(r.id)
         expect(after.state).toBe("settled")
         expect(after.outcome).toBe("success")

@@ -39,7 +39,7 @@ const user = Effect.fn("test.forkUser")(function* (sessionID: SessionID, text: s
       lane: { sessionID, agentID: "main" },
       message,
       parts: [part],
-      intent: { messageID: message.id, type: "prompt" },
+      type: "prompt",
       idempotencyKey: message.id,
     })
     return message
@@ -73,7 +73,7 @@ const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: Messag
       agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
     },
     parts: [],
-    intent: { messageID, type: "prompt" },
+    type: "prompt",
     idempotencyKey: messageID,
   })
 })
@@ -102,15 +102,15 @@ describe("Session.fork queue history", () => {
       const lane = { sessionID: source.id, agentID: "main" }
       const receipt = yield* admitPrompt(source.id, question.id)
       yield* tq.claimNext(lane, 1)
-      yield* tq.ack(lane, question.id, [{ receiptId: receipt.id, outcome: "success", messageId: answer.id }], 1)
+      yield* tq.ack(lane, question.id, [{ receiptId: receipt.id, outcome: "success" }], 1)
       const branch = yield* sessions.fork({ sessionID: source.id })
       yield* Effect.addFinalizer(() => prompt.cancel(branch.id))
       const copied = yield* sessions.messages({ sessionID: branch.id })
       const copiedQuestion = byText(copied, "SOURCE-QUESTION")
       const copiedPending = byText(copied, "SOURCE-PENDING-DO-NOT-EXECUTE")
       const history = yield* receipts(branch.id)
-      expect(history.find((row) => row.message_id === copiedQuestion.info.id)?.consumed).toBe(true)
-      expect(history.find((row) => row.message_id === copiedPending.info.id)?.state).toBe("cancelled")
+      expect(history.find((row) => row.input_message_id === copiedQuestion.info.id)?.consumed).toBe(true)
+      expect(history.find((row) => row.input_message_id === copiedPending.info.id)?.state).toBe("cancelled")
       yield* tq.reconcileOnBoot(branch.id)
       yield* Effect.sleep("25 millis")
       expect(yield* llm.calls).toBe(0)
@@ -145,7 +145,7 @@ describe("Session.fork queue history", () => {
       yield* tq.claimNext(lane, 1)
       yield* Effect.sync(() => Database.use((db) => db.update(InboxTable).set({ delivery_message_id: first.id })
         .where(eq(InboxTable.id, consumed.id)).run()))
-      yield* tq.ack(lane, question.id, [{ receiptId: consumed.id, outcome: "success", messageId: last.id }], 1)
+      yield* tq.ack(lane, question.id, [{ receiptId: consumed.id, outcome: "success" }], 1)
       for (const state of ["accepted", "claimed", "cancelled", "gap"] as const) {
         const pending = yield* user(source.id, `PENDING-${state}`)
         if (state === "gap") continue
@@ -178,14 +178,14 @@ describe("Session.fork queue history", () => {
       const mapped = history.find((row) => row.consumed)!
       expect(mapped.id).not.toBe(consumed.id)
       expect(mapped.epoch).toBe(0)
-      expect(mapped.message_id).toBe(byText(copied, "MULTI-STEP-QUESTION").info.id)
-      expect(mapped.message_id).toBe(byText(copied, "FINAL-ANSWER").info.id)
+      expect(mapped.input_message_id).toBe(byText(copied, "MULTI-STEP-QUESTION").info.id)
+      expect(mapped.input_message_id).toBe(byText(copied, "FINAL-ANSWER").info.id)
       expect(mapped.delivery_message_id).toBe(byText(copied, "FIRST-TOOL-STEP").info.id)
       expect(mapped.run_id).toBeNull()
       expect(history.filter((row) => !row.consumed)).toHaveLength(4)
       expect(history.filter((row) => !row.consumed).every((row) => row.state === "cancelled" && row.outcome === "never_ran")).toBe(true)
       expect(copied.filter((message) => message.info.role === "assistant").every((message) =>
-        message.info.role === "assistant" && message.info.parentID === mapped.message_id)).toBe(true)
+        message.info.role === "assistant" && message.info.parentID === mapped.input_message_id)).toBe(true)
       expect(snapshots).toHaveLength(14)
       expect(snapshots.every((snapshot) => snapshot.messages === 7 && snapshot.parts === 7 && snapshot.receipts === 5)).toBe(true)
       yield* tq.reconcileOnBoot(branch.id)
@@ -215,7 +215,7 @@ describe("Session.fork queue history", () => {
         yield* tq.claimNext(lane, 1)
         yield* Effect.sync(() => Database.use((db) => db.update(InboxTable).set({ delivery_message_id: delivery.id })
           .where(eq(InboxTable.id, receipt.id)).run()))
-        yield* tq.ack(lane, message.id, [{ receiptId: receipt.id, outcome: "success", messageId: finalStep.id }], 1)
+        yield* tq.ack(lane, message.id, [{ receiptId: receipt.id, outcome: "success" }], 1)
       }
       const branch = yield* sessions.fork({ sessionID: source.id })
       yield* Effect.addFinalizer(() => prompt.cancel(branch.id))
@@ -232,10 +232,10 @@ describe("Session.fork queue history", () => {
       const history = yield* receipts(truncated.id)
       expect(copied).toHaveLength(3)
       expect(history).toHaveLength(2)
-      expect(history.every((row) => row.consumed && row.state === "settled" && row.message_id === null)).toBe(true)
-      expect(history.find((row) => row.message_id === byText(copied, "FIRST-INPUT").info.id)?.delivery_message_id)
+      expect(history.every((row) => row.consumed && row.state === "settled" && row.input_message_id === null)).toBe(true)
+      expect(history.find((row) => row.input_message_id === byText(copied, "FIRST-INPUT").info.id)?.delivery_message_id)
         .toBe(byText(copied, "FIRST-STEP").info.id)
-      expect(history.find((row) => row.message_id === byText(copied, "LATE-INPUT").info.id)?.delivery_message_id).toBeNull()
+      expect(history.find((row) => row.input_message_id === byText(copied, "LATE-INPUT").info.id)?.delivery_message_id).toBeNull()
       yield* tq.reconcileOnBoot(truncated.id)
       expect(yield* tq.listAccepted({ sessionID: truncated.id, agentID: "main" })).toEqual([])
       expect(yield* llm.calls).toBe(1)
@@ -264,12 +264,12 @@ describe("Session.fork queue history", () => {
       const history = yield* receipts(branch.id)
       expect(history).toHaveLength(4)
       for (const text of ["LEGACY-PREFIX", "LEGACY-QUESTION"]) {
-        const row = history.find((row) => row.message_id === byText(copied, text).info.id)!
+        const row = history.find((row) => row.input_message_id === byText(copied, text).info.id)!
         expect(row.consumed).toBe(true)
-        expect(row.message_id).toBe(byText(copied, "LEGACY-ANSWER").info.id)
+        expect(row.input_message_id).toBe(byText(copied, "LEGACY-ANSWER").info.id)
       }
       for (const text of ["LEGACY-TOOL-ONLY", "POST-FREEZE-USER"]) {
-        const row = history.find((row) => row.message_id === byText(copied, text).info.id)!
+        const row = history.find((row) => row.input_message_id === byText(copied, text).info.id)!
         expect(row.consumed).toBe(false)
         expect(row.state).toBe("cancelled")
         expect(row.outcome).toBe("never_ran")

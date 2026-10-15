@@ -102,7 +102,7 @@ const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: Messag
       agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
     },
     parts: [],
-    intent: { messageID, type: "prompt" },
+    type: "prompt",
     idempotencyKey: messageID,
   })
 })

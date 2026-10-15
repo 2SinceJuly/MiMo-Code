@@ -64,16 +64,16 @@ describe("Inbox controller", () => {
           lane,
           message,
           parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
           idempotencyKey: message.id,
         })
         expect(receipt.state).toBe("accepted")
-        expect(receipt.intent.messageID).toBe(message.id)
-        expect(receipt.intent.type).toBe("prompt")
+        expect(receipt.inputMessageID).toBe(message.id)
+        expect(receipt.type).toBe("prompt")
         const row = Database.use((db) =>
           db.select().from(InboxTable).where(eq(InboxTable.id, receipt.id)).get(),
         )
-        expect(row?.message_id).toBe(message.id)
+        expect(row?.input_message_id).toBe(message.id)
         expect(row?.content).toBeNull()
         const laneRow = Database.use((db) =>
           db.select().from(InboxLaneStateTable)
@@ -100,14 +100,14 @@ describe("Inbox controller", () => {
             lane,
             message: a.message,
             parts: a.parts,
-            intent: { messageID: a.message.id, type: "prompt" },
+            type: "prompt",
             ...(keyed ? { idempotencyKey: "same-key" } : {}),
           })
           const r2 = yield* tq.accept({
             lane,
             message: keyed ? b.message : a.message,
             parts: keyed ? b.parts : a.parts,
-            intent: { messageID: (keyed ? b.message : a.message).id, type: "prompt" },
+            type: "prompt",
             ...(keyed ? { idempotencyKey: "same-key" } : {}),
           })
           expect(r2.id).toBe(r1.id)
@@ -131,12 +131,12 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const first = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
           idempotencyKey: "key-1",
         })
         const second = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
           idempotencyKey: "key-1",
         })
         expect(second.id).toBe(first.id)
@@ -158,12 +158,12 @@ describe("Inbox controller", () => {
           ids.push(message.id)
           yield* tq.accept({
             lane, message, parts,
-            intent: { messageID: message.id, type: "prompt" },
+            type: "prompt",
           })
         }
         const batch = yield* tq.claimNext(lane, 1)
         expect(batch?.receipts).toHaveLength(3)
-        expect(batch?.receipts.map((r) => r.intent.messageID)).toEqual(ids)
+        expect(batch?.receipts.map((r) => r.inputMessageID)).toEqual(ids)
         expect(batch?.receipts.every((r) => r.state === "claimed")).toBe(true)
         expect(batch?.claimFrontier).toBe(ids[2])
       }),
@@ -181,12 +181,12 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const receipt = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         const batch = yield* tq.claimNext(lane, 7)
         expect(batch?.receipts).toHaveLength(1)
         yield* tq.ack(lane, batch!.claimFrontier, [
-          { receiptId: receipt.id, outcome: "success", messageId: MessageID.ascending() },
+          { receiptId: receipt.id, outcome: "success" },
         ], 7)
         const settled = yield* tq.getReceipt(receipt.id)
         expect(settled.state).toBe("settled")
@@ -207,12 +207,12 @@ describe("Inbox controller", () => {
         const a = userMessage(session.id, "unread")
         const accepted = yield* tq.accept({
           lane, message: a.message, parts: a.parts,
-          intent: { messageID: a.message.id, type: "prompt" },
+          type: "prompt",
         })
         const b = userMessage(session.id, "claimed")
         const claimed = yield* tq.accept({
           lane, message: b.message, parts: b.parts,
-          intent: { messageID: b.message.id, type: "prompt" },
+          type: "prompt",
         })
         yield* tq.claimNext(lane, 1)
         const epoch = yield* tq.abortSession(session.id)
@@ -238,7 +238,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const receipt = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         const batch = yield* tq.claimNext(lane, 1)
         // Mark consumed via ack interrupted? No — consumed is set at ack.
@@ -265,7 +265,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         const rev = yield* tq.observeInput(lane, 0)
         expect(rev).toBeGreaterThan(0)
@@ -286,7 +286,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         const rev = yield* Fiber.join(fiber).pipe(Effect.timeout("5 seconds"))
         expect(rev).toBeGreaterThan(0)
@@ -305,7 +305,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const receipt = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         yield* tq.claimNext(lane, 1)
         yield* tq.reconcileOnBoot(session.id)
@@ -327,7 +327,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const receipt = yield* tq.accept({
           lane, message, parts,
-          intent: { messageID: message.id, type: "prompt" },
+          type: "prompt",
         })
         yield* tq.abortSession(session.id)
         const batch = yield* tq.claimNext(lane, 2, 1)
@@ -350,18 +350,18 @@ describe("Inbox controller", () => {
         const a = userMessage(session.id, "first")
         yield* tq.accept({
           lane, message: a.message, parts: a.parts,
-          intent: { messageID: a.message.id, type: "prompt" },
+          type: "prompt",
         })
         const first = yield* tq.claimNext(lane, 5)
         expect(first?.receipts).toHaveLength(1)
         const b = userMessage(session.id, "second")
         yield* tq.accept({
           lane, message: b.message, parts: b.parts,
-          intent: { messageID: b.message.id, type: "prompt" },
+          type: "prompt",
         })
         const extended = yield* tq.extendClaim(lane, 5)
         expect(extended?.receipts).toHaveLength(1)
-        expect(extended?.receipts[0]?.intent.messageID).toBe(b.message.id)
+        expect(extended?.receipts[0]?.inputMessageID).toBe(b.message.id)
       }),
     ),
   )
@@ -379,7 +379,7 @@ describe("Inbox controller", () => {
         const { message, parts } = userMessage(session.id)
         const result = yield* tq
           .accept(
-            { lane, message, parts, intent: { messageID: message.id, type: "prompt" } },
+            { lane, message, parts, type: "prompt" },
             { expectedEpoch: epoch },
           )
           .pipe(Effect.exit)

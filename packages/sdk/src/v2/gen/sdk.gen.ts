@@ -4219,7 +4219,7 @@ export class Sync extends HeyApiClient {
           content: {
             text?: string
           } | null
-          message_id: string | null
+          input_message_id: string | null
           state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
           epoch: number
           run_id: number | null

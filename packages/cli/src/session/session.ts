@@ -816,36 +816,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
         const msgs = Array.from(MessageV2.stream(input.sessionID, { agentID: "*" })).reverse()
         const copied = msgs.filter((msg) => !input.messageID || msg.info.id < input.messageID)
         const idMap = new Map(copied.map((msg) => [msg.info.id, MessageID.ascending()]))
-        const receipts = tx.select().from(InboxTable)
-          .where(eq(InboxTable.receiver_session_id, input.sessionID)).orderBy(InboxTable.id).all()
         const now = Date.now()
-        const receiptID = monotonicFactory()
-        for (const row of receipts) {
-          if (!row.message_id) continue
-          const messageID = idMap.get(row.message_id)
-          if (!messageID) continue
-          tx.insert(InboxTable).values({
-            id: receiptID(),
-            receiver_session_id: session.id,
-            receiver_actor_id: row.receiver_actor_id,
-            sender_session_id: row.sender_session_id,
-            sender_actor_id: row.sender_actor_id,
-            type: row.type,
-            content: null,
-            message_id: messageID,
-            state: row.consumed ? "settled" : "cancelled",
-            epoch: 0,
-            run_id: null,
-            claim_frontier: row.consumed && row.claim_frontier ? idMap.get(row.claim_frontier) ?? null : null,
-            consumed: row.consumed,
-            outcome: row.consumed ? row.outcome : "never_ran",
-            delivery_message_id: row.delivery_message_id ? idMap.get(row.delivery_message_id) ?? null : null,
-            error: row.consumed ? row.error : null,
-            idempotency_key: row.idempotency_key,
-            created_at: now,
-            time_updated: now,
-          }).run()
-        }
         for (const msg of copied) {
           const info = { ...msg.info, sessionID: session.id, id: idMap.get(msg.info.id)! }
           if (info.role !== "user") {

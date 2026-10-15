@@ -3,9 +3,9 @@ import { SessionTable } from "../session/session.sql"
 import type { SessionID, MessageID } from "../session/schema"
 
 /**
- * Per-lane input queue. Prompt rows carry `message_id` (the accepted user
- * message) and no `content`; legacy/agent rows may still carry `content` and
- * a null `message_id` until phase-2 accept conversion.
+ * Per-lane input queue. Prompt rows carry `input_message_id` (the accepted user
+ * message) and no `content`; legacy rows may still carry `content` and a null
+ * `input_message_id` until accept conversion.
  */
 export const InboxTable = sqliteTable(
   "inbox",
@@ -21,7 +21,7 @@ export const InboxTable = sqliteTable(
     type: text().notNull().default("text"),
     /** Legacy-format rows only; new accepts never store the body here. */
     content: text({ mode: "json" }).$type<{ text?: string } | null>(),
-    message_id: text().$type<MessageID>(),
+    input_message_id: text().$type<MessageID>(),
     state: text()
       .$type<"accepted" | "claimed" | "settled" | "cancelled" | "rejected">()
       .notNull()

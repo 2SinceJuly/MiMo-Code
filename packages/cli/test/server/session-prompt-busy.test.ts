@@ -112,7 +112,7 @@ function epoch(sessionID: SessionID) {
 async function accepted(http: Http, sessionID: SessionID, response: Response, messageID: MessageID) {
   expect(response.status).toBe(202)
   // Check SQLite without yielding after the response: background admission must not repair a premature 202.
-  const persisted = rows(sessionID).filter((row) => row.message_id === messageID)
+  const persisted = rows(sessionID).filter((row) => row.input_message_id === messageID)
   expect(persisted).toHaveLength(1)
   const message = Database.use((db) => db.select().from(MessageTable).where(eq(MessageTable.id, messageID)).get())
   expect(message?.session_id).toBe(sessionID)
@@ -124,8 +124,8 @@ async function accepted(http: Http, sessionID: SessionID, response: Response, me
   const receipt = await http.receipt(sessionID, body.receiptId)
   expect(receipt.id).toBe(body.receiptId)
   expect(receipt.lane).toEqual({ sessionID, agentID: "main" })
-  expect(receipt.intent.messageID).toBe(messageID)
-  expect(receipt.intent.type).toBe("prompt")
+  expect(receipt.inputMessageID).toBe(messageID)
+  expect(receipt.type).toBe("prompt")
   return receipt
 }
 
@@ -168,7 +168,7 @@ async function controlled(http: Http, llm: TestLLMServer["Service"], sessionID: 
   )
   expect([200, 202]).toContain(response.status)
   await started(llm, text)
-  const persisted = rows(sessionID).filter((row) => row.message_id === messageID)
+  const persisted = rows(sessionID).filter((row) => row.input_message_id === messageID)
   expect(persisted).toHaveLength(1)
   expect(persisted[0].state).toBe("claimed")
   return { response, release: () => gate.resolve(), receiptId: persisted[0].id, messageID }
@@ -307,7 +307,7 @@ describe("HTTP Inbox admission", () => {
             .flatMap((message) => message.parts)
             .some((part) => part.type === "text" && part.text === "async HTTP answer"),
         ).toBe(true)
-        expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
+        expect(rows(session.id).filter((row) => row.input_message_id === messageID)).toHaveLength(1)
       }),
     30_000,
   )
@@ -341,7 +341,7 @@ describe("HTTP Inbox admission", () => {
               .flatMap((message) => message.parts)
               .some((part) => part.type === "text" && part.text === "queued HTTP answer"),
           ).toBe(true)
-          expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
+          expect(rows(session.id).filter((row) => row.input_message_id === messageID)).toHaveLength(1)
         } finally {
           first.release()
         }
@@ -350,11 +350,11 @@ describe("HTTP Inbox admission", () => {
   )
 
   test(
-    "interjected prompt delivered to the model publishes deliveryMessageId and exposes it on the public GET receipt",
+    "interjected prompt delivered to the model publishes deliveryMessageID and exposes it on the public GET receipt",
     () =>
       fixture(async (http, llm) => {
         const session = await http.session()
-        const events: Array<{ deliveryMessageId?: string; receiptId: string; state: string }> = []
+        const events: Array<{ deliveryMessageID?: string; receiptId: string; state: string }> = []
         const listener = (event: GlobalEvent) => {
           const payload = event.payload
           if (payload.type !== "session.receipt.updated") return
@@ -362,7 +362,7 @@ describe("HTTP Inbox admission", () => {
           events.push({
             receiptId: payload.properties.receiptId,
             state: payload.properties.state,
-            deliveryMessageId: payload.properties.deliveryMessageId,
+            deliveryMessageID: payload.properties.deliveryMessageID,
           })
         }
         GlobalBus.on("event", listener)
@@ -378,7 +378,7 @@ describe("HTTP Inbox admission", () => {
               parts: [{ type: "text", text }],
             })
             const queued = await accepted(http, session.id, response, messageID)
-            expect(queued.deliveryMessageId).toBeUndefined()
+            expect(queued.deliveryMessageID).toBeUndefined()
             first.release()
             await started(llm, text)
             // Wait for the answering assistant step to land before reading the anchor.
@@ -388,21 +388,21 @@ describe("HTTP Inbox admission", () => {
             ).then((messages) => answered(messages, "interjected HTTP answer")!)
             const delivered = await until(
               () => http.receipt(session.id, queued.id),
-              (value) => value.deliveryMessageId !== undefined,
+              (value) => value.deliveryMessageID !== undefined,
             )
-            // deliveryMessageId is the first assistant step that read this input.
-            expect(delivered.deliveryMessageId).toBe(answer.info.id)
+            // deliveryMessageID is the first assistant step that read this input.
+            expect(delivered.deliveryMessageID).toBe(answer.info.id)
             const { raw, parsed } = await http.publicReceipt(session.id, queued.id)
-            expect(parsed.deliveryMessageId).toBe(answer.info.id)
+            expect(parsed.deliveryMessageID).toBe(answer.info.id)
             for (const internal of ["runId", "claimFrontier", "idempotencyKey", "time"] as const)
               expect(raw).not.toHaveProperty(internal)
             await settled(http, session.id, queued.id)
             await settled(http, session.id, first.receiptId)
             const anchor = await until(
-              async () => events.find((event) => event.receiptId === queued.id && event.deliveryMessageId !== undefined),
+              async () => events.find((event) => event.receiptId === queued.id && event.deliveryMessageID !== undefined),
               (value) => value !== undefined,
             )
-            expect(anchor!.deliveryMessageId).toBe(answer.info.id)
+            expect(anchor!.deliveryMessageID).toBe(answer.info.id)
             expect(anchor!.state).toBe("claimed")
           } finally {
             first.release()
@@ -464,7 +464,7 @@ describe("HTTP abort and transport ownership", () => {
             await settled(http, session.id, current.id)
             // A later successful turn must not claim or unsuspend an old-epoch receipt.
             expect(await http.receipt(session.id, receipt.id)).toEqual(cancelled)
-            expect(rows(session.id).filter((row) => row.message_id === messageID)).toHaveLength(1)
+            expect(rows(session.id).filter((row) => row.input_message_id === messageID)).toHaveLength(1)
           } finally {
             first.release()
           }
