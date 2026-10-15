@@ -1958,13 +1958,27 @@ it.live("uses the frozen system and appends the compaction prompt to the existin
   ),
 )
 
-it.live("provider-overflow compaction uses its configured model and strips media", () =>
+it.live("provider-overflow compaction uses its configured model and keeps replayed media", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const compaction = yield* SessionCompaction.Service
       const chat = yield* sessions.create({ title: "Overflow compaction" })
+      const imageSource = {
+        type: "file" as const,
+        path: "/tmp/example/large.png",
+        text: { value: "", start: 0, end: 0 },
+      }
+      // Overflow replay only fires when earlier user content remains after the
+      // replayed message is taken out of the summarization history.
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "earlier context" }],
+      })
       yield* prompt.prompt({
         sessionID: chat.id,
         agent: "build",
@@ -1972,7 +1986,13 @@ it.live("provider-overflow compaction uses its configured model and strips media
         noReply: true,
         parts: [
           { type: "text", text: "inspect this image" },
-          { type: "file", mime: "image/png", url: "data:image/png;base64,QUFBQQ==", filename: "large.png" },
+          {
+            type: "file",
+            mime: "image/png",
+            url: mcpErrorImageURL,
+            filename: "large.png",
+            source: imageSource,
+          },
         ],
       })
       yield* compaction.create({
@@ -1997,16 +2017,54 @@ it.live("provider-overflow compaction uses its configured model and strips media
       const request = (yield* llm.inputs)[0]
       expect(request.model).toBe(mcpRef.modelID)
       expect(request.messages).toBeArray()
-      if (!Array.isArray(request.messages)) return
-      expect(JSON.stringify(request.messages[0])).not.toContain("You have been working on the task described above")
-      expect(JSON.stringify(request.messages.at(-1))).toContain("1. Task Overview")
-      expect(JSON.stringify(request)).toContain("[Attached image/png: large.png]")
-      expect(JSON.stringify(request)).not.toContain("QUFBQQ==")
+      if (Array.isArray(request.messages)) {
+        expect(JSON.stringify(request.messages[0])).not.toContain("You have been working on the task described above")
+        expect(JSON.stringify(request.messages.at(-1))).toContain("1. Task Overview")
+      }
+      expect(JSON.stringify(request)).not.toContain(mcpErrorImage)
+
+      // The prompt path persists `source`; the replayed user message must keep
+      // the media file part (including source) verbatim.
+      const after = yield* sessions.messages({ sessionID: chat.id })
+      const userMessages = after.filter((message) => message.info.role === "user")
+      const originalFile = userMessages
+        .find((message) => message.info.id !== userMessages.at(-1)!.info.id && message.parts.some((part) => part.type === "file"))!
+        .parts.find((part) => part.type === "file")
+      expect(originalFile?.type).toBe("file")
+      if (originalFile?.type === "file") expect(originalFile.source).toEqual(imageSource)
+      const replayed = userMessages.at(-1)!
+      expect(replayed.parts.some((part) => part.type === "text" && part.text.includes("[Attached image/png"))).toBe(false)
+      const replayedFile = replayed.parts.find((part) => part.type === "file")
+      expect(replayedFile?.type).toBe("file")
+      expect(replayedFile?.source).toEqual(imageSource)
+      if (replayedFile?.type === "file") {
+        expect(replayedFile.mime).toBe("image/png")
+        expect(replayedFile.filename).toBe("large.png")
+        expect(replayedFile.url).toBe(mcpErrorImageURL)
+      }
+
+      // The next model turn for the replayed message sends the image on the wire.
+      yield* llm.text("continued")
+      yield* prompt.loop({ sessionID: chat.id })
+      const followUp = (yield* llm.inputs).at(-1)!
+      const followUpSerialized = JSON.stringify(followUp)
+      expect(followUpSerialized).toContain(mcpErrorImage)
+      expect(followUpSerialized).not.toContain("[Attached image/png")
+      expect(followUp).toMatchObject({
+        messages: expect.arrayContaining([
+          {
+            role: "user",
+            content: expect.arrayContaining([
+              expect.objectContaining({ type: "image_url", image_url: { url: mcpErrorImageURL } }),
+            ]),
+          },
+        ]),
+      })
     }),
     {
       git: true,
       config: (url) => ({
-        ...providerCfg(url),
+        ...mediaProviderCfg(url),
         agent: { compaction: { model: "test/gpt-5-test" } },
       }),
     },

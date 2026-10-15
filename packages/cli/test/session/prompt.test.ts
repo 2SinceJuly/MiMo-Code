@@ -717,6 +717,99 @@ describe("session.prompt user image attachment envelope", () => {
     expect(text).toContain("Do not infer a local path from the filename")
   })
 
+  test("image envelope derives the local path from a file url when source is absent", () => {
+    const text = userImageAttachmentEnvelope([
+      { filename: "team.png", mime: "image/png", url: "file:///tmp/example/team.png" },
+    ])
+    expect(text).toContain("- team.png (image/png)")
+    expect(text).toContain('Local path: "/tmp/example/team.png"')
+    expect(text).not.toContain("No local file path provided")
+  })
+
+  test("image envelope keeps the fallback for a data url without a local path", () => {
+    const text = userImageAttachmentEnvelope([
+      { filename: "team.png", mime: "image/png", url: "data:image/png;base64,AA==" },
+    ])
+    expect(text).toContain("- team.png (image/png)")
+    expect(text).toContain("No local file path provided; view the attached image directly.")
+    expect(text).not.toContain("Local path:")
+  })
+
+  test("image envelope prefers an absolute source.path over the file url", () => {
+    const text = userImageAttachmentEnvelope([
+      {
+        filename: "team.png",
+        mime: "image/png",
+        url: "file:///tmp/example/other.png",
+        source: { type: "file", path: "/tmp/example/team.png" },
+      },
+    ])
+    expect(text).toContain('Local path: "/tmp/example/team.png"')
+    expect(text).not.toContain("other.png")
+    expect(text).not.toContain("No local file path provided")
+  })
+
+  test("image envelope lists filename and mime without paste-marker prefixes", () => {
+    const text = userImageAttachmentEnvelope([
+      {
+        filename: "sidebar.png",
+        mime: "image/png",
+        source: {
+          type: "file",
+          path: path.resolve("/tmp/example/sidebar.png"),
+          text: { value: "[Image: sidebar.png]" },
+        },
+      },
+      {
+        filename: "diagram.pdf",
+        mime: "application/pdf",
+        source: {
+          type: "file",
+          path: path.resolve("/tmp/example/diagram.pdf"),
+          text: { value: "[PDF: diagram.pdf]" },
+        },
+      },
+    ])
+    expect(text).toContain("- sidebar.png (image/png)")
+    expect(text).toContain("- diagram.pdf (application/pdf)")
+    expect(text).not.toContain("- [Image")
+    expect(text).not.toContain("- [PDF")
+    expect(text).toContain("identify the listed attachment with the same file name")
+    expect(text).toContain("use that name or the local path")
+  })
+
+  test("image envelope keeps the entry shape when source.text is absent", () => {
+    const withSourceNoText = userImageAttachmentEnvelope([
+      {
+        filename: "team.png",
+        mime: "image/png",
+        source: { type: "file", path: path.resolve("/tmp/example/team.png") },
+      },
+    ])
+    expect(withSourceNoText).toContain("- team.png (image/png)")
+    expect(withSourceNoText).not.toContain("- [Image")
+    expect(withSourceNoText).not.toContain("- [PDF")
+
+    const noSource = userImageAttachmentEnvelope([{ filename: "team.png", mime: "image/png" }])
+    expect(noSource).toContain("- team.png (image/png)")
+    expect(noSource).not.toContain("- [Image")
+
+    const fileChip = userImageAttachmentEnvelope([
+      {
+        filename: "team.png",
+        mime: "image/png",
+        source: {
+          type: "file",
+          path: path.resolve("/tmp/example/team.png"),
+          text: { value: "@team.png" },
+        },
+      },
+    ])
+    expect(fileChip).toContain("- team.png (image/png)")
+    expect(fileChip).not.toContain("- @team.png")
+    expect(fileChip).not.toContain("- [Image")
+  })
+
   test("[TP-R3-07] isUserAttachmentImagePart excludes MCP resource / synthetic; accepts file:// and data:", () => {
     expect(isUserAttachmentImagePart({ type: "file", mime: "image/png" })).toBe(true)
     expect(isUserAttachmentImagePart({ type: "file", mime: "IMAGE/PNG" })).toBe(true)
@@ -1147,6 +1240,71 @@ describe("session.prompt special characters", () => {
 })
 
 describe("session.prompt regression", () => {
+  test("attachment-only message keeps caller system when parts are synthetic", async () => {
+    await using tmp = await tmpdir({
+      git: true,
+      config: { agent: { build: { model: "openai/gpt-5.2" } } },
+      init: async (dir) => {
+        await Bun.write(path.join(dir, "pack.zip"), "PK\x03\x04")
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const system = "readNote: open /tmp/example/doc.pdf first"
+            const zipUrl = pathToFileURL(path.join(tmp.path, "pack.zip")).href
+            const missing = path.join(tmp.path, "note.txt")
+
+            // text/plain attachment expands to synthetic read text only.
+            const allSynthetic = yield* sessions.create({})
+            const syntheticMsg = yield* prompt.prompt({
+              sessionID: allSynthetic.id,
+              agent: "build",
+              noReply: true,
+              system,
+              parts: [
+                {
+                  type: "file",
+                  mime: "text/plain",
+                  url: pathToFileURL(missing).href,
+                  filename: "note.txt",
+                },
+              ],
+            })
+            if (syntheticMsg.info.role !== "user") throw new Error("expected user message")
+            const syntheticInfo = syntheticMsg.info
+            expect(syntheticInfo.system).toBe(system)
+            const storedSynthetic = MessageV2.get({ sessionID: allSynthetic.id, messageID: syntheticMsg.info.id })
+            expect(storedSynthetic.info.role === "user" && storedSynthetic.info.system).toBe(system)
+            // Synthetic-only traffic must not pin the session prompt.
+            expect((yield* sessions.get(allSynthetic.id)).prompt).toBeUndefined()
+
+            const mixed = yield* sessions.create({})
+            const mixedMsg = yield* prompt.prompt({
+              sessionID: mixed.id,
+              agent: "build",
+              noReply: true,
+              system,
+              parts: [
+                { type: "text", text: "", synthetic: true },
+                { type: "file", mime: "application/zip", url: zipUrl, filename: "pack.zip" },
+              ],
+            })
+            if (mixedMsg.info.role !== "user") throw new Error("expected user message")
+            const mixedInfo = mixedMsg.info
+            expect(mixedInfo.system).toBe(system)
+
+            yield* sessions.remove(allSynthetic.id)
+            yield* sessions.remove(mixed.id)
+          }),
+        ),
+    })
+  })
+
   test("does not loop empty assistant turns for a simple reply", async () => {
     let calls = 0
     const server = Bun.serve({
