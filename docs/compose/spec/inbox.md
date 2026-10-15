@@ -33,7 +33,7 @@ updated: 2026-09-26
 | `sender_actor_id` | text | 发送方 actor |
 | `type` | text NOT NULL default `'text'` | 输入类型 |
 | `content` | text NULL | 仅旧格式行；新行不存正文 |
-| `message_id` | text | 受理时写入的 user 消息 ID |
+| `input_message_id` | text | 受理时写入的 user 消息 ID |
 | `state` | text NOT NULL default `'accepted'` | `accepted` \| `claimed` \| `settled` \| `cancelled` \| `rejected` |
 | `epoch` | integer NOT NULL default 0 | 受理时的会话 epoch |
 | `run_id` | integer | 认领运行 ID |
@@ -79,7 +79,7 @@ updated: 2026-09-26
 
 `packages/cli/migration/<ts>_inbox_queue/migration.sql`（`<ts>` 晚于已发布的最新迁移 `20261012000000_history_cjk_unigram`）：
 
-1. 表重建 `inbox`：建 `inbox_new`（上表列）→ 把旧行拷入（`content` 保留、`message_id` 置 NULL、`state='accepted'`、`time_updated=created_at`）→ 丢旧表 → 改名 → 建四个索引。
+1. 表重建 `inbox`：建 `inbox_new`（上表列）→ 把旧行拷入（`content` 保留、`input_message_id` 置 NULL、`state='accepted'`、`time_updated=created_at`）→ 丢旧表 → 改名 → 建四个索引。
 2. 建 `inbox_lane_state`、`inbox_session_epoch`。
 3. 不写清理 `turn_receipt` / `turn_lane_state` / `turn_session_epoch` / `turn_legacy_bootstrap` 的语句（那四个表与两个迁移目录从未发布，当从不存在，直接删掉目录即可）。
 
@@ -103,7 +103,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 一个事务内完成：
 
 1. 把输入写成接收方切片的一条 user 消息。agent 发来的标记 `synthetic`，并带发送方 provenance。synthetic 消息的 `agent`/`model` 在受理时按接收方确定（`resolveDrainSeed` 语义：standing peer 跨切片搜索；workflow 父 agent 只搜本切片，防止子 actor 通知凭空产生真实回合）。
-2. 写一行 inbox 记录：`state=accepted`、`epoch`、`message_id` 指向该消息、幂等键、`type`、发送方。
+2. 写一行 inbox 记录：`state=accepted`、`epoch`、`input_message_id` 指向该消息、幂等键、`type`、发送方。
 3. 递增该 lane 的 `input_revision`。
 
 事务提交后发布 `session.receipt.updated`。lane 空闲时经唯一调度路径（`schedulerRef.kick`）启动执行。
@@ -143,17 +143,30 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 | `POST /session/:id/message` | 受理。busy 不 409。认领开始且客户端仍连接 → **200 stream**；否则 **202** + `{ receiptId }` 并结束响应 |
 | `GET /session/:id/receipt/:receiptId` | 返回 `PublicReceipt` 投影 |
 | `POST /session/:id/abort` | 响应 `{ epoch }` |
-| 事件 | `session.receipt.updated` `{ sessionID, receiptId, agentID, state, outcome?, messageId?, deliveryMessageId?, epoch }` |
+| 事件 | `session.receipt.updated` `{ sessionID, receiptId, agentID, state, outcome?, inputMessageID, deliveryMessageID?, epoch }` |
 
-`PublicReceipt` 字段：`id`、`lane`、`state`、`intent`、`epoch`、`consumed`、`outcome?`、`messageId?`、`deliveryMessageId?`、`error?`。内部记账（`runId`、`claimFrontier`、`idempotencyKey`、`time`）不进外部契约。
+`PublicReceipt` 字段：`id`、`lane`、`state`、`type`、`senderSessionID?`、`senderActorID?`、`epoch`、`consumed`、`outcome?`、`inputMessageID`、`deliveryMessageID?`、`error?`。内部记账（`runId`、`claimFrontier`、`idempotencyKey`、`time`）不进外部契约。
 
-`intent` 只有一种形状：`{ messageID, type, senderSessionID?, senderActorID? }`，`messageID` 是受理时写入的 user 消息。inbox 记录只承载输入，resume 与 shell 是独占入口（C-03），不写 inbox 记录，因此没有 resume、shell、wake 意图。
+每条记录只承载一条输入，字段直接平铺在回执上，没有 `intent` 包装。resume 与 shell 是独占入口（C-03），不写 inbox 记录，因此不存在 resume、shell、wake 类型。
 
-`deliveryMessageId` 是首次读入该输入的 model-step assistant 消息，只写一次；`session.receipt.updated` 在写入时发布。OpenAPI 响应 schema 与 HTTP body 共用 `PublicReceipt` zod 单源。
+记录只引用两条消息：
+
+- `inputMessageID`：受理时写入的 user 消息。客户端用它把回执关联到消息。
+- `deliveryMessageID`：首次读入该输入的 model-step assistant 消息，只写一次；引擎渲染上下文时用它确定输入的位置，客户端用它判断输入已被消费。写入时发布 `session.receipt.updated`。
+
+结算（ack）只写 `state` / `outcome` / `error`，不记录任何消息 ID。OpenAPI 响应 schema 与 HTTP body 共用 `PublicReceipt` zod 单源。
+
+## fork
+
+fork 的目的是让新会话继承原会话的 prefix cache，所以新会话渲染出的上下文必须与原会话逐条一致。
+
+复制消息时按原会话渲染给模型的顺序写入：先按「可见性」过滤，再按 `delivery_message_id` 把已消费的输入移到对应 delivery 消息之前，然后按这个顺序为每条消息分配递增的新 MessageID（消息 ID 是全局主键，必须换新），assistant 的 `parentID` 指向对应的新 ID。仍在排队的输入（accepted 或 claimed 未消费）按受理顺序排在末尾。`messageID` 截断点按渲染顺序计算：只复制渲染序列中该消息之前的部分。
+
+fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会话里的消息全部是没有 inbox 记录的普通历史，按可见性规则对模型可见，原始 ID 顺序即渲染顺序。
 
 ## 已发布数据
 
-用户机器上可能存在旧格式待处理 inbox 行（有 `content`、无 `message_id`）。inbox 服务启动时把它们转为新模型：用与受理相同的写消息逻辑把 `content` 渲染为一条 synthetic user 消息，写入 `message_id` 并清空 `content`，`state` 保持 `accepted`、`input_revision` 照增。这是唯一的转换实现；`content` 列只为这些旧行保留为可空，新行永远为空。渲染为空白的旧行直接结算为 `rejected`。
+用户机器上可能存在旧格式待处理 inbox 行（有 `content`、无 `input_message_id`）。inbox 服务启动时把它们转为新模型：用与受理相同的写消息逻辑把 `content` 渲染为一条 synthetic user 消息，写入 `input_message_id` 并清空 `content`，`state` 保持 `accepted`、`input_revision` 照增。这是唯一的转换实现；`content` 列只为这些旧行保留为可空，新行永远为空。渲染为空白的旧行直接结算为 `rejected`。
 
 ## GC
 
@@ -181,7 +194,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 ### `packages/cli/src/tool/actor.ts`
 
-- `inboxServiceRef.current.send` 改 `accept`；返回值给 `messageID`（intent）与 `inboxID`。
+- `inboxServiceRef.current.send` 改 `accept`；返回值给 `inputMessageID` 与 `inboxID`。
 - `InboxReceiverNotFound` 错误分支保留。
 
 ### `packages/cli/src/session/prompt.ts`
@@ -190,9 +203,14 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 - 删掉 `inbox.drain` 全部调用（约 862、4610、4735、6228 行）及 `deferInbox` 分叉；步骤边界改为 `claimNext` / `extendClaim`。
 - 认领可见性过滤（约 4766–4785 行）改为按 inbox 记录状态判断：accepted 未认领或其他运行 claimed 的消息隐藏；其余可见。
 - `recordDelivery` 写 `delivery_message_id`，事件在事务提交后发布。
+- 运行结束结算（ack）不再传 `messageId`。
 - `abortSession` 去掉 `queuedPolicy`；`cancel` 不再收 `AbortPolicy`。
 - `waitForSubagents` 与显式 `actor.wait` 都用 `observeInput` 解除；任一输入唤醒。
 - 删掉 `requireClaim` / `inboxWake` / `LoopInput` 相关字段与分叉（约 3536、6155、6227、7372、7546、7548 行）。
+
+### `packages/cli/src/session/session.ts`
+
+- `fork` 按「fork」一节改写：按渲染顺序复制消息，不复制 inbox 记录。
 
 ### 服务端路由 `packages/cli/src/server/routes/instance/session.ts`
 
@@ -220,7 +238,9 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 | `packages/cli/src/turn-queue/` | 整个模块（`controller.ts`、`schema.ts`、`events.ts`、`scheduler.ts`、`sync.ts`、`turn-queue.sql.ts`、`turn-queue-ref.ts`、`index.ts`） |
 | `packages/cli/src/inbox/inbox.ts` | `send` 里的 `promptRef.loop` / `inboxWake` / `requireClaim` 分叉、`wake` 意图、`inboxWatermark` 合并、`MAX_DRAIN_PER_TURN`、`drain` 及其手工回滚、`InboxArrived` 发布（`actor/events.ts` 中的定义一并删，无订阅方） |
 | `packages/cli/src/turn-queue/schema.ts` | `WakeIntent`、`ResumeIntent`、`ShellIntent`（后两者从未被受理）、`isCoalescable`、`intentRank`、`AbortPolicy`、`suspended` 字段 |
-| `packages/cli/src/session/session.ts` | `persistQueuedUser`（并入 `inbox.accept`） |
+| `packages/cli/src/session/session.ts` | `persistQueuedUser`（并入 `inbox.accept`）；`fork` 中复制 inbox 记录与 `idMap` 改写记录字段的整段 |
+| `packages/cli/src/inbox/controller.ts` | ack 的 `messageId` 参数及其写入 `delivery_message_id` 的 `coalesce` |
+| 回执投影与事件 | `intent` 包装、`messageId` 字段 |
 | `packages/cli/src/session/message-v2.ts` | user 消息的 `queueAdmission` 字段 |
 | `packages/cli/src/server/routes/instance/session.ts` | abort 的 `queuedPolicy` |
 | `packages/cli/src/session/prompt.ts` | `requireClaim` / `inboxWake` / `deferInbox` / `inbox.drain` 调用 / `queuedPolicy` |
@@ -236,11 +256,12 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 | (d) | 停止后未读输入 | prompt 与通知为 `never_ran`；不自动执行；下一次运行时对模型可见 |
 | (e) | 排队中输入不可见 | accepted 未认领的输入在认领前对模型隐藏 |
 | (f) | 进程重启 | 待处理 inbox 记录不丢，boot 后仍可认领 |
-| (g) | 旧格式 inbox 行 | 有 `content` 无 `message_id` 的行转为 synthetic user 消息并被引用 |
+| (g) | 旧格式 inbox 行 | 有 `content` 无 `input_message_id` 的行转为 synthetic user 消息并被引用 |
 | (h) | 跨会话投递接收方不存在 | 报 `InboxReceiverNotFound` |
 | (i) | workflow 父 agent 收到子 agent 通知 | 不凭空产生真实回合（`resolveDrainSeed` 切片范围回归） |
 | (j) | 压缩溢出后续跑 | `test/session/turn-queue-admission.test.ts:740` 场景 |
-| (k) | `deliveryMessageId` 与回执事件 | `test/server/session-prompt-busy.test.ts:356` 场景 |
+| (k) | `deliveryMessageID` 与回执事件 | `test/server/session-prompt-busy.test.ts:356` 场景 |
 | (l) | 旧格式行渲染为空 | 启动转换时结算为 `rejected`，不写空消息 |
 | (m) | GC | 已结算记录在 `time_updated` 后 7 天清理；`accepted`/`claimed` 不清理 |
+| (n) | fork 继承上下文 | 原会话含插话（输入受理早于 delivery）时，fork 后新会话渲染的消息序列与原会话逐条一致（角色、内容、顺序）；新会话无 inbox 记录；按 `messageID` 截断时按渲染顺序截断 |
 
