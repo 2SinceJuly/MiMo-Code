@@ -16,6 +16,7 @@ import { AppLayer } from "../../src/effect/app-runtime"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { SessionRunState } from "../../src/session/run-state"
 import { SessionStatus } from "../../src/session/status"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
@@ -92,16 +93,22 @@ const until = <E, R>(condition: Effect.Effect<boolean, E, R>) =>
     while (!(yield* condition)) yield* Effect.sleep("10 millis")
   }).pipe(Effect.timeout("5 seconds"))
 
-const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
+// One Inbox.accept, as a client prompt does: the message (with its own
+// client-allocated id and format) and its inbox record are written together.
+const acceptUser = Effect.fn(function* (
+  sessionID: SessionID,
+  text: string,
+  format?: MessageV2.User["format"],
+  messageID = MessageID.ascending(),
+) {
+  const sessions = yield* Session.Service
   const tq = yield* InboxController.Service
+  const original = (yield* sessions.messages({ sessionID })).find((message) => message.info.role === "user")
+  if (!original || original.info.role !== "user") throw new Error("initial user missing")
   return yield* tq.accept({
     lane: { sessionID, agentID: "main" },
-    message: {
-      id: messageID, sessionID, agentID: "main", role: "user",
-      time: { created: Date.now() },
-      agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
-    },
-    parts: [],
+    message: { ...original.info, id: messageID, time: { created: Date.now() }, format },
+    parts: [{ id: PartID.ascending(), sessionID, messageID, type: "text", text }],
     type: "prompt",
     idempotencyKey: messageID,
   })
@@ -412,7 +419,7 @@ describe("main automatically waits for subagent executions", () => {
             .prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "Current claimed U1." }] })
             .pipe(Effect.forkChild)
           yield* Deferred.await(entered).pipe(Effect.timeout("5 seconds"))
-          const wake = yield* admitPrompt(session.id, MessageID.ascending())
+          const wake = yield* acceptUser(session.id, "ACCEPTED-AT-EXTENSION")
           yield* Deferred.succeed(release, undefined)
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
@@ -431,7 +438,7 @@ describe("main automatically waits for subagent executions", () => {
   )
 
   it.live(
-    "a user persisted before assistant creation but admitted during its LLM call needs a new model answer",
+    "an input whose id predates the assistant but is accepted during its LLM call needs a new model answer",
     provideTmpdirServer(
       ({ llm }) =>
         Effect.gen(function* () {
@@ -474,15 +481,8 @@ describe("main automatically waits for subagent executions", () => {
             (message) => message.info.role === "user",
           )
           if (!original || original.info.role !== "user") throw new Error("initial user missing")
+          // Client-allocated before the assistant exists, sent only later.
           const messageID = MessageID.ascending()
-          yield* sessions.updateMessage({ ...original.info, id: messageID, time: { created: Date.now() } })
-          yield* sessions.updatePart({
-            id: PartID.ascending(),
-            sessionID: session.id,
-            messageID,
-            type: "text",
-            text: "U2 must receive its own answer.",
-          })
           yield* Deferred.succeed(snapshot, undefined)
           yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
           expect(JSON.stringify((yield* llm.inputs)[0]?.messages)).not.toContain("U2 must receive its own answer.")
@@ -492,7 +492,7 @@ describe("main automatically waits for subagent executions", () => {
           if (!assistant || assistant.info.role !== "assistant") throw new Error("initial assistant missing")
           expect(messageID < assistant.info.id).toBe(true)
           expect(assistant.info.parentID).toBe(original.info.id)
-          const receipt = yield* admitPrompt(session.id, messageID)
+          const receipt = yield* acceptUser(session.id, "U2 must receive its own answer.", undefined, messageID)
           response.resolve()
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
           yield* waiting(session.id)
@@ -585,56 +585,6 @@ describe("main automatically waits for subagent executions", () => {
           expect(result.parts.some((part) => part.type === "text" && part.text === "STEERED-FINAL")).toBe(true)
           expect(yield* waitState(session.id)).toBeUndefined()
           expect(yield* llm.calls).toBe(3)
-        }),
-      { git: true, config },
-    ),
-    20000,
-  )
-
-  it.live(
-    "a persisted user beyond the claim frontier cannot bypass child waiting before admission",
-    provideTmpdirServer(
-      ({ llm }) =>
-        Effect.gen(function* () {
-          const sessions = yield* Session.Service
-          const tq = yield* InboxController.Service
-          const session = yield* sessions.create({ title: "persistence before admission" })
-          const held = yield* child(session.id)
-          const release = Promise.withResolvers<void>()
-          yield* Effect.addFinalizer(() => Effect.sync(() => release.resolve()))
-          yield* llm.hold("FIRST-FINAL", release.promise)
-          yield* llm.text("ADMITTED-FINAL")
-          const main = yield* start(session.id)
-          yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
-          const original = (yield* sessions.messages({ sessionID: session.id })).find(
-            (message) => message.info.role === "user",
-          )
-          if (!original || original.info.role !== "user") throw new Error("initial user missing")
-          const messageID = MessageID.ascending()
-          yield* sessions.updateMessage({ ...original.info, id: messageID, time: { created: Date.now() } })
-          yield* sessions.updatePart({
-            id: PartID.ascending(),
-            sessionID: session.id,
-            messageID,
-            type: "text",
-            text: "Persisted before admission.",
-          })
-          release.resolve()
-          yield* waiting(session.id)
-          yield* busy(session.id)
-          expect(main.pollUnsafe()).toBeUndefined()
-          expect(yield* llm.calls).toBe(1)
-          const receipt = yield* admitPrompt(session.id, messageID)
-          yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
-          yield* waiting(session.id)
-          expect(JSON.stringify((yield* llm.inputs)[1]?.messages)).toContain("Persisted before admission.")
-          expect((yield* tq.getReceipt(receipt.id))?.state).toBe("claimed")
-          yield* busy(session.id)
-          yield* complete(held)
-          const result = yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
-          expect(result.parts.some((part) => part.type === "text" && part.text === "ADMITTED-FINAL")).toBe(true)
-          expect((yield* tq.getReceipt(receipt.id))?.outcome).toBe("success")
-          expect(yield* llm.calls).toBe(2)
         }),
       { git: true, config },
     ),
@@ -988,15 +938,8 @@ describe("main automatically waits for subagent executions", () => {
       yield* waiting(session.id)
       const original = (yield* sessions.messages({ sessionID: session.id })).find((message) => message.info.role === "user")
       if (!original || original.info.role !== "user") throw new Error("original schema A user missing")
+      // Client-allocated before the notification arrives, sent only later.
       const messageID = MessageID.ascending()
-      yield* sessions.updateMessage({
-        ...original.info, id: messageID, time: { created: Date.now() },
-        format: formatChange === "replace" ? { type: "json_schema", schema: replacementSchema, retryCount: 0 } : undefined,
-      })
-      yield* sessions.updatePart({
-        id: PartID.ascending(), sessionID: session.id, messageID, type: "text",
-        text: `LATE-USER-FORMAT-${formatChange}`,
-      })
       yield* inbox.send({
         receiverSessionID: session.id, receiverActorID: "main", senderSessionID: session.id, senderActorID: "child-1",
         type: "actor_notification", wake: false,
@@ -1017,7 +960,12 @@ describe("main automatically waits for subagent executions", () => {
           && part.text.includes("LATE-ADMISSION-NOTIFICATION")))
       if (!notification) throw new Error("notification synthetic user missing")
       expect(messageID < notification.info.id).toBe(true)
-      const receipt = yield* admitPrompt(session.id, messageID)
+      const receipt = yield* acceptUser(
+        session.id,
+        `LATE-USER-FORMAT-${formatChange}`,
+        formatChange === "replace" ? { type: "json_schema", schema: replacementSchema, retryCount: 0 } : undefined,
+        messageID,
+      )
       second.resolve()
       yield* llm.wait(3).pipe(Effect.timeout("5 seconds"))
       const admitted = (yield* llm.inputs)[2]!

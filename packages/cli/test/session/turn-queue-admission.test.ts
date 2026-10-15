@@ -7,7 +7,6 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
-import { ProviderID, ModelID } from "../../src/provider/schema"
 import { Database, and, eq } from "../../src/storage"
 import { InboxController, inboxControllerRef } from "../../src/inbox"
 import { InboxLaneStateTable, InboxTable } from "../../src/inbox/inbox.sql"
@@ -68,31 +67,22 @@ const pauseFirstExtension = Effect.fn(function* (sessionID: SessionID) {
   return { entered, release }
 })
 
-const persistUser = Effect.fn(function* (
+// One Inbox.accept, as a client prompt does: the message (with its own
+// client-allocated id and format) and its inbox record are written together.
+const acceptUser = Effect.fn(function* (
   sessionID: SessionID,
   text: string,
   format?: MessageV2.User["format"],
   messageID = MessageID.ascending(),
 ) {
   const sessions = yield* Session.Service
+  const tq = yield* InboxController.Service
   const original = (yield* sessions.messages({ sessionID })).find((message) => message.info.role === "user")
   if (!original || original.info.role !== "user") throw new Error("initial user missing")
-  yield* sessions.updateMessage({ ...original.info, id: messageID, time: { created: Date.now() }, format })
-  yield* sessions.updatePart({ id: PartID.ascending(), sessionID, messageID, type: "text", text })
-  return messageID
-})
-
-// Bridge to InboxController.accept — message body is already persisted by persistUser.
-const admitPrompt = Effect.fn(function* (sessionID: SessionID, messageID: MessageID) {
-  const tq = yield* InboxController.Service
   return yield* tq.accept({
     lane: { sessionID, agentID: "main" },
-    message: {
-      id: messageID, sessionID, agentID: "main", role: "user",
-      time: { created: Date.now() },
-      agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
-    },
-    parts: [],
+    message: { ...original.info, id: messageID, time: { created: Date.now() }, format },
+    parts: [{ id: PartID.ascending(), sessionID, messageID, type: "text", text }],
     type: "prompt",
     idempotencyKey: messageID,
   })
@@ -187,14 +177,13 @@ describe("InboxController admission and claim acceptance without child execution
     30_000,
   )
 
-  for (const persisted of ["before U2 execution", "after U2 ack"] as const) {
-    for (const change of ["replace", "clear"] as const) {
+  for (const change of ["replace", "clear"] as const) {
       it.live(
-        `admission hole: U1 persisted ${persisted}, first admitted below frontier, format ${change}`,
+        `lower-ID input accepted after a higher one settled runs below the frontier, format ${change}`,
         provideTmpdirServer(
           ({ llm }) =>
             Effect.gen(function* () {
-              const { session, sessions, prompt, tq } = yield* setup(`A admission hole ${persisted} ${change}`)
+              const { session, sessions, prompt, tq } = yield* setup(`A lower id after ack ${change}`)
               const initialID = MessageID.ascending()
               yield* llm.text("U0-ANSWER")
               yield* prompt.prompt({
@@ -208,15 +197,12 @@ describe("InboxController admission and claim acceptance without child execution
 
               const lowerID = MessageID.ascending()
               const upperID = MessageID.ascending()
-              const lowerText = `UNADMITTED-LOWER-ID-${change}`
+              const lowerText = `LOWER-ID-${change}`
               const schema = { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }
               const replacement = { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] }
               const lowerFormat: MessageV2.User["format"] =
                 change === "replace" ? { type: "json_schema", schema: replacement, retryCount: 0 } : undefined
               expect(initialID < lowerID && lowerID < upperID).toBe(true)
-              if (persisted === "before U2 execution") {
-                yield* persistUser(session.id, lowerText, lowerFormat, lowerID)
-              }
               yield* llm.tool("StructuredOutput", { answer: "U2-ANSWER" })
               const upper = yield* prompt.prompt({
                 sessionID: session.id,
@@ -236,12 +222,9 @@ describe("InboxController admission and claim acceptance without child execution
               expect(JSON.stringify((yield* llm.inputs)[1]!.messages).includes(lowerText)).toBe(false)
               expect(structuredTool((yield* llm.inputs)[1]!)?.function.parameters).toEqual(schema)
               expect(receipts(session.id).filter((row) => row.input_message_id === lowerID)).toHaveLength(0)
-              if (persisted === "after U2 ack") {
-                yield* persistUser(session.id, lowerText, lowerFormat, lowerID)
-              }
 
               const epoch = yield* tq.getEpoch(session.id)
-              const receipt = yield* admitPrompt(session.id, lowerID)
+              const receipt = yield* acceptUser(session.id, lowerText, lowerFormat, lowerID)
               expect(receipt.state).toBe("accepted")
               expect(receipt.epoch).toBe(epoch)
               if (change === "replace") yield* llm.tool("StructuredOutput", { summary: "U1-NEW-ANSWER" })
@@ -274,7 +257,6 @@ describe("InboxController admission and claim acceptance without child execution
         ),
         30_000,
       )
-    }
   }
 
   it.live(
@@ -385,8 +367,7 @@ describe("InboxController admission and claim acceptance without child execution
           })
           yield* successful((yield* receiptFor(session.id, upperID)).id)
           expect(frontier(session.id)).toBe(upperID)
-          yield* persistUser(session.id, "PROJECTION-LATE-U1", undefined, lowerID)
-          const receipt = yield* admitPrompt(session.id, lowerID)
+          const receipt = yield* acceptUser(session.id, "PROJECTION-LATE-U1", undefined, lowerID)
           yield* llm.tool("read", { file_path: dir })
           yield* llm.text("PROJECTION-U1-COMPLETED")
           const result = yield* prompt
@@ -474,8 +455,8 @@ describe("InboxController admission and claim acceptance without child execution
               agent: "build",
               parts: [{ type: "text", text: "BEFORE-BOUNDARY-USER" }],
             })
-            const pendingID = yield* persistUser(session.id, "PENDING-BEHIND-BOUNDARY")
-            const receipt = yield* admitPrompt(session.id, pendingID)
+            const receipt = yield* acceptUser(session.id, "PENDING-BEHIND-BOUNDARY")
+            const pendingID = receipt.inputMessageID
             expect(receipt.state).toBe("accepted")
             const original = MessageV2.get({ sessionID: session.id, messageID: initialID })
             if (original.info.role !== "user") throw new Error("initial user missing")
@@ -595,64 +576,8 @@ describe("InboxController admission and claim acceptance without child execution
       30_000,
     )
 
-  // Wake intents removed with the inbox queue (spec: intent is prompt-only).
-  it.live.skip(
-    "wake-only extension preserves the current claim and advances the consumed frontier monotonically",
-    provideTmpdirServer(
-      ({ llm }) =>
-        Effect.gen(function* () {
-          const { session, prompt, tq } = yield* setup("A monotonic frontier")
-          const firstID = MessageID.ascending()
-          yield* llm.text("U0-ANSWER")
-          yield* prompt.prompt({
-            sessionID: session.id,
-            messageID: firstID,
-            agent: "build",
-            parts: [{ type: "text", text: "Consumed U0" }],
-          })
-          expect(frontier(session.id)).toBe(firstID)
-          const firstReceipt = yield* receiptFor(session.id, firstID)
-          yield* successful(firstReceipt.id)
-          const expansion = yield* pauseFirstExtension(session.id)
-          const response = yield* responseGate()
-          yield* llm.hold("U1-ANSWER", response.promise)
-          const currentID = MessageID.ascending()
-          const main = yield* prompt
-            .prompt({
-              sessionID: session.id,
-              messageID: currentID,
-              agent: "build",
-              parts: [{ type: "text", text: "Current U1 must remain visible" }],
-            })
-            .pipe(Effect.forkChild)
-          yield* Deferred.await(expansion.entered).pipe(Effect.timeout("5 seconds"))
-          const wake = yield* admitPrompt(session.id, MessageID.ascending())
-          yield* Deferred.succeed(expansion.release, undefined)
-          yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
-          const input = (yield* llm.inputs)[1]!
-          expect(JSON.stringify(input.messages)).toContain("Current U1 must remain visible")
-          const current = yield* receiptFor(session.id, currentID)
-          const extended = yield* tq.getReceipt(wake.id)
-          expect(current.state).toBe("claimed")
-          expect(extended.state).toBe("claimed")
-          expect(extended.runId).toBe(current.runId)
-          expect(extended.claimFrontier).toBe(currentID)
-          expect(frontier(session.id)).toBe(firstID)
-          response.resolve()
-          answer(yield* Fiber.join(main).pipe(Effect.timeout("5 seconds")), "U1-ANSWER", currentID)
-          yield* successful(current.id)
-          expect((yield* tq.getReceipt(wake.id)).outcome).toBe("success")
-          expect(frontier(session.id)).toBe(currentID)
-          expect(yield* tq.getReceipt(firstReceipt.id)).toEqual(firstReceipt)
-          expect(yield* llm.calls).toBe(2)
-        }),
-      { git: true, config },
-    ),
-    30_000,
-  )
-
   it.live(
-    "a user persisted before assistant creation but admitted during its response gets a new model answer",
+    "an input whose id predates the assistant but is accepted during its response gets a new model answer",
     provideTmpdirServer(
       ({ llm }) =>
         Effect.gen(function* () {
@@ -672,10 +597,11 @@ describe("InboxController admission and claim acceptance without child execution
             })
             .pipe(Effect.forkChild)
           yield* Deferred.await(expansion.entered).pipe(Effect.timeout("5 seconds"))
-          const lateID = yield* persistUser(session.id, "LATE-PERSISTED-USER")
+          // Client-allocated before the assistant exists, sent only later.
+          const lateID = MessageID.ascending()
           yield* Deferred.succeed(expansion.release, undefined)
           yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
-          expect(JSON.stringify((yield* llm.inputs)[0]!.messages)).not.toContain("LATE-PERSISTED-USER")
+          expect(JSON.stringify((yield* llm.inputs)[0]!.messages)).not.toContain("LATE-ACCEPTED-USER")
           const initialAssistant = (yield* sessions.messages({ sessionID: session.id })).find(
             (message) => message.info.role === "assistant",
           )
@@ -683,10 +609,10 @@ describe("InboxController admission and claim acceptance without child execution
             throw new Error("initial assistant missing")
           expect(lateID < initialAssistant.info.id).toBe(true)
           expect(initialAssistant.info.parentID).toBe(originalID)
-          const receipt = yield* admitPrompt(session.id, lateID)
+          const receipt = yield* acceptUser(session.id, "LATE-ACCEPTED-USER", undefined, lateID)
           first.resolve()
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
-          expect(JSON.stringify((yield* llm.inputs)[1]!.messages)).toContain("LATE-PERSISTED-USER")
+          expect(JSON.stringify((yield* llm.inputs)[1]!.messages)).toContain("LATE-ACCEPTED-USER")
           expect((yield* tq.getReceipt(receipt.id)).state).toBe("claimed")
           expect(main.pollUnsafe()).toBeUndefined()
           second.resolve()
@@ -695,39 +621,6 @@ describe("InboxController admission and claim acceptance without child execution
           yield* successful((yield* receiptFor(session.id, originalID)).id)
           expect(frontier(session.id)).toBe(lateID)
           expect(yield* llm.calls).toBe(2)
-        }),
-      { git: true, config },
-    ),
-    30_000,
-  )
-
-  it.live(
-    "a persisted but unadmitted user is excluded from execution and cannot advance the consumed frontier",
-    provideTmpdirServer(
-      ({ llm }) =>
-        Effect.gen(function* () {
-          const { session, prompt } = yield* setup("A unadmitted input")
-          const response = yield* responseGate()
-          yield* llm.hold("ONLY-ADMITTED-ANSWER", response.promise)
-          const originalID = MessageID.ascending()
-          const main = yield* prompt
-            .prompt({
-              sessionID: session.id,
-              messageID: originalID,
-              agent: "build",
-              parts: [{ type: "text", text: "Only admitted request" }],
-            })
-            .pipe(Effect.forkChild)
-          yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
-          const unadmittedID = yield* persistUser(session.id, "UNADMITTED-MUST-NOT-BE-CONSUMED")
-          expect(unadmittedID > originalID).toBe(true)
-          response.resolve()
-          answer(yield* Fiber.join(main).pipe(Effect.timeout("5 seconds")), "ONLY-ADMITTED-ANSWER", originalID)
-          expect(yield* llm.calls).toBe(1)
-          expect(JSON.stringify(yield* llm.inputs)).not.toContain("UNADMITTED-MUST-NOT-BE-CONSUMED")
-          expect(receipts(session.id).filter((row) => row.input_message_id === unadmittedID)).toHaveLength(0)
-          expect(frontier(session.id)).toBe(originalID)
-          yield* successful((yield* receiptFor(session.id, originalID)).id)
         }),
       { git: true, config },
     ),
@@ -876,12 +769,12 @@ describe("InboxController admission and claim acceptance without child execution
               .pipe(Effect.forkChild)
             yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
             expect(structuredTool((yield* llm.inputs)[0]!)?.function.parameters).toEqual(schema)
-            const lateID = yield* persistUser(
+            const receipt = yield* acceptUser(
               session.id,
               `ADMITTED-FORMAT-${change}`,
               change === "replace" ? { type: "json_schema", schema: replacement, retryCount: 0 } : undefined,
             )
-            const receipt = yield* admitPrompt(session.id, lateID)
+            const lateID = receipt.inputMessageID
             first.resolve()
             yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
             const input = (yield* llm.inputs)[1]!
