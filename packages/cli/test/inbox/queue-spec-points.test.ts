@@ -173,9 +173,9 @@ describe("inbox queue spec test points", () => {
     15_000,
   )
 
-  // (k) deliveryMessageId 与回执事件
+  // (k) deliveryMessageID 与回执事件
   it.live(
-    "(k) deliveryMessageId is recorded and exposed on the receipt",
+    "(k) deliveryMessageID is recorded and exposed on the receipt",
     provideTmpdirServer(({ llm }) =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
@@ -191,6 +191,41 @@ describe("inbox queue spec test points", () => {
         expect(rows[0]!.state).toBe("settled")
         // deliveryMessageId is the first model-step assistant message that read the input.
         expect(rows[0]!.delivery_message_id).toBeTruthy()
+      }),
+      { git: true, config },
+    ),
+    15_000,
+  )
+
+  // (o) noReply prompt 只写历史，不产生 inbox 记录
+  it.live(
+    "(o) noReply prompt writes plain history that later prompts neither execute nor hide",
+    provideTmpdirServer(({ llm }) =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const prompt = yield* SessionPrompt.Service
+        const session = yield* sessions.create({ title: "spec-o" })
+        for (const text of ["NOTE-ONE", "NOTE-TWO"]) {
+          const note = yield* prompt.prompt({
+            sessionID: session.id, agent: "build", noReply: true,
+            parts: [{ type: "text", text }],
+          })
+          expect(note.info.role).toBe("user")
+        }
+        expect(receiptRows(session.id)).toEqual([])
+        expect(yield* llm.calls).toBe(0)
+        yield* llm.text("REAL-ANSWER")
+        const result = yield* prompt.prompt({
+          sessionID: session.id, agent: "build",
+          parts: [{ type: "text", text: "REAL-PROMPT" }],
+        })
+        expect(result.parts.some((p) => p.type === "text" && p.text === "REAL-ANSWER")).toBe(true)
+        expect(yield* llm.calls).toBe(1)
+        const request = JSON.stringify((yield* llm.inputs)[0]!.messages)
+        const positions = ["NOTE-ONE", "NOTE-TWO", "REAL-PROMPT"].map((text) => request.indexOf(text))
+        expect(positions.every((position) => position >= 0)).toBe(true)
+        expect(positions).toEqual([...positions].sort((a, b) => a - b))
+        expect(receiptRows(session.id).map((row) => row.state)).toEqual(["settled"])
       }),
       { git: true, config },
     ),

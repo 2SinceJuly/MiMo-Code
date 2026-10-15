@@ -2771,6 +2771,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return yield* provider.defaultModel()
     })
 
+    // User prompts to the main lane go through Inbox.accept; noReply only
+    // appends history, so it is written as a plain message with no record.
+    const acceptsIntoInbox = (input: PromptInput) =>
+      input.noReply !== true && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main"
+
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
       const agentName = input.agent || (yield* agents.defaultAgent())
       const ag = yield* agents.get(agentName)
@@ -3318,9 +3323,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       })
 
-      // Queued user prompts persist through Inbox.accept (same transaction as
+      // Accepted prompts persist through Inbox.accept (same transaction as
       // the inbox record + input_revision bump). Everything else saves here.
-      if (!(inboxControllerRef.current && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main")) {
+      if (!(inboxControllerRef.current && acceptsIntoInbox(input))) {
         yield* sessions.updateMessage(message)
         for (const part of parts) yield* sessions.updatePart(part)
       }
@@ -3517,7 +3522,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const tq = inboxControllerRef.current
         let promptReceiptId: string | undefined
         let promptEpoch: number | undefined
-        if (message.parts.length > 0 && tq && (input.source ?? "user") === "user" && (input.agentID ?? "main") === "main") {
+        if (message.parts.length > 0 && tq && acceptsIntoInbox(input)) {
           const receipt = yield* tq.accept({
             lane: { sessionID: input.sessionID, agentID: "main" },
             message: message.info as MessageV2.User,
@@ -4738,43 +4743,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               eq(InboxTable.receiver_actor_id, resolvedAgentID),
             )).all()))
             const owned = new Set(claimOwner.receipts.map((receipt) => receipt.id))
-            // Visibility: hide only still-queued inputs. accepted (unclaimed) or
-            // claimed by another run stay hidden; cancelled/settled and messages
-            // without an inbox record (history, imports, compaction replay) show.
-            const hidden = new Set<MessageID>()
-            for (const receipt of receipts) {
-              if (!receipt.input_message_id) continue
-              if (receipt.state === "accepted") {
-                hidden.add(receipt.input_message_id)
-                continue
-              }
-              if (receipt.state === "claimed" && !owned.has(receipt.id)) {
-                hidden.add(receipt.input_message_id)
-              }
-            }
-            msgs = msgs.filter((msg) =>
-              msg.info.sessionID !== sessionID || msg.info.role !== "user" || !hidden.has(msg.info.id) ||
-              !!msg.info.provenance ||
-              (msg.parts.length > 0 && msg.parts.every((part) =>
-                (part.type === "text" && part.synthetic) || part.type === "compaction" || part.type === "checkpoint")),
-            )
-            const deliveries = new Map<MessageID, MessageID[]>()
-            for (const receipt of receipts.sort((a, b) => a.id.localeCompare(b.id))) {
-              if (!receipt.input_message_id || !receipt.delivery_message_id ||
-                  (!receipt.consumed && !owned.has(receipt.id))) continue
-              const ids = deliveries.get(receipt.delivery_message_id) ?? []
-              ids.push(receipt.input_message_id)
-              deliveries.set(receipt.delivery_message_id, ids)
-            }
-            // First delivery, not final settlement, fixes each batch before its own tool/assistant steps.
-            for (const [responseID, ids] of deliveries) {
-              if (!msgs.some((msg) => msg.info.id === responseID)) continue
-              const inputs = yield* Effect.sync(() => ids.map((messageID) =>
-                msgs.find((msg) => msg.info.id === messageID) ?? MessageV2.get({ sessionID, messageID }),
-              ))
-              msgs = msgs.filter((msg) => !ids.includes(msg.info.id))
-              msgs.splice(msgs.findIndex((msg) => msg.info.id === responseID), 0, ...inputs)
-            }
+            msgs = yield* Effect.sync(() => MessageV2.renderedOrder(msgs, receipts, sessionID, owned,
+              (messageID) => MessageV2.get({ sessionID, messageID })))
             const pending = claimOwner.receipts.flatMap((receipt) =>
               !deliveredPrompts.has(receipt.inputMessageID)
                 ? [receipt.inputMessageID] : [],

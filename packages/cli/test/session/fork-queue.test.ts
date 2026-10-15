@@ -89,7 +89,7 @@ function byText(messages: MessageV2.WithParts[], text: string) {
 
 describe("Session.fork queue history", () => {
   it.live(
-    "boot does not execute copied admitted history and a new prompt sees its answered context",
+    "copies no inbox records, keeps queued input hidden until the next run, and never auto-executes it",
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const prompt = yield* SessionPrompt.Service
@@ -106,15 +106,17 @@ describe("Session.fork queue history", () => {
       const branch = yield* sessions.fork({ sessionID: source.id })
       yield* Effect.addFinalizer(() => prompt.cancel(branch.id))
       const copied = yield* sessions.messages({ sessionID: branch.id })
-      const copiedQuestion = byText(copied, "SOURCE-QUESTION")
-      const copiedPending = byText(copied, "SOURCE-PENDING-DO-NOT-EXECUTE")
-      const history = yield* receipts(branch.id)
-      expect(history.find((row) => row.input_message_id === copiedQuestion.info.id)?.consumed).toBe(true)
-      expect(history.find((row) => row.input_message_id === copiedPending.info.id)?.state).toBe("cancelled")
+      byText(copied, "SOURCE-QUESTION")
+      byText(copied, "SOURCE-ANSWER")
+      byText(copied, "SOURCE-PENDING-DO-NOT-EXECUTE")
+      // The fork carries plain history only: no inbox rows, no lane state.
+      expect(yield* receipts(branch.id)).toEqual([])
+      expect(yield* tq.listAccepted({ sessionID: branch.id, agentID: "main" })).toEqual([])
+      expect(yield* Effect.sync(() => Database.use((db) => db.select().from(InboxLaneStateTable)
+        .where(eq(InboxLaneStateTable.session_id, branch.id)).all()))).toEqual([])
       yield* tq.reconcileOnBoot(branch.id)
       yield* Effect.sleep("25 millis")
       expect(yield* llm.calls).toBe(0)
-      expect(yield* tq.listAccepted({ sessionID: branch.id, agentID: "main" })).toEqual([])
       yield* state.assertNotBusy(branch.id)
       yield* llm.text("FORK-ANSWER")
       const result = yield* prompt.prompt({ sessionID: branch.id, agent: "build", parts: [{ type: "text", text: "FORK-FOLLOWUP" }] })
@@ -123,14 +125,19 @@ describe("Session.fork queue history", () => {
       const request = JSON.stringify((yield* llm.inputs)[0].messages)
       expect(request).toContain("SOURCE-QUESTION")
       expect(request).toContain("SOURCE-ANSWER")
-      expect(request).toContain("FORK-FOLLOWUP")
-      expect(request).not.toContain("SOURCE-PENDING-DO-NOT-EXECUTE")
+      // The copied queued input is plain visible history: the model sees it,
+      // and nothing runs it by itself.
+      expect(request).toContain("SOURCE-PENDING-DO-NOT-EXECUTE")
+      const positions = ["SOURCE-QUESTION", "SOURCE-ANSWER", "SOURCE-PENDING-DO-NOT-EXECUTE", "FORK-FOLLOWUP"]
+        .map((text) => request.indexOf(text))
+      expect(positions.every((position) => position >= 0)).toBe(true)
+      expect(positions).toEqual([...positions].sort((a, b) => a - b))
     }), { git: true, config }),
     20000,
   )
 
   it.live(
-    "remaps result and first delivery across epochs while pending work stays terminal and clone events see a complete snapshot",
+    "copies messages in rendered order without remapping ids or copying receipts",
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const tq = yield* InboxController.Service
@@ -147,7 +154,7 @@ describe("Session.fork queue history", () => {
         .where(eq(InboxTable.id, consumed.id)).run()))
       yield* tq.ack(lane, question.id, [{ receiptId: consumed.id, outcome: "success" }], 1)
       for (const state of ["accepted", "claimed", "cancelled", "gap"] as const) {
-        const pending = yield* user(source.id, `PENDING-${state}`)
+        const pending = yield* user(source.id, `PENDING-${state}`, state !== "gap")
         if (state === "gap") continue
         const receipt = yield* admitPrompt(source.id, pending.id)
         yield* Effect.sync(() => Database.use((db) => db.update(InboxTable).set({ state, outcome: state === "cancelled" ? "never_ran" : null })
@@ -174,20 +181,20 @@ describe("Session.fork queue history", () => {
         GlobalBus.off("event", listener)
       }
       const copied = yield* sessions.messages({ sessionID: branch.id })
-      const history = yield* receipts(branch.id)
-      const mapped = history.find((row) => row.consumed)!
-      expect(mapped.id).not.toBe(consumed.id)
-      expect(mapped.epoch).toBe(0)
-      expect(mapped.input_message_id).toBe(byText(copied, "MULTI-STEP-QUESTION").info.id)
-      expect(mapped.input_message_id).toBe(byText(copied, "FINAL-ANSWER").info.id)
-      expect(mapped.delivery_message_id).toBe(byText(copied, "FIRST-TOOL-STEP").info.id)
-      expect(mapped.run_id).toBeNull()
-      expect(history.filter((row) => !row.consumed)).toHaveLength(4)
-      expect(history.filter((row) => !row.consumed).every((row) => row.state === "cancelled" && row.outcome === "never_ran")).toBe(true)
-      expect(copied.filter((message) => message.info.role === "assistant").every((message) =>
-        message.info.role === "assistant" && message.info.parentID === mapped.input_message_id)).toBe(true)
+      // Rendered order: the consumed input sits before the delivery step that
+      // first read it; the cancelled input and the one with no inbox record
+      // stay in place; the still queued ones (accepted / claimed) follow at the
+      // end in acceptance order.
+      const order = ["MULTI-STEP-QUESTION", "FIRST-TOOL-STEP", "FINAL-ANSWER",
+        "PENDING-cancelled", "PENDING-gap", "PENDING-accepted", "PENDING-claimed"]
+      expect(copied.map((message) => message.parts.flatMap((p) => p.type === "text" ? [p.text] : [])).flat()).toEqual(order)
+      expect(copied).toHaveLength(7)
+      // Message IDs are new (global primary key) but keep their relative order;
+      // no inbox row is rewritten and none is copied.
+      expect(copied.every((message) => message.info.id < MessageID.ascending())).toBe(true)
+      expect(yield* receipts(branch.id)).toEqual([])
       expect(snapshots).toHaveLength(14)
-      expect(snapshots.every((snapshot) => snapshot.messages === 7 && snapshot.parts === 7 && snapshot.receipts === 5)).toBe(true)
+      expect(snapshots.every((snapshot) => snapshot.messages === 7 && snapshot.parts === 7 && snapshot.receipts === 0)).toBe(true)
       yield* tq.reconcileOnBoot(branch.id)
       expect(yield* tq.listAccepted({ sessionID: branch.id, agentID: "main" })).toEqual([])
       expect(yield* llm.calls).toBe(0)
@@ -199,7 +206,7 @@ describe("Session.fork queue history", () => {
   )
 
   it.live(
-    "preserves first-delivery ordering in the next model request and clears references outside a fork cutoff",
+    "preserves first-delivery ordering in the next model request and truncates by rendered order",
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const tq = yield* InboxController.Service
@@ -219,6 +226,7 @@ describe("Session.fork queue history", () => {
       }
       const branch = yield* sessions.fork({ sessionID: source.id })
       yield* Effect.addFinalizer(() => prompt.cancel(branch.id))
+      expect(yield* receipts(branch.id)).toEqual([])
       yield* llm.text("FOLLOWUP-ANSWER")
       yield* prompt.prompt({ sessionID: branch.id, agent: "build", parts: [{ type: "text", text: "FOLLOWUP" }] })
       expect(yield* llm.calls).toBe(1)
@@ -229,13 +237,13 @@ describe("Session.fork queue history", () => {
 
       const truncated = yield* sessions.fork({ sessionID: source.id, messageID: finalStep.id })
       const copied = yield* sessions.messages({ sessionID: truncated.id })
-      const history = yield* receipts(truncated.id)
-      expect(copied).toHaveLength(3)
-      expect(history).toHaveLength(2)
-      expect(history.every((row) => row.consumed && row.state === "settled" && row.input_message_id === null)).toBe(true)
-      expect(history.find((row) => row.input_message_id === byText(copied, "FIRST-INPUT").info.id)?.delivery_message_id)
-        .toBe(byText(copied, "FIRST-STEP").info.id)
-      expect(history.find((row) => row.input_message_id === byText(copied, "LATE-INPUT").info.id)?.delivery_message_id).toBeNull()
+      // The cutoff is a rendered-order boundary: every message before the
+      // requested one is copied, which includes the input that never got its
+      // own delivery step.
+      expect(copied.map((message) => message.parts.find((part) => part.type === "text" && "text" in part)?.type === "text"
+        ? (message.parts.find((part) => part.type === "text" && "text" in part) as { text: string }).text
+        : undefined)).toEqual(["FIRST-INPUT", "FIRST-STEP", "LATE-INPUT"])
+      expect(yield* receipts(truncated.id)).toEqual([])
       yield* tq.reconcileOnBoot(truncated.id)
       expect(yield* tq.listAccepted({ sessionID: truncated.id, agentID: "main" })).toEqual([])
       expect(yield* llm.calls).toBe(1)
@@ -243,47 +251,8 @@ describe("Session.fork queue history", () => {
     20000,
   )
 
-  // Bootstrap removed with the inbox queue (spec: legacy messages stay visible
-  // without inbox records; no prefix-consumption inference).
-  it.live.skip(
-    "infers only frozen legacy completed prefixes, not tool-only or post-freeze users",
-    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
-      const sessions = yield* Session.Service
-      const tq = yield* InboxController.Service
-      const source = yield* sessions.create({ title: "legacy boundary source" })
-      const prefix = yield* user(source.id, "LEGACY-PREFIX", false)
-      const question = yield* user(source.id, "LEGACY-QUESTION", false)
-      const answer = yield* assistant(question, "LEGACY-ANSWER")
-      const pending = yield* user(source.id, "LEGACY-TOOL-ONLY", false)
-      const toolStep = yield* assistant(pending, "NONTERMINAL-STEP", "tool-calls")
-      void toolStep
-      const untrusted = yield* user(source.id, "POST-FREEZE-USER", false)
-      yield* assistant(untrusted, "POST-FREEZE-ANSWER")
-      const branch = yield* sessions.fork({ sessionID: source.id })
-      const copied = yield* sessions.messages({ sessionID: branch.id })
-      const history = yield* receipts(branch.id)
-      expect(history).toHaveLength(4)
-      for (const text of ["LEGACY-PREFIX", "LEGACY-QUESTION"]) {
-        const row = history.find((row) => row.input_message_id === byText(copied, text).info.id)!
-        expect(row.consumed).toBe(true)
-        expect(row.input_message_id).toBe(byText(copied, "LEGACY-ANSWER").info.id)
-      }
-      for (const text of ["LEGACY-TOOL-ONLY", "POST-FREEZE-USER"]) {
-        const row = history.find((row) => row.input_message_id === byText(copied, text).info.id)!
-        expect(row.consumed).toBe(false)
-        expect(row.state).toBe("cancelled")
-        expect(row.outcome).toBe("never_ran")
-      }
-      yield* tq.reconcileOnBoot(branch.id)
-      expect(yield* tq.listAccepted({ sessionID: branch.id, agentID: "main" })).toEqual([])
-      expect(yield* llm.calls).toBe(0)
-      expect(yield* receipts(source.id)).toEqual([])
-    }), { git: true, config }),
-    20000,
-  )
-
   it.live(
-    "rolls back cloned messages parts and receipts and removes the empty target when a part projector fails",
+    "rolls back cloned messages and parts and removes the empty target when a part projector fails",
     provideTmpdirServer(() => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const source = yield* sessions.create({ title: "fork rollback source" })
@@ -303,8 +272,9 @@ describe("Session.fork queue history", () => {
       const cut = spyOn(SyncEvent, "run").mockImplementation((definition, data, options) => {
         const result = run(definition, data, options)
         if (definition.type === MessageV2.Event.PartUpdated.type && data.sessionID !== source.id && ++clonedParts === 2) {
+          // Fork never copies inbox rows, so the clone carries none at any point.
           expect(Database.use((db) => db.select().from(InboxTable)
-            .where(eq(InboxTable.receiver_session_id, target!)).all())).toHaveLength(1)
+            .where(eq(InboxTable.receiver_session_id, target!)).all())).toHaveLength(0)
           failed = true
           throw new Error("injected clone part failure")
         }

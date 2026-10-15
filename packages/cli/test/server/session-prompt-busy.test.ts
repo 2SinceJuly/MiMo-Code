@@ -258,11 +258,10 @@ describe("HTTP Inbox admission", () => {
   }
 
   test(
-    "prompt_async returns a durable GET-able receipt before 202; receipts are session-scoped",
+    "prompt_async noReply:true returns 204 and writes plain history with no receipt or model call",
     () =>
       fixture(async (http, llm) => {
         const session = await http.session()
-        const other = await http.session()
         const messageID = MessageID.ascending()
         const response = await http.post(`/session/${session.id}/prompt_async`, {
           messageID,
@@ -270,15 +269,37 @@ describe("HTTP Inbox admission", () => {
           noReply: true,
           parts: [{ type: "text", text: "persist without model reply" }],
         })
+        expect(response.status).toBe(204)
+        expect(await response.text()).toBe("")
+        expect(rows(session.id)).toHaveLength(0)
+        const messages = await http.messages(session.id)
+        expect(messages.map((message) => message.info.id)).toEqual([messageID])
+        expect(messages[0].info.role).toBe("user")
+        expect(await Effect.runPromise(llm.calls)).toBe(0)
+      }),
+    30_000,
+  )
+
+  test(
+    "prompt_async returns a durable GET-able receipt before 202; receipts are session-scoped",
+    () =>
+      fixture(async (http, llm) => {
+        const session = await http.session()
+        const other = await http.session()
+        const messageID = MessageID.ascending()
+        await Effect.runPromise(llm.text("scoped receipt answer"))
+        const response = await http.post(`/session/${session.id}/prompt_async`, {
+          messageID,
+          model,
+          parts: [{ type: "text", text: "scoped receipt prompt" }],
+        })
         const receipt = await accepted(http, session.id, response, messageID)
-        expect(receipt.state).toBe("accepted")
-        expect(receipt.consumed).toBe(false)
         const foreign = await http.request(`/session/${other.id}/receipt/${receipt.id}`)
         expect(foreign.status).toBe(404)
         const missing = await http.request(`/session/${session.id}/receipt/receipt-does-not-exist`)
         expect(missing.status).toBe(404)
         expect((await http.receipt(session.id, receipt.id)).id).toBe(receipt.id)
-        expect(await Effect.runPromise(llm.calls)).toBe(0)
+        await settled(http, session.id, receipt.id)
       }),
     30_000,
   )

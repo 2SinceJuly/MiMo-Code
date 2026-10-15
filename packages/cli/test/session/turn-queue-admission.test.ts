@@ -300,11 +300,10 @@ describe("InboxController admission and claim acceptance without child execution
           const firstReceipt = yield* receiptFor(session.id, firstID)
           expect(firstReceipt.state).toBe("claimed")
           const secondID = MessageID.ascending()
-          yield* prompt.prompt({
+          yield* prompt.promptAsync({
             sessionID: session.id,
             messageID: secondID,
             agent: "build",
-            noReply: true,
             parts: [{ type: "text", text: "MULTIBATCH-U2" }],
           })
           expect((yield* receiptFor(session.id, secondID)).state).toBe("accepted")
@@ -823,11 +822,10 @@ describe("InboxController admission and claim acceptance without child execution
           yield* Deferred.await(expansion.entered).pipe(Effect.timeout("5 seconds"))
           expect(yield* llm.calls).toBe(0)
           const nextID = MessageID.ascending()
-          yield* prompt.prompt({
+          yield* prompt.promptAsync({
             sessionID: session.id,
             messageID: nextID,
             agent: "build",
-            noReply: true,
             parts: [{ type: "text", text: "ADMITTED-AT-EXTENSION" }],
           })
           const pending = yield* receiptFor(session.id, nextID)

@@ -813,12 +813,42 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
         idleByAgent.set(agentID, idle)
       }
       yield* Effect.sync(() => Database.transaction((tx) => {
-        const msgs = Array.from(MessageV2.stream(input.sessionID, { agentID: "*" })).reverse()
-        const copied = msgs.filter((msg) => !input.messageID || msg.info.id < input.messageID)
+        // Copy in the order the model saw the source: still-queued inputs are
+        // hidden from the body and appended at the end in acceptance order,
+        // consumed inputs sit in front of the assistant message that first read
+        // them. The clone then needs no inbox records — its raw id order is
+        // already the rendered one.
+        const all = Array.from(MessageV2.stream(input.sessionID, { agentID: "*" })).reverse()
+        const receipts = tx.select().from(InboxTable)
+          .where(eq(InboxTable.receiver_session_id, input.sessionID)).all()
+        // Consumed receipts count as owned so their inputs stay visible; the
+        // still-queued ones are hidden by the same rule the model uses.
+        const body = MessageV2.renderedOrder(all, receipts, input.sessionID, new Set(
+          receipts.filter((row) => row.consumed).map((row) => row.id),
+        ), (messageID) => MessageV2.get({ sessionID: input.sessionID, messageID }))
+        const bodyIDs = new Set(body.map((msg) => msg.info.id))
+        const queuedIDs = receipts
+          .filter((row) => row.input_message_id && !bodyIDs.has(row.input_message_id) &&
+            (row.state === "accepted" || (row.state === "claimed" && !row.consumed)))
+          .map((row) => row.input_message_id!)
+        const tail = queuedIDs
+          .map((id) => all.find((msg) => msg.info.id === id))
+          .filter((msg): msg is MessageV2.WithParts => msg !== undefined)
+        const sequence = [...body, ...tail]
+        let copied = sequence
+        if (input.messageID) {
+          const cutoff = sequence.findIndex((msg) => msg.info.id === input.messageID)
+          if (cutoff < 0) throw new NotFoundError({ message: `Message not found: ${input.messageID}` })
+          copied = sequence.slice(0, cutoff)
+        }
         const idMap = new Map(copied.map((msg) => [msg.info.id, MessageID.ascending()]))
         const now = Date.now()
+        let created = 0
         for (const msg of copied) {
-          const info = { ...msg.info, sessionID: session.id, id: idMap.get(msg.info.id)! }
+          // Reads sort by time_created before id, so creation time must not
+          // decrease along the rendered order.
+          created = Math.max(created, msg.info.time.created)
+          const info = { ...msg.info, sessionID: session.id, id: idMap.get(msg.info.id)!, time: { ...msg.info.time, created } }
           if (info.role !== "user") {
             info.parentID = idMap.get(info.parentID) ?? info.parentID
           }

@@ -564,10 +564,9 @@ describe("main automatically waits for subagent executions", () => {
           yield* waiting(session.id)
           expectSubagentWait(yield* waitState(session.id), ["child-1"])
           expect(yield* llm.calls).toBe(2)
-          yield* prompt.prompt({
+          yield* prompt.promptAsync({
             sessionID: session.id,
             agent: "build",
-            noReply: true,
             parts: [{ type: "text", text: "Include the new constraint." }],
           })
           yield* llm.wait(3).pipe(Effect.timeout("5 seconds"))
@@ -680,10 +679,9 @@ describe("main automatically waits for subagent executions", () => {
           yield* llm.text("BOTH-INPUTS-ANSWERED")
           const main = yield* start(session.id)
           yield* Deferred.await(entered).pipe(Effect.timeout("5 seconds"))
-          yield* prompt.prompt({
+          yield* prompt.promptAsync({
             sessionID: session.id,
             agent: "build",
-            noReply: true,
             parts: [{ type: "text", text: "Admitted during claim expansion." }],
           })
           yield* Deferred.succeed(release, undefined)
@@ -924,8 +922,8 @@ describe("main automatically waits for subagent executions", () => {
         type: "actor_notification", wake: false,
         content: '<actor-notification actor_id="child-1" status="completed">PARTIAL-CHILD-RESULT</actor-notification>',
       })
-      if (formatChange !== "preserve") yield* prompt.prompt({
-        sessionID: session.id, agent: "build", noReply: true,
+      if (formatChange !== "preserve") yield* prompt.promptAsync({
+        sessionID: session.id, agent: "build",
         parts: [{ type: "text", text: `USER-FORMAT-${formatChange}: use my new response format.` }],
         format: formatChange === "replace" ? { type: "json_schema", schema: replacementSchema, retryCount: 0 } : undefined,
       })
@@ -1139,8 +1137,8 @@ describe("main automatically waits for subagent executions", () => {
           (spy) => Effect.sync(() => spy.mockRestore()),
         )
         if (winner === "user input") {
-          yield* prompt.prompt({
-            sessionID: session.id, agent: "build", noReply: true,
+          yield* prompt.promptAsync({
+            sessionID: session.id, agent: "build",
             parts: [{ type: "text", text: "PRIORITY-USER-INPUT" }],
           })
           yield* llm.wait(2).pipe(Effect.timeout("5 seconds"), Effect.provideService(Clock.Clock, liveClock))
@@ -1200,8 +1198,8 @@ describe("main automatically waits for subagent executions", () => {
         if (!execution) throw new Error("spawn did not start general-1")
         expect(execution.fiber?.pollUnsafe()).toBeUndefined()
         expect(yield* llm.calls).toBe(3)
-        if (trigger === "interrupted") yield* prompt.prompt({
-          sessionID: session.id, agent: "build", noReply: true,
+        if (trigger === "interrupted") yield* prompt.promptAsync({
+          sessionID: session.id, agent: "build",
           parts: [{ type: "text", text: "NEW-USER-CONSTRAINT: answer me before the child finishes." }],
         })
         yield* llm.wait(4).pipe(Effect.timeout("5 seconds"))
@@ -1313,8 +1311,8 @@ describe("main automatically waits for subagent executions", () => {
           return
         }
         if (setup) yield* Deferred.await(entered).pipe(Effect.timeout("5 seconds"))
-        if (trigger === "interrupted") yield* prompt.prompt({
-          sessionID: session.id, agent: "build", noReply: true,
+        if (trigger === "interrupted") yield* prompt.promptAsync({
+          sessionID: session.id, agent: "build",
           parts: [{ type: "text", text: "RUN-NEW-USER-CONSTRAINT: answer me before the child finishes." }],
         })
         if (setup) {

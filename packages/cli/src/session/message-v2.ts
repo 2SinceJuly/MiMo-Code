@@ -1449,6 +1449,68 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   return compactionProjection(result)
 }
 
+/**
+ * Message order as the model sees it: hide still-queued inputs, then move each
+ * consumed input in front of the assistant message that first read it.
+ * Also used by fork, which copies this order so the clone's raw id order is
+ * already the rendered one (no inbox records are copied).
+ */
+export function renderedOrder(
+  msgs: WithParts[],
+  receipts: Array<{
+    id: string
+    input_message_id: MessageID | null
+    delivery_message_id: MessageID | null
+    state: "accepted" | "claimed" | "settled" | "cancelled" | "rejected"
+    consumed: boolean
+  }>,
+  sessionID: SessionID,
+  owned: Set<string>,
+  // Reads a consumed input that lies outside `msgs` (e.g. before the compacted
+  // window) so it can still be placed in front of its delivery message.
+  load: (messageID: MessageID) => WithParts,
+): WithParts[] {
+  const hidden = new Set<MessageID>()
+  for (const receipt of receipts) {
+    if (!receipt.input_message_id) continue
+    if (receipt.state === "accepted") {
+      hidden.add(receipt.input_message_id)
+      continue
+    }
+    if (receipt.state === "claimed" && !owned.has(receipt.id)) {
+      hidden.add(receipt.input_message_id)
+    }
+  }
+  let ordered = msgs.filter(
+    (msg) =>
+      msg.info.sessionID !== sessionID ||
+      msg.info.role !== "user" ||
+      !hidden.has(msg.info.id) ||
+      !!msg.info.provenance ||
+      (msg.parts.length > 0 &&
+        msg.parts.every(
+          (part) => (part.type === "text" && part.synthetic) || part.type === "compaction" || part.type === "checkpoint",
+        )),
+  )
+  const deliveries = new Map<MessageID, MessageID[]>()
+  for (const receipt of [...receipts].sort((a, b) => a.id.localeCompare(b.id))) {
+    if (!receipt.input_message_id || !receipt.delivery_message_id || (!receipt.consumed && !owned.has(receipt.id))) continue
+    const ids = deliveries.get(receipt.delivery_message_id) ?? []
+    ids.push(receipt.input_message_id)
+    deliveries.set(receipt.delivery_message_id, ids)
+  }
+  // First delivery, not final settlement, fixes each batch before its own
+  // tool/assistant steps.
+  for (const [responseID, ids] of deliveries) {
+    const at = ordered.findIndex((msg) => msg.info.id === responseID)
+    if (at < 0) continue
+    const inputs = ids.map((messageID) => ordered.find((msg) => msg.info.id === messageID) ?? load(messageID))
+    ordered = ordered.filter((msg) => !ids.includes(msg.info.id))
+    ordered.splice(ordered.findIndex((msg) => msg.info.id === responseID), 0, ...inputs)
+  }
+  return ordered
+}
+
 export const filterCompactedEffect = Effect.fnUntraced(function* (
   sessionID: SessionID,
   options?: { contextFrom?: SessionID; contextWatermark?: MessageID; agentID?: string },

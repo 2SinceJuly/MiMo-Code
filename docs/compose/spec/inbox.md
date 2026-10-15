@@ -110,6 +110,8 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 用户 prompt 与 agent 输入共用 `inbox.accept`：`sessions.persistQueuedUser` 并入其中，不再单独存在。消息上的 `queueAdmission` 标记删除，排队状态只以 inbox 记录为准。
 
+`noReply` 的 prompt 只写入历史、不请求执行，所以不经受理：直接写成没有 inbox 记录的普通 user 消息，按可见性规则对模型可见，不递增 `input_revision`，不启动执行，也不会被之后的运行认领。
+
 跨会话投递与发送前接收方存在性检查（`InboxReceiverNotFound`）保留。inbox 不再存正文。`send` 的 `wake` / `isWakeCancelled` / `wakeEpoch` 参数由 `AdmissionGuard`（`isCancelled` / `expectedEpoch`）取代。会话停止时发出的子 actor 终止通知照常受理，随后由停止规则结算，没有单独的受理即作废路径。
 
 ## 唤醒
@@ -160,9 +162,9 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 fork 的目的是让新会话继承原会话的 prefix cache，所以新会话渲染出的上下文必须与原会话逐条一致。
 
-复制消息时按原会话渲染给模型的顺序写入：先按「可见性」过滤，再按 `delivery_message_id` 把已消费的输入移到对应 delivery 消息之前，然后按这个顺序为每条消息分配递增的新 MessageID（消息 ID 是全局主键，必须换新），assistant 的 `parentID` 指向对应的新 ID。仍在排队的输入（accepted 或 claimed 未消费）按受理顺序排在末尾。`messageID` 截断点按渲染顺序计算：只复制渲染序列中该消息之前的部分。
+复制消息时按原会话渲染给模型的顺序写入：先按「可见性」过滤，再按 `delivery_message_id` 把已消费的输入移到对应 delivery 消息之前，然后按这个顺序为每条消息分配递增的新 MessageID（消息 ID 是全局主键，必须换新），assistant 的 `parentID` 指向对应的新 ID。消息读取按创建时间排序、再按 ID 排序，所以复制时把每条消息的 `time.created` 取为它的原值与序列中前一条消息 `time.created` 的较大值，使创建时间沿渲染顺序不递减。仍在排队的输入（accepted 或 claimed 未消费）按受理顺序排在末尾。`messageID` 截断点按渲染顺序计算：只复制渲染序列中该消息之前的部分。
 
-fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会话里的消息全部是没有 inbox 记录的普通历史，按可见性规则对模型可见，原始 ID 顺序即渲染顺序。
+fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会话里的消息全部是没有 inbox 记录的普通历史，按可见性规则对模型可见，存储顺序即渲染顺序。
 
 ## 已发布数据
 
@@ -246,7 +248,7 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | `packages/cli/src/session/prompt.ts` | `requireClaim` / `inboxWake` / `deferInbox` / `inbox.drain` 调用 / `queuedPolicy` |
 | `packages/cli/src/session/resume-test-hooks.ts` | `inbox.drain` 相关注释与钩子 |
 
-## 测试点 (a)–(k)
+## 测试点 (a)–(o)
 
 | # | 场景 | 验收 |
 |---|---|---|
@@ -264,4 +266,5 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | (l) | 旧格式行渲染为空 | 启动转换时结算为 `rejected`，不写空消息 |
 | (m) | GC | 已结算记录在 `time_updated` 后 7 天清理；`accepted`/`claimed` 不清理 |
 | (n) | fork 继承上下文 | 原会话含插话（输入受理早于 delivery）时，fork 后新会话渲染的消息序列与原会话逐条一致（角色、内容、顺序）；新会话无 inbox 记录；按 `messageID` 截断时按渲染顺序截断 |
+| (o) | `noReply` prompt | 不产生 inbox 记录；之后的 prompt 不会执行它，也不会因它多出一次模型请求；下一次运行时对模型可见 |
 
