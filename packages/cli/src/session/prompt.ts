@@ -6140,7 +6140,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             claimOwner.receipts.map((r) => ({
               receiptId: r.id,
               outcome: failed ? ("assistant_error" as const) : ("success" as const),
-              messageId: final.info.role === "assistant" ? final.info.id : undefined,
               error: failed && final.info.role === "assistant" ? String(final.info.error) : undefined,
             })),
             runId,
