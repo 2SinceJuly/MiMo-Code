@@ -2,11 +2,7 @@ import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlit
 import { SessionTable } from "../session/session.sql"
 import type { SessionID, MessageID } from "../session/schema"
 
-/**
- * Per-lane input queue. Prompt rows carry `input_message_id` (the accepted user
- * message) and no `content`; legacy rows may still carry `content` and a null
- * `input_message_id` until accept conversion.
- */
+// 所有来源的输入均引用受理时写入的 user 消息；content 仅供旧格式启动转换。
 export const InboxTable = sqliteTable(
   "inbox",
   {

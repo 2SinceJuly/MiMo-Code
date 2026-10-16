@@ -34,6 +34,7 @@ export type AcceptInput = {
   senderSessionID?: SessionID
   senderActorID?: string
   idempotencyKey?: string
+  legacyInboxID?: string
 }
 
 export const ReceiptStateSchema = z.enum(["accepted", "claimed", "settled", "cancelled", "rejected"])

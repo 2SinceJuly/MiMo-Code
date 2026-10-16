@@ -80,18 +80,6 @@ export type EventWriterCachePerf = {
   }
 }
 
-export type EventInboxArrived = {
-  type: "inbox.arrived"
-  properties: {
-    receiverSessionID: string
-    receiverActorID: string
-    senderSessionID?: string
-    senderActorID?: string
-    inboxID: string
-    type: string
-  }
-}
-
 export type EventSessionReceiptUpdated = {
   type: "session.receipt.updated"
   properties: {
@@ -1153,7 +1141,13 @@ export type MachineProvenance = {
   machine: string
 }
 
-export type Provenance = HookProvenance | MachineProvenance
+export type AgentProvenance = {
+  source: "agent"
+  senderSessionID?: string
+  senderActorID?: string
+}
+
+export type Provenance = HookProvenance | MachineProvenance | AgentProvenance
 
 export type UserMessage = {
   id: string
@@ -1878,7 +1872,6 @@ export type GlobalEvent = {
     | EventActorStuck
     | EventActorStalled
     | EventWriterCachePerf
-    | EventInboxArrived
     | EventSessionReceiptUpdated
     | EventTaskCreated
     | EventTaskUpdated
@@ -3492,7 +3485,6 @@ export type Event =
   | EventActorStuck
   | EventActorStalled
   | EventWriterCachePerf
-  | EventInboxArrived
   | EventSessionReceiptUpdated
   | EventTaskCreated
   | EventTaskUpdated

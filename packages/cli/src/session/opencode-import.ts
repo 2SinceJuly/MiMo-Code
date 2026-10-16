@@ -103,10 +103,15 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
     }
 
     srcDb.get("BEGIN")
-    const queueTables = ["turn_receipt", "turn_lane_state", "turn_session_epoch", "turn_legacy_bootstrap"]
+    const queueTables = ["inbox", "inbox_lane_state", "inbox_session_epoch"]
     const present = queueTables.filter((name) => srcDb.get("SELECT name FROM sqlite_master WHERE type='table' AND name=?", name))
-    if (present.length > 0 && present.length !== queueTables.length) throw new Error("Incomplete source turn queue schema")
-    const hasQueue = present.length === queueTables.length
+    const legacyColumns = ["id", "receiver_session_id", "receiver_actor_id", "sender_session_id", "sender_actor_id", "type", "content", "created_at"]
+    const inboxColumns = present.includes("inbox") ? srcDb.all("PRAGMA table_info(inbox)") as { name: string }[] : []
+    const hasLegacyInbox = present.length === 1 && present[0] === "inbox" &&
+      inboxColumns.length === legacyColumns.length && inboxColumns.every((column) => legacyColumns.includes(column.name))
+    const hasSnapshot = present.length === queueTables.length
+    if (present.length > 0 && !hasSnapshot && !hasLegacyInbox) throw new Error("Incomplete source inbox schema")
+    const hasQueue = hasSnapshot || hasLegacyInbox
     const sessions = srcDb.all("SELECT * FROM session ORDER BY time_created DESC") as OcSession[]
 
     for (const sess of sessions) {
@@ -154,44 +159,27 @@ export async function run(opts?: { force?: boolean; dbPath?: string }): Promise<
           continue
         }
 
-        // External opencode DB keeps its historical turn_* table names. Rows are
-        // converted into the inbox snapshot shape on the way in: only prompt
-        // intents become inbox records (input_message_id = the accepted user message).
         const queue = hasQueue ? QueueSync.SnapshotSchema.parse({
           version: 1, sessionID: sess.id,
-          receipts: (srcDb.all("SELECT * FROM turn_receipt WHERE session_id = ? ORDER BY id", sess.id) as Record<string, unknown>[])
-            .flatMap((row) => {
-              const intent = typeof row.intent === "string" ? JSON.parse(row.intent) : row.intent
-              if (intent?.kind !== "prompt") return []
-              return [{
-                id: row.id,
-                receiver_session_id: row.session_id,
-                receiver_actor_id: row.agent_id,
-                sender_session_id: null,
-                sender_actor_id: null,
-                type: "prompt",
-                content: null,
-                input_message_id: intent.messageID,
-                state: row.state,
-                epoch: row.epoch,
-                run_id: row.run_id ?? null,
-                claim_frontier: row.claim_frontier ?? null,
-                consumed: !!row.consumed,
-                outcome: row.outcome ?? null,
-                delivery_message_id: row.delivery_message_id ?? null,
-                error: row.error ?? null,
-                idempotency_key: row.idempotency_key ?? "",
-                created_at: row.time_created,
-                time_updated: row.time_updated,
-              }]
-            }),
-          lanes: srcDb.all("SELECT * FROM turn_lane_state WHERE session_id = ? ORDER BY agent_id", sess.id),
-          epoch: srcDb.get("SELECT * FROM turn_session_epoch WHERE session_id = ?", sess.id),
+          receipts: (srcDb.all(hasLegacyInbox
+            ? `SELECT id, receiver_session_id, receiver_actor_id, sender_session_id, sender_actor_id, type, content,
+                NULL AS input_message_id, 'accepted' AS state, 0 AS epoch, NULL AS run_id, NULL AS claim_frontier,
+                0 AS consumed, NULL AS outcome, NULL AS delivery_message_id, NULL AS error, '' AS idempotency_key,
+                created_at, created_at AS time_updated FROM inbox WHERE receiver_session_id = ? ORDER BY id`
+            : "SELECT * FROM inbox WHERE receiver_session_id = ? ORDER BY id", sess.id) as Record<string, unknown>[])
+            .map((row) => ({
+              ...row,
+              content: typeof row.content === "string" ? JSON.parse(row.content) : row.content,
+              consumed: row.consumed === 1,
+            })),
+          lanes: hasSnapshot ? srcDb.all("SELECT * FROM inbox_lane_state WHERE session_id = ? ORDER BY agent_id", sess.id) : [],
+          epoch: hasSnapshot ? srcDb.get("SELECT * FROM inbox_session_epoch WHERE session_id = ?", sess.id) ?? null : null,
         }) : undefined
         const parsedMessages = messages.map((message) => {
           const data = typeof message.data === "string" ? JSON.parse(message.data) : message.data
           const agentID = message.agent_id ?? data.agentID ?? "main"
           delete data.agentID
+          delete data.queueAdmission
           return { ...message, agent_id: agentID as string, data }
         })
         const messageIds = messages.map((m) => m.id as MessageID)

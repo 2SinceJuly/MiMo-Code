@@ -61,7 +61,7 @@ describe("spawn ownership before detached work", () => {
           })),
         ),
       )
-      const send = spyOn(inbox, "send")
+      const send = spyOn(inbox, "accept")
       const unexpectedPrompt = spyOn(prompt, "prompt").mockImplementation(() => Effect.die(new Error("work must not start")))
       try {
         const pending = yield* actors.spawn({
@@ -126,7 +126,7 @@ describe("spawn ownership before detached work", () => {
         Effect.andThen(original(execution, work, scope, onRejected)),
       )
     })
-    const send = spyOn(inbox, "send")
+    const send = spyOn(inbox, "accept")
     const rejectedWork = spyOn(prompt, "prompt").mockImplementation(() => Effect.die(new Error("fixture stopped new work")))
     let allocate: ReturnType<typeof spyOn<typeof registry, "allocateActorID">> | undefined
     try {

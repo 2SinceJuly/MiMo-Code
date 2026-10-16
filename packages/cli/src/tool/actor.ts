@@ -281,7 +281,7 @@ export const ActorTool = Tool.define(
           }
           const targetSid = op.to_session_id !== undefined ? SessionID.make(op.to_session_id) : ctx.sessionID
           const sendResult = yield* inboxSvc
-            .send({
+            .accept({
               receiverSessionID: targetSid,
               receiverActorID: op.to_actor_id,
               senderSessionID: ctx.sessionID,
@@ -307,9 +307,10 @@ export const ActorTool = Tool.define(
           }
           return {
             title: `Sent to ${op.to_actor_id}`,
-            output: JSON.stringify({ inboxID: sendResult.inboxID }),
+            output: JSON.stringify(sendResult),
             metadata: {
               inboxID: sendResult.inboxID,
+              inputMessageID: sendResult.inputMessageID,
               receiver_actor_id: op.to_actor_id,
               receiver_session_id: targetSid,
             } as Record<string, any>,

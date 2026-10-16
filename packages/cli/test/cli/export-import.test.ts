@@ -51,12 +51,14 @@ const queuedFixture = Effect.fn("test.queuedExportFixture")(function* () {
   })
   for (const [index, state] of ["settled", "accepted", "claimed", "cancelled", "rejected"].entries()) {
     queue.receipts.push(QueueSync.ReceiptRowSchema.parse({
-      id: `receipt-${session.id}-${index}`, session_id: session.id, agent_id: index === 1 ? "worker" : "main",
-      intent: index === 1 ? { kind: "shell", command: "SECRET-COMMAND", cwd: "SECRET-CWD" } : { kind: "prompt", messageID: main.id },
+      id: `receipt-${session.id}-${index}`, receiver_session_id: session.id, receiver_actor_id: index === 1 ? "worker" : "main",
+      sender_session_id: session.id, sender_actor_id: "main", type: index === 1 ? "text" : "prompt",
+      content: index === 1 ? { text: "SECRET-CONTENT" } : null,
+      input_message_id: index === 1 ? null : main.id,
       state, epoch: index === 3 ? 7 : 8, run_id: index === 2 ? 9 : null, claim_frontier: main.id,
-      consumed: index === 0, suspended: index === 1, outcome: index === 0 ? "success" : null,
-      message_id: index === 0 ? answer.id : null, delivery_message_id: index === 0 ? answer.id : null,
-      error: index === 4 ? "SECRET-ERROR" : null, idempotency_key: `SECRET-KEY-${index}`, time_created: 10 + index, time_updated: 100,
+      consumed: index === 0, outcome: index === 0 ? "success" : null,
+      delivery_message_id: index === 0 ? answer.id : null,
+      error: index === 4 ? "SECRET-ERROR" : null, idempotency_key: `SECRET-KEY-${index}`, created_at: 10 + index, time_updated: 100,
     }))
   }
   yield* Effect.sync(() => Database.transaction((tx) => QueueSync.applySnapshot(queue, tx)))
@@ -154,7 +156,7 @@ describe("CLI session transport", () => {
   it.live("receipt failure rolls back the entire imported transcript", provideTmpdirInstance(() => Effect.gen(function* () {
     const { sessions, session, data } = yield* queuedFixture()
     yield* sessions.remove(session.id)
-    Database.Client().$client.exec("CREATE TEMP TRIGGER reject_transport_receipt BEFORE INSERT ON turn_receipt BEGIN SELECT RAISE(ABORT, 'receipt failure'); END")
+    Database.Client().$client.exec("CREATE TEMP TRIGGER reject_transport_receipt BEFORE INSERT ON inbox BEGIN SELECT RAISE(ABORT, 'receipt failure'); END")
     try {
       expect(() => storeImportedSession(data.info, data.messages, data.queue)).toThrow("receipt failure")
       expect(Database.use((db) => db.select().from(SessionTable).where(eq(SessionTable.id, session.id)).get())).toBeUndefined()

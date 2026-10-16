@@ -60,8 +60,10 @@ export interface Interface {
     lane: Lane,
     runId: number,
     expectedEpoch?: number,
+    limit?: number,
   ) => Effect.Effect<{ receipts: Receipt[]; claimFrontier: MessageID | undefined } | undefined>
   readonly observeInput: (lane: Lane, afterRevision: number) => Effect.Effect<number>
+  readonly withStop: <A, E, R>(sessionID: SessionID, work: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   readonly abortSession: (sessionID: SessionID) => Effect.Effect<number>
   readonly getEpoch: (sessionID: SessionID) => Effect.Effect<number>
   readonly reconcileOnBoot: (sessionID: SessionID) => Effect.Effect<void>
@@ -90,7 +92,7 @@ function toReceipt(row: typeof InboxTable.$inferSelect): Receipt {
   }
 }
 
-/** Prompt records only: input_message_id set, content not used for queueing. */
+// 仅认领已经完成消息写入的输入。
 const promptOnly = sql`${InboxTable.input_message_id} is not null`
 
 export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
@@ -101,47 +103,36 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     /** Per-lane waiters for observeInput (in-process). */
     const inputWaiters = new Map<string, Set<Deferred.Deferred<number>>>()
     const reconciled = new Set<SessionID>()
-    const waiterKey = (lane: Lane) => `${lane.sessionID}:${lane.agentID}`
-
-    const bumpRevision = (lane: Lane, identity: ExecutionOwnership.Identity) =>
-      Effect.gen(function* () {
-        const now = Date.now()
-        const row = yield* Effect.sync(() =>
-          Database.transaction((db) => {
-            ExecutionOwnership.assertOwnership(db, lane.sessionID, identity)
-            const row = db.insert(InboxLaneStateTable)
-              .values({
-                session_id: lane.sessionID,
-                agent_id: lane.agentID,
-                input_revision: 1,
-                time_updated: now,
-              })
-              .onConflictDoUpdate({
-                target: [InboxLaneStateTable.session_id, InboxLaneStateTable.agent_id],
-                set: {
-                  input_revision: sql`${InboxLaneStateTable.input_revision} + 1`,
-                  time_updated: now,
-                },
-              })
-              .returning().get()!
-            InboxSync.record({ sessionID: lane.sessionID, lanes: [row] })
-            return row
-          }),
-        )
-        const rev = row?.input_revision ?? 0
-        const waiters = inputWaiters.get(waiterKey(lane))
-        if (waiters) {
-          for (const d of [...waiters]) {
-            waiters.delete(d)
-            // Concurrent accepts can race two bumps; skip already-completed waiters.
-            const done = yield* Deferred.isDone(d)
-            if (done) continue
-            Deferred.doneUnsafe(d, Effect.succeed(rev))
+    const stopping = new Map<SessionID, number>()
+    const cancelInputs = (db: Database.TxOrDb, sessionID: SessionID, now: number) =>
+      db.update(InboxTable).set({
+        state: "cancelled",
+        outcome: sql`CASE WHEN ${InboxTable.consumed} THEN 'interrupted' ELSE 'never_ran' END`,
+        time_updated: now,
+      }).where(and(eq(InboxTable.receiver_session_id, sessionID),
+        inArray(InboxTable.state, ["accepted", "claimed"]))).returning().all()
+    const withStop = <A, E, R>(sessionID: SessionID, work: Effect.Effect<A, E, R>) =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => stopping.set(sessionID, (stopping.get(sessionID) ?? 0) + 1)),
+        () => work,
+        () => Effect.gen(function* () {
+          const remaining = stopping.get(sessionID)! - 1
+          if (remaining > 0) {
+            stopping.set(sessionID, remaining)
+            return
           }
-          if (waiters.size === 0) inputWaiters.delete(waiterKey(lane))
-        }
-        return rev
-      })
+          const identity = yield* ExecutionOwnership.captureIdentity
+          const rows = yield* Effect.sync(() => Database.transaction((db) => {
+            ExecutionOwnership.assertOwnership(db, sessionID, identity)
+            const rows = cancelInputs(db, sessionID, Date.now())
+            InboxSync.record({ sessionID, receipts: rows })
+            return rows
+          }))
+          for (const row of rows) yield* publish(toReceipt(row))
+          stopping.delete(sessionID)
+        }),
+      )
+    const waiterKey = (lane: Lane) => `${lane.sessionID}:${lane.agentID}`
 
     const getEpoch = Effect.fn("Inbox.getEpoch")(function* (sessionID: SessionID) {
       const row = yield* Effect.sync(() =>
@@ -187,6 +178,11 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         const epoch = db.select().from(InboxSessionEpochTable)
           .where(eq(InboxSessionEpochTable.session_id, input.lane.sessionID)).get()?.epoch ?? 0
         if (guard?.expectedEpoch !== undefined && epoch !== guard.expectedEpoch) return undefined
+        const legacy = input.legacyInboxID
+          ? db.select().from(InboxTable).where(eq(InboxTable.id, input.legacyInboxID)).get()
+          : undefined
+        if (input.legacyInboxID && !legacy) throw new Error("Legacy inbox record missing")
+        if (legacy?.input_message_id) return { row: legacy, kind: "existing" as const }
         const idempotencyKey = input.idempotencyKey ?? ""
         if (idempotencyKey) {
           const row = db.select().from(InboxTable).where(and(
@@ -228,7 +224,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           })
         }
 
-        const id = ulid()
+        const id = input.legacyInboxID ?? ulid()
         const row = db.insert(InboxTable)
           .values({
             id,
@@ -244,6 +240,10 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             idempotency_key: idempotencyKey,
             created_at: now,
             time_updated: now,
+          })
+          .onConflictDoUpdate({
+            target: InboxTable.id,
+            set: { content: null, input_message_id: input.message.id, time_updated: now },
           })
           .returning().get()!
         const laneRow = db.insert(InboxLaneStateTable)
@@ -278,7 +278,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     const maybeKick = (lane: Lane) =>
       Effect.gen(function* () {
         const sched = schedulerRef.current
-        if (!sched) return
+        if (!sched || stopping.has(lane.sessionID)) return
         const bridge = yield* EffectBridge.make()
         void bridge.promise(sched.kick(lane)).catch(() => undefined)
       })
@@ -315,8 +315,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           if (waiters.size === 0) inputWaiters.delete(waiterKey(input.lane))
         }
         yield* publish(receipt)
-        yield* maybeKick(input.lane)
-      } else if (!guard && (receipt.state === "accepted" || receipt.state === "claimed")) {
+        if (!input.legacyInboxID) yield* maybeKick(input.lane)
+      } else if (!guard && !input.legacyInboxID && (receipt.state === "accepted" || receipt.state === "claimed")) {
         yield* maybeKick(input.lane)
       }
       return receipt
@@ -342,11 +342,13 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return rows.map(toReceipt).sort((a, b) => a.id.localeCompare(b.id))
     })
 
-    const claim = (lane: Lane, runId: number, expectedEpoch: number | undefined, requireOwner: boolean) =>
+    const claim = (lane: Lane, runId: number, expectedEpoch: number | undefined, requireOwner: boolean, limit = MAX_CLAIM_PER_STEP) =>
       Effect.gen(function* () {
+        if (limit === 0) return undefined
         const identity = yield* ExecutionOwnership.captureIdentity
         const batch = yield* Effect.sync(() => Database.transaction((db) => {
           ExecutionOwnership.assertOwnership(db, lane.sessionID, identity)
+          if (stopping.has(lane.sessionID)) return undefined
           const epoch = db.select().from(InboxSessionEpochTable)
             .where(eq(InboxSessionEpochTable.session_id, lane.sessionID)).get()?.epoch ?? 0
           if (expectedEpoch !== undefined && epoch !== expectedEpoch) return undefined
@@ -369,7 +371,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             eq(InboxTable.state, "accepted"),
             promptOnly,
             eq(InboxTable.epoch, epoch),
-          )).orderBy(InboxTable.id).limit(MAX_CLAIM_PER_STEP).all().map(toReceipt)
+          )).orderBy(InboxTable.id).limit(limit).all().map(toReceipt)
           if (eligible.length === 0) return undefined
           let claimFrontier = frontier
           for (const row of owned) {
@@ -472,8 +474,8 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       for (const row of rows) yield* publish(toReceipt(row))
     })
 
-    const extendClaim = Effect.fn("Inbox.extendClaim")(function* (lane: Lane, runId: number, expectedEpoch?: number) {
-      return yield* claim(lane, runId, expectedEpoch, true)
+    const extendClaim = Effect.fn("Inbox.extendClaim")(function* (lane: Lane, runId: number, expectedEpoch?: number, limit?: number) {
+      return yield* claim(lane, runId, expectedEpoch, true, limit)
     })
 
     const observeInput = Effect.fn("Inbox.observeInput")(function* (lane: Lane, afterRevision: number) {
@@ -488,8 +490,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         set = new Set()
         inputWaiters.set(key, set)
       }
-      // Check-subscribe-recheck: close the gap between load and subscribe so a
-      // concurrent bumpRevision cannot be missed (spec: no gap).
+      // 订阅前后读取 revision，避免遗漏并发受理。
       set.add(deferred)
       const current2 = yield* loadLane(lane)
       const rev2 = current2?.input_revision ?? 0
@@ -505,7 +506,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
     const abortSession = Effect.fn("Inbox.abortSession")(function* (sessionID: SessionID) {
       const identity = yield* ExecutionOwnership.captureIdentity
       const now = Date.now()
-      const nextEpoch = yield* Effect.sync(() =>
+      const stopped = yield* Effect.sync(() =>
         Database.transaction((db) => {
           ExecutionOwnership.assertOwnership(db, sessionID, identity)
           const epochRow = db.insert(InboxSessionEpochTable)
@@ -516,29 +517,14 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             })
             .returning().get()!
           const nextEpoch = epochRow.epoch
-          // Stop rule: accepted/claimed prompt records → cancelled.
-          // outcome by consumed: interrupted (read) / never_ran (unread).
-          const receipts = db.update(InboxTable)
-            .set({
-              state: "cancelled",
-              outcome: sql`CASE WHEN ${InboxTable.consumed} THEN 'interrupted' ELSE 'never_ran' END`,
-              time_updated: now,
-            })
-            .where(
-              and(
-                eq(InboxTable.receiver_session_id, sessionID),
-                promptOnly,
-                inArray(InboxTable.state, ["accepted", "claimed"]),
-                ne(InboxTable.epoch, nextEpoch),
-              ),
-            )
-            .returning().all()
+          const receipts = cancelInputs(db, sessionID, now)
           InboxSync.record({ sessionID, receipts, epoch: epochRow })
-          return nextEpoch
+          return { epoch: nextEpoch, receipts }
         }),
       )
-      log.info("inbox abort", { sessionID, epoch: nextEpoch })
-      return nextEpoch
+      for (const row of stopped.receipts) yield* publish(toReceipt(row))
+      log.info("inbox abort", { sessionID, epoch: stopped.epoch })
+      return stopped.epoch
     })
 
     const reconcileOnBoot = Effect.fn("Inbox.reconcileOnBoot")(function* (sessionID: SessionID) {
@@ -617,6 +603,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       ack,
       extendClaim,
       observeInput,
+      withStop,
       abortSession,
       getEpoch,
       reconcileOnBoot,

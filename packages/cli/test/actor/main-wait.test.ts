@@ -5,7 +5,9 @@ import { ActorWaiter, DEFAULT_TIMEOUT_MS, WAIT_TIMEOUT_HINT } from "../../src/ac
 import { Plugin } from "../../src/plugin"
 import { ActorExecution } from "../../src/actor/execution"
 import { spawnRef } from "../../src/actor/spawn-ref"
-import { inboxServiceRef, sessionPromptRef } from "../../src/inbox/inbox-ref"
+import { inboxServiceRef } from "../../src/inbox/inbox-ref"
+import { schedulerRef } from "../../src/inbox/scheduler"
+import { makeTerminalNotifier } from "../../src/actor/notification"
 import { InboxTable } from "../../src/inbox/inbox.sql"
 import { ActorTool } from "../../src/tool/actor"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -28,6 +30,8 @@ import { reply, TestLLMServer } from "../lib/llm-server"
 import { Bus } from "../../src/bus"
 import { TuiEvent } from "../../src/cli/cmd/tui/event"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
+import { ReceiptUpdated } from "../../src/inbox/events"
+import { EffectBridge } from "../../src/effect"
 
 const it = testEffect(
   Layer.mergeAll(AppLayer, ActorExecution.layer, CrossSpawnSpawner.defaultLayer, TestLLMServer.layer),
@@ -119,15 +123,15 @@ const trackTerminalNotifications = (sessionID: SessionID) => Effect.gen(function
   if (!inbox) throw new Error("fixture did not initialize Inbox")
   const delivered: string[] = []
   yield* Effect.acquireRelease(Effect.sync(() => {
-    const previous = inbox.send
-    Object.assign(inbox, { send: (input: Parameters<typeof previous>[0]) => Effect.gen(function* () {
-      const result = yield* previous(input)
+    const previous = inbox.accept
+    Object.assign(inbox, { accept: (input: Parameters<typeof previous>[0], guard: Parameters<typeof previous>[1]) => Effect.gen(function* () {
+      const result = yield* previous(input, guard)
       if (input.receiverSessionID === sessionID && input.receiverActorID === "main"
         && input.senderActorID === "general-1" && input.type === "actor_notification") delivered.push(input.content)
       return result
     }) })
     return previous
-  }), (previous) => Effect.sync(() => { Object.assign(inbox, { send: previous }) }))
+  }), (previous) => Effect.sync(() => { Object.assign(inbox, { accept: previous }) }))
   return delivered
 })
 
@@ -679,7 +683,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* llm.text("MAIN-ACKNOWLEDGED-CHILD")
           const owners = {
             actor: spawnRef.current,
-            prompt: sessionPromptRef.current,
+            prompt: schedulerRef.current,
             queue: inboxControllerRef.current,
           }
           expect(owners.actor).toBeDefined()
@@ -689,7 +693,7 @@ describe("main automatically waits for subagent executions", () => {
           yield* waiting(session.id)
           yield* busy(session.id)
           expect(spawnRef.current).toBe(owners.actor)
-          expect(sessionPromptRef.current).toBe(owners.prompt)
+          expect(schedulerRef.current).toBe(owners.prompt)
           expect(inboxControllerRef.current).toBe(owners.queue)
           expect(yield* llm.calls).toBe(3)
           const actor = (yield* registry.listBySession(session.id)).find((actor) => actor.agent === "general")
@@ -769,16 +773,16 @@ describe("main automatically waits for subagent executions", () => {
       const inbox = inboxServiceRef.current
       if (!inbox) throw new Error("fixture did not initialize Inbox")
       yield* Effect.acquireRelease(Effect.sync(() => {
-        const previous = inbox.send
-        Object.assign(inbox, { send: (input: Parameters<typeof previous>[0]) => Effect.gen(function* () {
+        const previous = inbox.accept
+        Object.assign(inbox, { accept: (input: Parameters<typeof previous>[0], guard: Parameters<typeof previous>[1]) => Effect.gen(function* () {
           if (input.receiverSessionID === session.id && input.senderActorID === "general-1" && input.type === "actor_notification") {
             yield* Deferred.succeed(notifyEntered, undefined)
             yield* Deferred.await(notifyRelease)
           }
-          return yield* previous(input)
+          return yield* previous(input, guard)
         }) })
         return previous
-      }), (previous) => Effect.sync(() => { Object.assign(inbox, { send: previous }) }))
+      }), (previous) => Effect.sync(() => { Object.assign(inbox, { accept: previous }) }))
       yield* llm.pushMatch((hit) => {
         if (!Array.isArray(hit.body.messages)) return false
         const last = hit.body.messages.at(-1)
@@ -843,7 +847,7 @@ describe("main automatically waits for subagent executions", () => {
   for (const formatChange of ["preserve", "replace", "clear"] as const) it.live(
     formatChange === "preserve"
       ? "structured automatic wait preserves its schema after a partial child completion notification"
-      : `structured automatic wait honors user format ${formatChange} arriving with a child notification`,
+      : `structured continuation honors user format ${formatChange} arriving with a child notification`,
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
       const sessions = yield* Session.Service
       const prompt = yield* SessionPrompt.Service
@@ -854,10 +858,12 @@ describe("main automatically waits for subagent executions", () => {
       const finished = yield* child(session.id, "child-1")
       const pending = yield* child(session.id, "child-2")
       const response = Promise.withResolvers<void>()
-      yield* Effect.addFinalizer(() => Effect.sync(() => response.resolve()))
+      const firstResponse = Promise.withResolvers<void>()
+      yield* Effect.addFinalizer(() => Effect.sync(() => { response.resolve(); firstResponse.resolve() }))
       const replacementSchema = { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] }
       const finalStructured = formatChange === "replace" ? { summary: "AFTER-NOTIFICATION" } : { answer: "AFTER-NOTIFICATION" }
-      yield* llm.tool("StructuredOutput", { answer: "BEFORE-NOTIFICATION" })
+      if (formatChange === "preserve") yield* llm.tool("StructuredOutput", { answer: "BEFORE-NOTIFICATION" })
+      else yield* llm.push(reply().wait(firstResponse.promise).tool("StructuredOutput", { answer: "BEFORE-NOTIFICATION" }))
       if (formatChange === "clear") yield* llm.hold("PLAIN-AFTER-NOTIFICATION", response.promise)
       else yield* llm.push(reply().wait(response.promise).tool("StructuredOutput", finalStructured))
       yield* Effect.addFinalizer(() => prompt.cancel(session.id))
@@ -865,11 +871,12 @@ describe("main automatically waits for subagent executions", () => {
         sessionID: session.id, agent: "build", parts: [{ type: "text", text: "Return the answer in the schema." }],
         format: { type: "json_schema", schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }, retryCount: 0 },
       }).pipe(Effect.forkChild)
-      yield* waiting(session.id)
+      if (formatChange === "preserve") yield* waiting(session.id)
+      else yield* llm.wait(1)
       expect(yield* llm.calls).toBe(1)
-      yield* inbox.send({
+      yield* inbox.accept({
         receiverSessionID: session.id, receiverActorID: "main", senderSessionID: session.id, senderActorID: "child-1",
-        type: "actor_notification", wake: false,
+        type: "actor_notification",
         content: '<actor-notification actor_id="child-1" status="completed">PARTIAL-CHILD-RESULT</actor-notification>',
       })
       if (formatChange !== "preserve") yield* prompt.promptAsync({
@@ -878,6 +885,7 @@ describe("main automatically waits for subagent executions", () => {
         format: formatChange === "replace" ? { type: "json_schema", schema: replacementSchema, retryCount: 0 } : undefined,
       })
       yield* complete(finished)
+      firstResponse.resolve()
       yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
       const inputs = yield* llm.inputs
       const structuredTool = (input: Record<string, unknown>) =>
@@ -888,7 +896,7 @@ describe("main automatically waits for subagent executions", () => {
       else {
         expect(JSON.stringify(inputs[1]!.messages)).toContain(`USER-FORMAT-${formatChange}`)
         const lastUser = (yield* sessions.messages({ sessionID: session.id })).findLast((message) => message.info.role === "user")
-        expect(lastUser?.parts.every((part) => part.type === "text" && part.synthetic)).toBe(true)
+        expect(lastUser?.parts.some((part) => part.type === "text" && part.text.includes(`USER-FORMAT-${formatChange}`))).toBe(true)
         if (formatChange === "replace") expect(structuredTool(inputs[1]!)?.function.parameters).toEqual(replacementSchema)
         else expect(structuredTool(inputs[1]!)).toBeUndefined()
       }
@@ -940,9 +948,9 @@ describe("main automatically waits for subagent executions", () => {
       if (!original || original.info.role !== "user") throw new Error("original schema A user missing")
       // Client-allocated before the notification arrives, sent only later.
       const messageID = MessageID.ascending()
-      yield* inbox.send({
+      yield* inbox.accept({
         receiverSessionID: session.id, receiverActorID: "main", senderSessionID: session.id, senderActorID: "child-1",
-        type: "actor_notification", wake: false,
+        type: "actor_notification",
         content: '<actor-notification actor_id="child-1" status="completed">LATE-ADMISSION-NOTIFICATION</actor-notification>',
       })
       yield* complete(finished)
@@ -1462,18 +1470,18 @@ describe("main automatically waits for subagent executions", () => {
       const resume = yield* Deferred.make<void>()
       const settled = yield* Deferred.make<void>()
       yield* Effect.acquireRelease(Effect.sync(() => {
-        const previous = inbox.send
-        Object.assign(inbox, { send: (input: Parameters<typeof previous>[0]) => {
+        const previous = inbox.accept
+        Object.assign(inbox, { accept: (input: Parameters<typeof previous>[0], guard: Parameters<typeof previous>[1]) => {
           if (input.receiverSessionID !== session.id || input.receiverActorID !== "main"
-            || input.senderActorID !== "general-1" || input.type !== "actor_notification") return previous(input)
+            || input.senderActorID !== "general-1" || input.type !== "actor_notification") return previous(input, guard)
           return Effect.gen(function* () {
             yield* Deferred.succeed(entered, undefined)
             yield* Deferred.await(resume)
-            return yield* previous(input)
+            return yield* previous(input, guard)
           }).pipe(Effect.ensuring(Deferred.succeed(settled, undefined)))
         } })
         return previous
-      }), (previous) => Effect.sync(() => { Object.assign(inbox, { send: previous }) }))
+      }), (previous) => Effect.sync(() => { Object.assign(inbox, { accept: previous }) }))
       yield* llm.pushMatch((hit) => {
         if (!Array.isArray(hit.body.messages)) return false
         const last = hit.body.messages.at(-1)
@@ -1561,19 +1569,19 @@ describe("main automatically waits for subagent executions", () => {
         return previous
       }), (previous) => Effect.sync(() => { inboxControllerRef.current = previous }))
       yield* Effect.acquireRelease(Effect.sync(() => {
-        const previous = sessionPromptRef.current
+        const previous = schedulerRef.current
         if (!previous) throw new Error("fixture did not initialize SessionPrompt")
-        sessionPromptRef.current = { ...previous, loop: (input) => {
-          if (input.sessionID !== session.id || input.agentID !== "main" || !input.inboxWake) return previous.loop(input)
+        schedulerRef.current = { ...previous, kick: (input) => {
+          if (input.sessionID !== session.id || input.agentID !== "main" || !delayed) return previous.kick(input)
           dispatches++
           return Effect.gen(function* () {
             yield* Deferred.succeed(dispatchEntered, undefined)
             yield* Deferred.await(resumeDispatch)
-            return yield* previous.loop(input)
+            return yield* previous.kick(input)
           }).pipe(Effect.ensuring(Deferred.succeed(dispatchSettled, undefined)))
         } }
         return previous
-      }), (previous) => Effect.sync(() => { sessionPromptRef.current = previous }))
+      }), (previous) => Effect.sync(() => { schedulerRef.current = previous }))
       yield* llm.pushMatch((hit) => {
         if (!Array.isArray(hit.body.messages)) return false
         const last = hit.body.messages.at(-1)
@@ -1777,6 +1785,103 @@ describe("main automatically waits for subagent executions", () => {
         }),
       { git: true, config },
     ),
+    20000,
+  )
+
+  it.live(
+    "actor cancellation after claim and before runLoop settles unread input without a model request",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const executions = yield* ActorExecution.Service
+      const controller = yield* InboxController.Service
+      const bridge = yield* EffectBridge.make()
+      const actor = spawnRef.current
+      const inbox = inboxServiceRef.current
+      if (!actor || !inbox) throw new Error("Actor and inbox services missing")
+      const parent = yield* sessions.create({ title: "cancel claimed continuation" })
+      yield* llm.text("INITIAL-CHILD-RESULT")
+      const child = yield* actor.spawn({
+        sessionID: parent.id, mode: "subagent", agentType: "build", task: "initial task",
+        context: "none", tools: [], background: true,
+      })
+      expect((yield* Deferred.await(child.outcome)).status).toBe("success")
+      const initialExecution = yield* executions.current(child.sessionID, child.actorID)
+      if (initialExecution) yield* Deferred.await(initialExecution.done)
+      const claimed = yield* Deferred.make<string>()
+      let cancellation: Fiber.Fiber<void> | undefined
+      const onReceipt = (event: GlobalEvent) => {
+        if (event.payload.type !== ReceiptUpdated.type) return
+        const receipt = ReceiptUpdated.properties.parse(event.payload.properties)
+        if (receipt.sessionID !== child.sessionID || receipt.agentID !== child.actorID || receipt.state !== "claimed") return
+        const execution = executions.currentUnsafe(child.sessionID, child.actorID)
+        if (!execution) throw new Error("Claimed continuation execution missing")
+        Effect.runSync(executions.requestCancel(execution))
+        cancellation = bridge.fork(actor.cancel(child.sessionID, child.actorID, "forced"))
+        Deferred.doneUnsafe(claimed, Effect.succeed(receipt.receiptId))
+      }
+      yield* Effect.acquireRelease(
+        Effect.sync(() => GlobalBus.on("event", onReceipt)),
+        () => Effect.sync(() => { GlobalBus.off("event", onReceipt) }),
+      )
+      const input = yield* inbox.accept({
+        receiverSessionID: child.sessionID, receiverActorID: child.actorID,
+        senderSessionID: parent.id, senderActorID: "main", content: "CANCEL-BEFORE-MODEL",
+      })
+      expect(yield* Deferred.await(claimed).pipe(Effect.timeout("5 seconds"))).toBe(input.inboxID)
+      yield* until(controller.getReceipt(input.inboxID).pipe(Effect.map((receipt) => receipt.state === "cancelled")))
+      if (!cancellation) throw new Error("Cancellation did not start")
+      yield* Fiber.join(cancellation).pipe(Effect.timeout("5 seconds"))
+      const receipt = yield* controller.getReceipt(input.inboxID)
+      expect(receipt.outcome).toBe("never_ran")
+      expect(receipt.consumed).toBe(false)
+      expect(receipt.deliveryMessageID).toBeUndefined()
+      expect(yield* llm.calls).toBe(1)
+      const messages = yield* sessions.messages({ sessionID: child.sessionID, agentID: child.actorID })
+      expect(messages.some((message) => message.info.id === input.inputMessageID)).toBe(true)
+      expect(yield* executions.current(child.sessionID, child.actorID)).toBeUndefined()
+      expect(yield* controller.listAccepted(receipt.lane)).toEqual([])
+    }), { git: true, config }),
+    20000,
+  )
+
+  // inbox (a), (b)
+  for (const explicit of [true, false]) it.live(
+    `${explicit ? "explicit" : "automatic"} wait is interrupted by another child's completion notification`,
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const registry = yield* ActorRegistry.Service
+      const inbox = inboxServiceRef.current
+      if (!inbox) throw new Error("Inbox service missing")
+      const session = yield* sessions.create({ title: "notification interrupts wait" })
+      const first = yield* child(session.id, "child-a")
+      const second = yield* child(session.id, "child-b")
+      if (explicit) yield* llm.tool("actor", { operation: { action: "wait", actor_id: "child-a", timeout_ms: 10000 } })
+      else yield* llm.text("WAITING-FOR-CHILDREN")
+      yield* llm.text("NOTIFICATION-ACKNOWLEDGED")
+      const main = yield* start(session.id)
+      if (explicit) yield* until(sessions.messages({ sessionID: session.id }).pipe(Effect.map((messages) =>
+        messages.some((message) => message.parts.some((part) => part.type === "tool" && part.tool === "actor" && part.state.status === "running")))))
+      else yield* waiting(session.id)
+      yield* complete(second)
+      yield* makeTerminalNotifier({ inbox, registry, sessions })({
+        sessionID: session.id, actorID: "child-b", source: "spawn", status: "completed", result: "CHILD-B-COMPLETED",
+      })
+      yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
+      const inputs = yield* llm.inputs
+      expect(JSON.stringify(inputs[1].messages)).toContain("CHILD-B-COMPLETED")
+      if (explicit) {
+        const parts = (yield* sessions.messages({ sessionID: session.id })).flatMap((message) => message.parts)
+        const waited = parts.find((part) => part.type === "tool" && part.tool === "actor" && part.state.status === "completed")
+        if (!waited || waited.type !== "tool" || waited.state.status !== "completed") throw new Error("Actor wait did not finish")
+        expect(waited.state.output).toContain('"status":"interrupted"')
+      }
+      expect(first.execution.cancelled).toBe(false)
+      expect(first.fiber.pollUnsafe()).toBeUndefined()
+      expect((yield* registry.get(session.id, "child-a"))?.status).toBe("running")
+      yield* complete(first)
+      yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
+      expect(yield* llm.calls).toBe(2)
+    }), { git: true, config }),
     20000,
   )
 

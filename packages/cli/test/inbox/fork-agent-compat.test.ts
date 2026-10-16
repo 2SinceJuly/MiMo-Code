@@ -1,17 +1,3 @@
-/**
- * Fork-agent inbox compat test — Plan 4 / Task 5
- *
- * Key invariant (from docs/superpowers/specs/2026-05-26-fork-agent-prefix-cache-design.md):
- *   When a fork agent (contextMode="full") receives an inbox message, the
- *   `inheritedMessages` snapshot captured at spawn time must NOT be invalidated.
- *   Drain writes only to the fork's own agentID slice (beyond the watermark);
- *   the inherited prefix is untouched.
- *
- * Acceptance tier: structural (tier 2) + slice-routing (tier 3).
- *   - Tier 2: getForkContext() before and after drain — inheritedMessages identical.
- *   - Tier 3: drained synthetic message lands in fork's slice, NOT main's slice.
- */
-
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, describe, expect } from "bun:test"
@@ -248,7 +234,7 @@ function providerCfg(url: string) {
 }
 
 describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
-  it.live("tier 2+3: inheritedMessages snapshot unchanged after inbox drain, synthetic msg in fork slice only", () =>
+  it.live("inbox admission preserves inheritedMessages and writes only to the fork slice", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
         const actor = yield* Actor.Service
@@ -304,9 +290,6 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
         expect(forkCtxBefore?.system).toEqual(["inherited-system-prompt"])
         expect(forkCtxBefore?.inheritedMessages).toHaveLength(2)
 
-        // Seed a real message in the fork's slice so drain's lastReal predicate
-        // can resolve. Drain requires a prior real assistant/user turn in the
-        // fork's agentID slice before it will write the synthetic user message.
         const user = yield* session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -333,15 +316,12 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
         })
 
         // Send an inbox message to the fork actor.
-        yield* inbox.send({
+        yield* inbox.accept({
           receiverSessionID: parent.id,
           receiverActorID: forkActorID,
           content: "inbox-message-for-fork",
         })
 
-        // Tier 3 — slice routing: drain it manually.
-        const drained = yield* inbox.drain(parent.id, forkActorID)
-        expect(drained).toBe(1)
 
         // Tier 2 — structural: forkContext must still have the exact same
         // inheritedMessages snapshot. Drain must not touch forkContexts.
@@ -367,7 +347,6 @@ describe("Fork-agent inbox compat (Plan 4 / Task 5)", () => {
           .join("")
         expect(syntheticText).toContain("inbox-message-for-fork")
 
-        // Main slice must NOT contain any synthetic parts (drain never wrote there).
         expect(mainSynthetic.length).toBe(0)
 
         // Cleanup: cancel the hanging fork fiber.

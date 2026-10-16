@@ -12,7 +12,6 @@ import { Bus } from "../../src/bus"
 import { TaskRegistry } from "../../src/task/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { Inbox } from "../../src/inbox"
-import { sessionPromptRef } from "../../src/inbox/inbox-ref"
 import { schedulerRef } from "../../src/inbox"
 import { SessionPrompt } from "../../src/session/prompt"
 import { SessionStatus } from "../../src/session/status"
@@ -336,11 +335,10 @@ test("leftover owned task leaves delivery body untouched", async () => {
 }, 30000)
 
 // Desktop tool-step-schema [TP-R14-08] [TP-R14-11].
-test("inbox waits for the entire spawn execution before starting a continuation", async () => {
+test("hook steps claim queued inbox inputs and late inputs continue after execution release", async () => {
   const server = startScriptedLLMServer([
     { lines: textStopResponse("SPAWN-RESULT") },
     { lines: textStopResponse("POST-RESULT") },
-    { lines: textStopResponse("WOKEN-RESULT") },
     { lines: textStopResponse("LATE-WOKEN-RESULT") },
   ])
   await using tmp = await tmpdir({
@@ -372,12 +370,9 @@ test("inbox waits for the entire spawn execution before starting a continuation"
             const sessions = yield* Session.Service
             const registry = yield* ActorRegistry.Service
             const inbox = yield* Inbox.Service
-            const prompt = yield* SessionPrompt.Service
-            const previous = sessionPromptRef.current
             const previousScheduler = schedulerRef.current
             yield* Effect.addFinalizer(() =>
               Effect.sync(() => {
-                sessionPromptRef.current = previous
                 schedulerRef.current = previousScheduler
               }),
             )
@@ -402,7 +397,6 @@ test("inbox waits for the entire spawn execution before starting a continuation"
               yield* Effect.sleep("10 millis")
             expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, "entered")).exists())).toBe(true)
             // Spawn initialization can replace global refs with another runtime's services.
-            sessionPromptRef.current = { loop: prompt.loop }
             schedulerRef.current = previousScheduler
             const bus = yield* Bus.Service
             const context = yield* Effect.context<Services>()
@@ -416,10 +410,10 @@ test("inbox waits for the entire spawn execution before starting a continuation"
               )
                 return
               completions++
-              if (completions === 2)
+              if (completions === 1)
                 lateSend = Effect.runPromiseWith(context)(
                   attach(
-                    inbox.send({
+                    inbox.accept({
                       receiverSessionID: child.sessionID,
                       receiverActorID: child.actorID,
                       senderSessionID: parent.id,
@@ -430,14 +424,14 @@ test("inbox waits for the entire spawn execution before starting a continuation"
                 )
             })
             yield* Effect.addFinalizer(() => Effect.sync(unsubscribe))
-            yield* inbox.send({
+            yield* inbox.accept({
               receiverSessionID: child.sessionID,
               receiverActorID: child.actorID,
               senderSessionID: parent.id,
               senderActorID: "main",
               content: "woken probe",
             })
-            yield* inbox.send({
+            yield* inbox.accept({
               receiverSessionID: child.sessionID,
               receiverActorID: child.actorID,
               senderSessionID: parent.id,
@@ -461,14 +455,15 @@ test("inbox waits for the entire spawn execution before starting a continuation"
               if (texts.includes("LATE-WOKEN-RESULT")) break
               yield* Effect.sleep("10 millis")
             }
-            expect(texts.filter((text) => text === "WOKEN-RESULT")).toHaveLength(1)
+            expect(texts.filter((text) => text === "POST-RESULT")).toHaveLength(1)
             expect(texts.filter((text) => text === "LATE-WOKEN-RESULT")).toHaveLength(1)
             yield* Effect.promise(() => lateSend!)
             yield* Effect.sleep("100 millis")
             const after = yield* sessions.messages({ sessionID: child.sessionID, agentID: child.actorID })
-            expect(after.filter((message) => message.info.role === "assistant")).toHaveLength(4)
-            expect(JSON.stringify(server.captures[1].messages)).not.toContain("woken probe")
-            expect(JSON.stringify(server.captures[1].messages)).not.toContain("another queued message")
+            expect(after.filter((message) => message.info.role === "assistant")).toHaveLength(3)
+            expect(JSON.stringify(server.captures[1].messages)).toContain("woken probe")
+            expect(JSON.stringify(server.captures[1].messages)).toContain("another queued message")
+            expect(JSON.stringify(server.captures[2].messages)).toContain("late wake at terminal boundary")
           }).pipe(Effect.scoped, Effect.provide(Inbox.defaultLayer)),
         ),
     })

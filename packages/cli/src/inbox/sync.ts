@@ -18,13 +18,6 @@ function parse<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   return result.data
 }
 
-export const IntentSchema = z.object({
-  messageID: MessageID.zod,
-  type: z.string(),
-  senderSessionID: SessionID.zod.optional(),
-  senderActorID: z.string().optional(),
-})
-
 export const ReceiptRowSchema = z.object({
   id: z.string().min(1),
   receiver_session_id: SessionID.zod,

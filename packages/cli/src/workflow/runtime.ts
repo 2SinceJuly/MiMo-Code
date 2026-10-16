@@ -461,7 +461,7 @@ export const layer = Layer.effect(
     const cancelChild = (child: ChildExecution) => {
       const actor = spawnRef.current
       return actor
-        ? actor.cancel(child.sessionID, child.actorID, "graceful", { wake: false }).pipe(
+        ? actor.cancel(child.sessionID, child.actorID, "graceful").pipe(
             Effect.provideService(InstanceRef, child.context),
           )
         : Effect.void
@@ -1416,15 +1416,10 @@ export const layer = Layer.effect(
           yield* WorkflowPersistence.recordTerminal({ runID, status: "completed" }).pipe(Effect.ignore)
           yield* Deferred.succeed(deferred, { status: "completed", result: result.success })
           yield* bus.publish(WorkflowFinished, { sessionID: input.sessionID, runID, status: "completed" })
-          // Notify the parent so its next turn drains a completion message, the
-          // same way background actors notify on terminal (see actor/spawn.ts
-          // forkWork.notify). Fire-and-forget: a notify failure (e.g. parent row
-          // gone) must never fail the run, and wait-ers are already unblocked
-          // above by Deferred.succeed. Skipped when notifyOnTerminal === false (the
-          // tool's sync path returns the result inline; a notify would duplicate it).
+          // 同步工具已直接返回结果时跳过通知，避免重复向父 agent 交付。
           if (input.notifyOnTerminal !== false)
             yield* inbox
-              .send({
+              .accept({
                 receiverSessionID: input.sessionID,
                 receiverActorID: input.parentActorID,
                 senderSessionID: input.sessionID,
@@ -1448,7 +1443,7 @@ export const layer = Layer.effect(
         yield* bus.publish(WorkflowFinished, { sessionID: input.sessionID, runID, status: "failed", error })
         if (input.notifyOnTerminal !== false)
           yield* inbox
-            .send({
+            .accept({
               receiverSessionID: input.sessionID,
               receiverActorID: input.parentActorID,
               senderSessionID: input.sessionID,

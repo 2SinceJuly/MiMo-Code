@@ -3,12 +3,13 @@ import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import type { Interface as Inbox } from "@/inbox/inbox"
+import type { AdmissionGuard } from "@/inbox/controller"
 import { renderActorNotification } from "@/inbox/render"
 import type { SessionID } from "@/session/schema"
 import type { Service as SessionService } from "@/session/session"
 import type { Interface as Registry } from "./registry"
 
-export interface TerminalNotification {
+export interface TerminalNotification extends AdmissionGuard {
   sessionID: SessionID
   actorID: string
   source: "spawn" | "continuation" | "pending"
@@ -20,10 +21,6 @@ export interface TerminalNotification {
   reportedStatus?: string
   reportedSummary?: string
   warnings?: string[]
-  /** Persist inbox row without auto-waking the parent (session abort). Default true. */
-  wake?: boolean
-  isWakeCancelled?: () => boolean
-  wakeEpoch?: number
 }
 
 export function makeTerminalNotifier(deps: {
@@ -41,15 +38,12 @@ export function makeTerminalNotifier(deps: {
         input.parentSessionID ??
         (actor.mode === "peer" ? (yield* deps.sessions.get(input.sessionID)).parentID : input.sessionID)
       if (!parentSessionID) return yield* Effect.fail(new Error("actor parent session missing"))
-      const sent = yield* deps.inbox.send({
+      yield* deps.inbox.accept({
         receiverSessionID: parentSessionID,
         receiverActorID: input.parentActorID ?? actor.parentActorID ?? "main",
         senderSessionID: input.sessionID,
         senderActorID: input.actorID,
         type: "actor_notification",
-        ...(input.wake === false ? { wake: false } : {}),
-        ...(input.isWakeCancelled ? { isWakeCancelled: input.isWakeCancelled } : {}),
-        ...(input.wakeEpoch !== undefined ? { wakeEpoch: input.wakeEpoch } : {}),
         content: renderActorNotification({
           actorID: input.actorID,
           description: actor.description,
@@ -60,9 +54,8 @@ export function makeTerminalNotifier(deps: {
           ...(input.reportedSummary ? { reportedSummary: input.reportedSummary } : {}),
           ...(input.warnings?.length ? { warnings: input.warnings } : {}),
         }),
-      })
+      }, { isCancelled: input.isCancelled, expectedEpoch: input.expectedEpoch })
       if (input.source === "continuation") return
-      if (sent.wakeSuppressed || input.wake === false || input.isWakeCancelled?.()) return
       yield* Effect.promise(() =>
         Bus.publish(TuiEvent.ToastShow, {
           message: `Child "${actor.description}" ${input.status}`,

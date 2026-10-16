@@ -8,7 +8,7 @@ import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { Database, and, eq } from "../../src/storage"
-import { InboxController, inboxControllerRef } from "../../src/inbox"
+import { InboxController, inboxControllerRef, schedulerRef } from "../../src/inbox"
 import { InboxLaneStateTable, InboxTable } from "../../src/inbox/inbox.sql"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -117,6 +117,19 @@ const successful = Effect.fn(function* (receiptId: string) {
   expect(receipt.state).toBe("settled")
   expect(receipt.outcome).toBe("success")
   expect(receipt.consumed).toBe(true)
+})
+
+const runAccepted = Effect.fn(function* (sessionID: SessionID, receiptId: string) {
+  const scheduler = schedulerRef.current
+  if (!scheduler) throw new Error("Inbox scheduler missing")
+  yield* scheduler.kick({ sessionID, agentID: "main" })
+  const controller = yield* InboxController.Service
+  while (["accepted", "claimed"].includes((yield* controller.getReceipt(receiptId)).state))
+    yield* Effect.sleep("10 millis")
+  const sessions = yield* Session.Service
+  const result = (yield* sessions.messages({ sessionID, agentID: "main" })).findLast((message) => message.info.role === "assistant")
+  if (!result) throw new Error("Assistant result missing")
+  return result
 })
 
 function answer(result: MessageV2.WithParts, text: string, parentID: MessageID) {
@@ -229,8 +242,7 @@ describe("InboxController admission and claim acceptance without child execution
               expect(receipt.epoch).toBe(epoch)
               if (change === "replace") yield* llm.tool("StructuredOutput", { summary: "U1-NEW-ANSWER" })
               else yield* llm.text("U1-NEW-PLAIN-ANSWER")
-              const result = yield* prompt
-                .loop({ sessionID: session.id, requireClaim: true, expectedEpoch: epoch })
+              const result = yield* runAccepted(session.id, receipt.id)
                 .pipe(Effect.timeout("10 seconds"))
               expect(yield* llm.calls).toBe(3)
               const input = (yield* llm.inputs)[2]!
@@ -370,8 +382,7 @@ describe("InboxController admission and claim acceptance without child execution
           const receipt = yield* acceptUser(session.id, "PROJECTION-LATE-U1", undefined, lowerID)
           yield* llm.tool("read", { file_path: dir })
           yield* llm.text("PROJECTION-U1-COMPLETED")
-          const result = yield* prompt
-            .loop({ sessionID: session.id, requireClaim: true, expectedEpoch: receipt.epoch })
+          const result = yield* runAccepted(session.id, receipt.id)
             .pipe(Effect.timeout("10 seconds"))
           answer(result, "PROJECTION-U1-COMPLETED", lowerID)
           yield* successful(receipt.id)
@@ -532,8 +543,7 @@ describe("InboxController admission and claim acceptance without child execution
             expect(yield* llm.calls).toBe(1)
             yield* llm.tool("read", { file_path: dir })
             yield* llm.text("PENDING-BOUNDARY-ANSWER")
-            const result = yield* prompt
-              .loop({ sessionID: session.id, requireClaim: true, expectedEpoch: receipt.epoch })
+            const result = yield* runAccepted(session.id, receipt.id)
               .pipe(Effect.timeout("10 seconds"))
             answer(result, "PENDING-BOUNDARY-ANSWER", pendingID)
             expect(compactions).toBe(timing === "before run" ? 0 : 1)

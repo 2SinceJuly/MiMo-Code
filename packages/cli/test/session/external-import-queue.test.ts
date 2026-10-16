@@ -23,7 +23,6 @@ import { TestLLMServer } from "../lib/llm-server"
 import { captureExportData } from "../../src/cli/cmd/export"
 import { storeImportedSession } from "../../src/cli/cmd/import"
 import { ProviderID, ModelID } from "../../src/provider/schema"
-import { schedulerRef } from "../../src/inbox/scheduler"
 
 const it = testEffect(Layer.mergeAll(AppLayer, CrossSpawnSpawner.defaultLayer, TestLLMServer.layer))
 const config = (url: string) => ({
@@ -39,15 +38,15 @@ describe("external imported history execution", () => {
     const message = yield* sessions.updateMessage({
       id: MessageID.ascending(), sessionID: session.id, agentID: "main", role: "user", time: { created: Date.now() },
       agent: "build", model: { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") },
-      queueAdmission: { epoch: 4, ready: true, dispatch: true },
     })
     const queue = QueueSync.capture(session.id)
     queue.epoch = { session_id: session.id, epoch: 4, time_updated: 10 }
     for (const [index, receiptState] of ["accepted", "claimed"].entries()) queue.receipts.push(QueueSync.ReceiptRowSchema.parse({
-      id: `native-${session.id}-${index}`, session_id: session.id, agent_id: "main", state: receiptState,
-      intent: { kind: "prompt", messageID: message.id }, epoch: 4, run_id: index === 1 ? 77 : null,
-      claim_frontier: message.id, consumed: false, suspended: false, outcome: null,
-      message_id: null, delivery_message_id: null, error: null, idempotency_key: "", time_created: 1, time_updated: 10,
+      id: `native-${session.id}-${index}`, receiver_session_id: session.id, receiver_actor_id: "main", state: receiptState,
+      sender_session_id: null, sender_actor_id: null, type: "prompt", content: null, input_message_id: message.id,
+      epoch: 4, run_id: index === 1 ? 77 : null,
+      claim_frontier: message.id, consumed: false, outcome: null,
+      delivery_message_id: null, error: null, idempotency_key: "", created_at: 1, time_updated: 10,
     }))
     yield* Effect.sync(() => Database.transaction((tx) => QueueSync.applySnapshot(queue, tx)))
     const data = yield* Effect.sync(() => captureExportData(session.id))
@@ -59,32 +58,28 @@ describe("external imported history execution", () => {
     expect(yield* llm.calls).toBe(0)
   }), { git: true, config }), 20000)
 
-  it.live("OpenCode queue-only import does not kick an accepted shell or create a lease", provideTmpdirServer(({ dir, llm }) => Effect.gen(function* () {
+  it.live("OpenCode queue-only import preserves accepted input without creating a lease", provideTmpdirServer(({ dir, llm }) => Effect.gen(function* () {
     const sessionID = SessionID.descending()
     const file = path.join(dir, "queue-only-source.db")
     const src = new SQLite(file)
     try {
-      for (const table of ["session", "message", "part", "turn_receipt", "turn_lane_state", "turn_session_epoch", "turn_legacy_bootstrap"]) {
+      for (const table of ["session", "message", "part", "inbox", "inbox_lane_state", "inbox_session_epoch"]) {
         const schema = Database.Client().$client.query<{ sql: string }, [string]>("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table)!
         src.exec(schema.sql)
       }
       src.prepare("INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated) VALUES(?, 'global', 'queue-only', ?, 'Queue only', '1', 1, 1)").run(sessionID, dir)
-      src.prepare("INSERT INTO turn_receipt(id,session_id,agent_id,state,intent,epoch,time_created,time_updated) VALUES(?,?,'main','accepted',?,0,1,1)")
-        .run(`shell-${sessionID}`, sessionID, JSON.stringify({ kind: "shell", command: "pwd" }))
+      src.prepare("INSERT INTO inbox(id,receiver_session_id,receiver_actor_id,type,content,state,epoch,created_at,time_updated) VALUES(?,?,'main','text',?,'accepted',0,1,1)")
+        .run(`input-${sessionID}`, sessionID, JSON.stringify({ text: "Queued input" }))
     } finally { src.close() }
-    const previous = schedulerRef.current
-    let kicks = 0
-    schedulerRef.current = { kick: () => Effect.sync(() => { kicks++ }) }
-    try {
-      const result = yield* Effect.promise(() => OpencodeImport.run({ dbPath: file }))
-      expect(result.errors).toEqual([])
-      expect(result.imported).toBe(1)
-      yield* Effect.yieldNow
-      expect(kicks).toBe(0)
-      yield* (yield* SessionRunState.Service).assertNotBusy(sessionID)
-      expect(yield* llm.calls).toBe(0)
-      expect(QueueSync.capture(sessionID).receipts[0]).toMatchObject({ state: "accepted", run_id: null, consumed: false })
-    } finally { schedulerRef.current = previous }
+    const result = yield* Effect.promise(() => OpencodeImport.run({ dbPath: file }))
+    expect(result.errors).toEqual([])
+    expect(result.imported).toBe(1)
+    yield* Effect.yieldNow
+    yield* (yield* SessionRunState.Service).assertNotBusy(sessionID)
+    expect(yield* llm.calls).toBe(0)
+    expect(QueueSync.capture(sessionID).receipts[0]).toMatchObject({
+      state: "accepted", run_id: null, consumed: false, content: { text: "Queued input" }, input_message_id: null,
+    })
   }), { git: true, config }), 20000)
 
   for (const source of ["cc", "codex", "opencode"] as const) {

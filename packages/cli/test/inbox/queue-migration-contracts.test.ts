@@ -1,10 +1,4 @@
 import { describe, expect, it } from "bun:test"
-/**
- * [C-01] Runner has no pending-attach dual owner.
- * [C-02] Inbox admits wake without a dual loop() path (covered in inbox tests).
- * [C-04] prompt_async returns 202 + receiptId.
- * [C-08] /message busy path is admit+202, not assertNotBusy TOCTOU 409.
- */
 describe("turn-queue full migration contracts", () => {
   it("RunHandle has no pending field (C-01 source guard)", async () => {
     const src = await Bun.file(
@@ -15,11 +9,11 @@ describe("turn-queue full migration contracts", () => {
     expect(src).toContain("NO pending-attach")
   })
 
-  it("inbox send force-runs the loop to drain content rows (C-02)", async () => {
+  it("agent inputs use unified controller admission (C-02)", async () => {
     const src = await Bun.file(new URL("../../src/inbox/inbox.ts", import.meta.url).pathname).text()
-    expect(src).toContain("promptRef.loop({")
-    expect(src).toContain("inboxWake: true")
-    expect(src).toContain("isNotNull(InboxTable.content)")
+    expect(src).toContain("controller.accept({")
+    expect(src).not.toContain("promptRef.loop")
+    expect(src).not.toContain("inboxWake")
   })
 
   it("prompt_async documents 202 + receiptId (C-04 source guard)", async () => {
@@ -44,7 +38,8 @@ describe("turn-queue full migration contracts", () => {
   it("loop claims and acks via Controller (C-01)", async () => {
     const src = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
     expect(src).toContain("claimNext")
-    expect(src).toContain("extendClaim")
-    expect(src).toContain("C-01: claim eligible receipts")
+    expect(src).toContain("controller.extendClaim(")
+    expect(src).toContain("controller.ack(")
+    expect(src).toContain("settleClaims(")
   })
 })

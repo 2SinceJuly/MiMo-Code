@@ -202,6 +202,10 @@ export function sanitize(data: ReturnType<typeof captureExportData>) {
       ...data.queue,
       receipts: data.queue.receipts.map((row) => ({
         ...row,
+        content: row.content ? {
+          ...row.content,
+          text: row.content.text === undefined ? undefined : redact("receipt-content", row.id, row.content.text),
+        } : row.content,
         error: row.error === null ? null : redact("receipt-error", row.id, row.error),
         idempotency_key: redact("receipt-key", row.id, row.idempotency_key),
       })),

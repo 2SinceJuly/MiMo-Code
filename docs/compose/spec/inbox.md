@@ -95,18 +95,18 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 ```
 
 - `settled` + `assistant_error`：回合已跑，assistant 消息带错误。
-- 一个 `runId` 可认领 N 条记录；运行结束每条 claimed 记录得到终态。
+- 一个 `runId` 可认领 N 条记录；认领与执行通过 `acquireUseRelease` 形成完整生命周期，退出时统一结算，覆盖已认领但尚未进入 `runLoop` 的取消。`runLoop` 共用结算处理，成功、assistant 错误与执行中断均覆盖，每条 claimed 记录得到终态。
 - 幂等：唯一性按会话（`receiver_session_id` + `idempotency_key`）。并发 accept 同键一条插入胜出，另一条返回同一记录。
 
 ## 受理（accept）
 
 一个事务内完成：
 
-1. 把输入写成接收方切片的一条 user 消息。agent 发来的标记 `synthetic`，并带发送方 provenance。synthetic 消息的 `agent`/`model` 在受理时按接收方确定（`resolveDrainSeed` 语义：standing peer 跨切片搜索；workflow 父 agent 只搜本切片，防止子 actor 通知凭空产生真实回合）。
+1. 把输入写成接收方切片的一条 user 消息。agent 发来的标记 `synthetic`，消息 provenance 为 `{ source: "agent", senderSessionID?, senderActorID? }`。synthetic 消息的 `agent`/`model` 在受理时按接收方确定（`resolveDrainSeed` 语义：standing peer 跨切片搜索，无历史时使用注册 agent 与默认模型；workflow 父 agent 只搜本切片）。缺少接收方模型来源的协调切片使用 `system` agent/model 保存消息；`laneKick` 仅在接收方切片能够解析真实模型时执行，防止子 actor 通知凭空产生真实回合。
 2. 写一行 inbox 记录：`state=accepted`、`epoch`、`input_message_id` 指向该消息、幂等键、`type`、发送方。
 3. 递增该 lane 的 `input_revision`。
 
-事务提交后发布 `session.receipt.updated`。lane 空闲时经唯一调度路径（`schedulerRef.kick`）启动执行。
+事务提交后发布 `session.receipt.updated`。lane 空闲时经唯一调度路径（`schedulerRef.kick`）启动执行。`laneKick` 在执行租约内认领输入；子 actor 的续执行先取得 `ActorExecution`，再认领待处理记录，认领为空时结束，不发送额外终止通知。spawn/hook 初始执行沿用其外层 actor 生命周期，续执行由自己的 `runTurn` 负责终止通知。
 
 用户 prompt 与 agent 输入共用 `inbox.accept`：`sessions.persistQueuedUser` 并入其中，不再单独存在。消息上的 `queueAdmission` 标记删除，排队状态只以 inbox 记录为准。
 
@@ -133,7 +133,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 ## 停止
 
-用户停止时，该会话所有 `accepted`/`claimed` 记录结算为 `cancelled`：`outcome` 按是否已被模型读入取 `interrupted`（`consumed=true`）或 `never_ran`（`consumed=false`）。消息留在消息记录里、对模型可见，不自动执行。下次任何输入触发运行时模型会看到它们。用户 prompt 与 agent 消息同一规则。`keep-suspended` / `drop` 策略与 `suspended` 列删除。
+用户停止时，该会话所有 `accepted`/`claimed` 记录结算为 `cancelled`：`outcome` 按是否已被模型读入取 `interrupted`（`consumed=true`）或 `never_ran`（`consumed=false`）。停止操作由 `withStop` 包围：期间抑制该会话的调度与认领，输入仍正常受理；停止操作收尾复用相同结算规则处理期间收到的输入，不再次递增 epoch。消息留在消息记录里、对模型可见，不自动执行。下次任何输入触发运行时模型会看到它们。用户 prompt 与 agent 消息同一规则。`keep-suspended` / `drop` 策略与 `suspended` 列删除。
 
 `abortSession` 仍递增会话 epoch；epoch 低于当前值的 `accepted`/`claimed` 记录不可再被认领。
 
@@ -168,7 +168,7 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 
 ## 已发布数据
 
-用户机器上可能存在旧格式待处理 inbox 行（有 `content`、无 `input_message_id`）。inbox 服务启动时把它们转为新模型：用与受理相同的写消息逻辑把 `content` 渲染为一条 synthetic user 消息，写入 `input_message_id` 并清空 `content`，`state` 保持 `accepted`、`input_revision` 照增。这是唯一的转换实现；`content` 列只为这些旧行保留为可空，新行永远为空。渲染为空白的旧行直接结算为 `rejected`。
+用户机器上可能存在旧格式待处理 inbox 行（有 `content`、无 `input_message_id`）。inbox 服务启动时把它们转为新模型：用与受理相同的写消息逻辑把 `content` 渲染为一条 synthetic user 消息，写入 `input_message_id` 并清空 `content`，`state` 保持 `accepted`、`input_revision` 照增。这是唯一的转换实现；`content` 列只为这些旧行保留为可空，新行永远为空。正文为空白或渲染为空白的旧行直接结算为 `rejected`，同时清空 `content`，后续启动不再转换。
 
 ## GC
 
@@ -263,7 +263,7 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | (i) | workflow 父 agent 收到子 agent 通知 | 不凭空产生真实回合（`resolveDrainSeed` 切片范围回归） |
 | (j) | 压缩溢出后续跑 | `test/session/turn-queue-admission.test.ts:740` 场景 |
 | (k) | `deliveryMessageID` 与回执事件 | `test/server/session-prompt-busy.test.ts:356` 场景 |
-| (l) | 旧格式行渲染为空 | 启动转换时结算为 `rejected`，不写空消息 |
+| (l) | 旧格式行正文或渲染为空 | 启动转换时结算为 `rejected`，不写空消息，重复启动无额外变更 |
 | (m) | GC | 已结算记录在 `time_updated` 后 7 天清理；`accepted`/`claimed` 不清理 |
 | (n) | fork 继承上下文 | 原会话含插话（输入受理早于 delivery）时，fork 后新会话渲染的消息序列与原会话逐条一致（角色、内容、顺序）；新会话无 inbox 记录；按 `messageID` 截断时按渲染顺序截断 |
 | (o) | `noReply` prompt | 不产生 inbox 记录；之后的 prompt 不会执行它，也不会因它多出一次模型请求；下一次运行时对模型可见 |

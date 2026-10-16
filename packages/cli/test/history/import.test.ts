@@ -47,9 +47,10 @@ function nativeContinuation(sessionID: SessionID) {
   snapshot.epoch = { session_id: sessionID, epoch: 7, time_updated: 10 }
   snapshot.lanes = [{ session_id: sessionID, agent_id: "main", consumed_frontier: id, input_revision: 9, time_updated: 10 }]
   const receipt = QueueSync.ReceiptRowSchema.parse({
-    id: `native-${id}`, session_id: sessionID, agent_id: "main", state: "settled", intent: { kind: "prompt", messageID: id },
-    epoch: 7, run_id: 4, claim_frontier: id, consumed: true, suspended: false, outcome: "success",
-    message_id: null, delivery_message_id: null, error: null, idempotency_key: id, time_created: 1, time_updated: 10,
+    id: `native-${id}`, receiver_session_id: sessionID, receiver_actor_id: "main", state: "settled",
+    sender_session_id: null, sender_actor_id: null, type: "prompt", content: null, input_message_id: id,
+    epoch: 7, run_id: 4, claim_frontier: id, consumed: true, outcome: "success",
+    delivery_message_id: null, error: null, idempotency_key: id, created_at: 1, time_updated: 10,
   })
   snapshot.receipts.push(receipt)
   Database.transaction((tx) => QueueSync.applySnapshot(snapshot, tx))
@@ -295,20 +296,19 @@ test("OpenCode queue snapshots preserve claims and reject queue-only divergence 
     src.exec(`CREATE TABLE session(id TEXT, directory TEXT, slug TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER);
       CREATE TABLE message(id TEXT, session_id TEXT, agent_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
       CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-      CREATE TABLE turn_session_epoch(session_id TEXT, epoch INTEGER, time_updated INTEGER);
-      CREATE TABLE turn_lane_state(session_id TEXT, agent_id TEXT, consumed_frontier TEXT, input_revision INTEGER, time_updated INTEGER);
-      CREATE TABLE turn_legacy_bootstrap(session_id TEXT, message_ids TEXT, completed INTEGER, time_updated INTEGER);
-      CREATE TABLE turn_receipt(id TEXT, session_id TEXT, agent_id TEXT, state TEXT, intent TEXT, epoch INTEGER, run_id INTEGER,
-        claim_frontier TEXT, consumed INTEGER, suspended INTEGER, outcome TEXT, message_id TEXT, delivery_message_id TEXT,
-        error TEXT, idempotency_key TEXT, time_created INTEGER, time_updated INTEGER);
+      CREATE TABLE inbox_session_epoch(session_id TEXT, epoch INTEGER, time_updated INTEGER);
+      CREATE TABLE inbox_lane_state(session_id TEXT, agent_id TEXT, consumed_frontier TEXT, input_revision INTEGER, time_updated INTEGER);
+      CREATE TABLE inbox(id TEXT, receiver_session_id TEXT, receiver_actor_id TEXT, sender_session_id TEXT, sender_actor_id TEXT,
+        type TEXT, content TEXT, input_message_id TEXT, state TEXT, epoch INTEGER, run_id INTEGER,
+        claim_frontier TEXT, consumed INTEGER, outcome TEXT, delivery_message_id TEXT,
+        error TEXT, idempotency_key TEXT, created_at INTEGER, time_updated INTEGER);
       INSERT INTO session VALUES('ses_native_import', '/tmp/example', 'example', 'Example', '1', 1, 1);
-      INSERT INTO message VALUES('msg_native_import', 'ses_native_import', 'worker', 1, 1, '{"role":"user","queueAdmission":{"epoch":6,"ready":true,"dispatch":false}}');
+      INSERT INTO message VALUES('msg_native_import', 'ses_native_import', 'worker', 1, 1, '{"role":"user"}');
       INSERT INTO part VALUES('part_native_import', 'msg_native_import', 'ses_native_import', 1, 1, '{"type":"text","text":"nativequeue"}');
-      INSERT INTO turn_session_epoch VALUES('ses_native_import', 6, 10);
-      INSERT INTO turn_lane_state VALUES('ses_native_import', 'worker', 'msg_native_import', 9, 10);
-      INSERT INTO turn_legacy_bootstrap VALUES('ses_native_import', '[]', 1, 10);
-      INSERT INTO turn_receipt VALUES('native-import-receipt', 'ses_native_import', 'worker', 'claimed',
-        '{"kind":"prompt","messageID":"msg_native_import"}', 6, 99, 'msg_native_import', 0, 0, NULL, NULL, 'msg_native_import', NULL, 'native-key', 1, 10);`)
+      INSERT INTO inbox_session_epoch VALUES('ses_native_import', 6, 10);
+      INSERT INTO inbox_lane_state VALUES('ses_native_import', 'worker', 'msg_native_import', 9, 10);
+      INSERT INTO inbox VALUES('native-import-receipt', 'ses_native_import', 'worker', NULL, NULL, 'prompt', NULL,
+        'msg_native_import', 'claimed', 6, 99, 'msg_native_import', 0, NULL, 'msg_native_import', NULL, 'native-key', 1, 10);`)
     const first = await OpencodeImport.run({ dbPath: file })
     expect(first.errors).toEqual([])
     expect(first.imported).toBe(1)
@@ -318,9 +318,9 @@ test("OpenCode queue snapshots preserve claims and reject queue-only divergence 
     expect(queue.lanes[0].input_revision).toBe(9)
     expect(queue.receipts[0]).toMatchObject({ state: "claimed", run_id: 99, delivery_message_id: "msg_native_import", consumed: false })
     expect(Database.Client().select().from(MessageTable).get()!.agent_id).toBe("worker")
-    expect(Database.Client().select().from(MessageTable).get()!.data).toHaveProperty("queueAdmission")
+    expect(Database.Client().select().from(MessageTable).get()!.data).not.toHaveProperty("queueAdmission")
     expect((await OpencodeImport.run({ dbPath: file })).skipped).toBe(1)
-    src.exec("UPDATE turn_receipt SET state = 'cancelled', outcome = 'never_ran'")
+    src.exec("UPDATE inbox SET state = 'cancelled', outcome = 'never_ran'")
     const conflict = await OpencodeImport.run({ dbPath: file })
     expect(conflict.errors).toHaveLength(1)
     expect(conflict.errors[0]).toContain("conflicts with existing session")

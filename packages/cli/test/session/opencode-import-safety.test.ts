@@ -9,8 +9,8 @@ import { SessionTable } from "../../src/session/session.sql"
 import { stopIndexMigration } from "../../src/history/migration"
 import { tmpdir } from "../fixture/fixture"
 
-const tables = ["project", "session", "message", "part", "history_fts", "external_import", "turn_receipt", "turn_lane_state", "turn_session_epoch", "turn_legacy_bootstrap"]
-const queueTables = ["turn_receipt", "turn_lane_state", "turn_session_epoch", "turn_legacy_bootstrap"]
+const tables = ["project", "session", "message", "part", "history_fts", "external_import", "inbox", "inbox_lane_state", "inbox_session_epoch"]
+const queueTables = ["inbox", "inbox_lane_state", "inbox_session_epoch"]
 
 beforeEach(() => {
   const db = Database.Client()
@@ -115,24 +115,79 @@ test("OpenCode refuses a stored ownership list containing another session's mess
   } finally { src.close() }
 })
 
-for (const withShell of [false, true]) test(`OpenCode imports an empty native transcript with ${withShell ? "an accepted shell" : "epoch/bootstrap only"}`, async () => {
+for (const withInput of [false, true]) test(`OpenCode imports an empty native transcript with ${withInput ? "an accepted input" : "epoch only"}`, async () => {
   await using dir = await tmpdir()
   const file = path.join(dir.path, "queue-only.db")
   const src = source(file)
   try {
     session(src)
-    insert(src, "turn_session_epoch", { session_id: "ses_import_a", epoch: 4, time_updated: 2 })
-    insert(src, "turn_legacy_bootstrap", { session_id: "ses_import_a", message_ids: "[]", completed: 1, time_updated: 2 })
-    if (withShell) insert(src, "turn_receipt", { id: "receipt_shell", session_id: "ses_import_a", agent_id: "main", state: "accepted",
-      intent: JSON.stringify({ kind: "shell", command: "pwd" }), epoch: 4, time_created: 1, time_updated: 2 })
+    insert(src, "inbox_session_epoch", { session_id: "ses_import_a", epoch: 4, time_updated: 2 })
+    if (withInput) insert(src, "inbox", { id: "receipt_input", receiver_session_id: "ses_import_a", receiver_actor_id: "main", state: "accepted",
+      type: "text", content: JSON.stringify({ text: "Pending input" }), epoch: 4, created_at: 1, time_updated: 2 })
     const result = await OpencodeImport.run({ dbPath: file })
     expect(result.errors).toEqual([])
     expect(result.imported).toBe(1)
     const queue = QueueSync.capture(SessionID.make("ses_import_a"))
-    // Shell intents no longer map to inbox records (spec: exclusive entry points).
-    expect(queue.receipts).toEqual([])
+    expect(queue.receipts).toHaveLength(withInput ? 1 : 0)
+    if (withInput) expect(queue.receipts[0]).toMatchObject({
+      state: "accepted", content: { text: "Pending input" }, input_message_id: null, consumed: false, run_id: null,
+    })
     expect(queue.epoch?.epoch).toBe(4)
     expect((await OpencodeImport.run({ dbPath: file })).skipped).toBe(1)
+  } finally { src.close() }
+})
+
+for (const withTranscript of [false, true]) test(`OpenCode imports published legacy inbox with ${withTranscript ? "history" : "queue only"} without losing pending content`, async () => {
+  await using dir = await tmpdir()
+  const file = path.join(dir.path, "published-inbox.db")
+  const src = source(file, false)
+  try {
+    src.exec(await Bun.file(path.join(import.meta.dir, "../../migration/20260527000100_inbox/migration.sql")).text())
+    session(src)
+    if (withTranscript) message(src, "ses_import_a")
+    insert(src, "inbox", {
+      id: "legacy_input", receiver_session_id: "ses_import_a", receiver_actor_id: "worker",
+      sender_session_id: "ses_sender", sender_actor_id: "main", type: "text",
+      content: JSON.stringify({ text: "Published pending content" }), created_at: 42,
+    })
+    const original = src.query("SELECT * FROM inbox").all()
+    const result = await OpencodeImport.run({ dbPath: file })
+    expect(result.errors).toEqual([])
+    expect(result.imported).toBe(1)
+    const queue = QueueSync.capture(SessionID.make("ses_import_a"))
+    expect(queue).toEqual({
+      version: 1, sessionID: SessionID.make("ses_import_a"), lanes: [], epoch: null,
+      receipts: [{
+        id: "legacy_input", receiver_session_id: SessionID.make("ses_import_a"), receiver_actor_id: "worker",
+        sender_session_id: SessionID.make("ses_sender"), sender_actor_id: "main", type: "text",
+        content: { text: "Published pending content" }, input_message_id: null,
+        state: "accepted", epoch: 0, run_id: null, claim_frontier: null, consumed: false,
+        outcome: null, delivery_message_id: null, error: null, idempotency_key: "",
+        created_at: 42, time_updated: 42,
+      }],
+    })
+    expect(src.query("SELECT * FROM inbox").all()).toEqual(original)
+    expect((await OpencodeImport.run({ dbPath: file })).skipped).toBe(1)
+    const before = snapshot()
+    src.prepare("UPDATE inbox SET content = ?").run(JSON.stringify({ text: "Source changed" }))
+    const conflict = await OpencodeImport.run({ dbPath: file })
+    expect(conflict.errors).toHaveLength(1)
+    expect(conflict.errors[0]).toContain("conflicts with existing session")
+    expect(snapshot()).toEqual(before)
+  } finally { src.close() }
+})
+
+for (const missing of [...queueTables.map((table) => [table]), ["inbox_lane_state", "inbox_session_epoch"]]) test(`OpenCode rejects incomplete inbox schema missing ${missing.join(",")} without writing`, async () => {
+  await using dir = await tmpdir()
+  const file = path.join(dir.path, "incomplete.db")
+  const src = source(file)
+  try {
+    session(src)
+    message(src, "ses_import_a")
+    for (const table of missing) src.exec(`DROP TABLE ${table}`)
+    const before = snapshot()
+    await expect(OpencodeImport.run({ dbPath: file })).rejects.toThrow("Incomplete source inbox schema")
+    expect(snapshot()).toEqual(before)
   } finally { src.close() }
 })
 

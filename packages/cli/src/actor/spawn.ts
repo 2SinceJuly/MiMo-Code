@@ -24,6 +24,7 @@ import { Log } from "@/util"
 import { Instance, type InstanceContext } from "@/project/instance"
 import { InstanceRef } from "@/effect/instance-ref"
 import { inboxControllerRef } from "@/inbox"
+import type { AdmissionGuard } from "@/inbox/controller"
 
 const log = Log.create({ service: "actor.spawn" })
 
@@ -267,7 +268,7 @@ export interface Interface {
     sessionID: SessionID,
     actorID: string,
     mode: "graceful" | "forced",
-    options?: { wake?: boolean },
+    guard?: AdmissionGuard,
   ) => Effect.Effect<void>
   readonly getForkContext: (sessionID: SessionID, actorID: string) => Effect.Effect<ForkContext | undefined>
 }
@@ -307,7 +308,7 @@ export const layer = Layer.effect(
     // load-bearing piece this primitive exists for.
     //
     // Returns the assistant's final text (if any) so forkWork's onSuccess can
-    // pass it to inbox.send (notification body) and into the success Deferred.
+    // pass it to inbox.accept (notification body) and into the success Deferred.
     const runAgentLoop = Effect.fn("Actor.runAgentLoop")(function* (input: {
       sessionID: SessionID
       actorID: string
@@ -364,7 +365,7 @@ export const layer = Layer.effect(
       description?: string
       background: boolean
       notifyOnCompletion?: Deferred.Deferred<boolean>
-      wakeEpoch?: number
+      expectedEpoch?: number
       model?: { providerID: ProviderID; modelID: ModelID }
       lifecycle: "ephemeral" | "persistent"
       actorMode: "peer" | "subagent"
@@ -408,9 +409,7 @@ export const layer = Layer.effect(
             source: "spawn",
             status,
             ...extra,
-            // Admission must read the execution-bound flag, not an earlier snapshot.
-            isWakeCancelled: () => input.execution.groupAbort === true,
-            ...(input.execution.groupAbort ? { wake: false as const } : {}),
+            expectedEpoch: input.execution.groupAbort ? undefined : input.expectedEpoch,
           })
         })
         const warnings: string[] = []
@@ -664,7 +663,6 @@ export const layer = Layer.effect(
                   ? { status: "cancelled" }
                   : { status: "failure", error, ...lastResult, ...(failure ? { failure } : {}) }
                 if (input.notifyOnCompletion) yield* Deferred.succeed(outcome, result)
-                // notify() applies wake:false when this execution.groupAbort is set.
                 yield* notify(
                   cancelled ? "cancelled" : "failed",
                   cancelled
@@ -694,7 +692,7 @@ export const layer = Layer.effect(
         return { fiber, outcome }
       })
 
-    const spawnPeer = Effect.fn("Actor.spawnPeer")(function* (input: SpawnInput, wakeEpoch?: number) {
+    const spawnPeer = Effect.fn("Actor.spawnPeer")(function* (input: SpawnInput, expectedEpoch?: number) {
       // When the caller gives the child its own directory (e.g. a worktree the
       // session tool created), bind the child's work fiber to that directory's
       // Instance so its file tools / write boundary are isolated there. A
@@ -712,17 +710,7 @@ export const layer = Layer.effect(
         title: `${input.agentType}: ${input.task.slice(0, 40)}`,
         ...(input.cwd ? { directory: instanceRef?.directory ?? input.cwd } : {}),
       })
-      // T42: register the peer's receiver/actor-registry row (session_id ===
-      // actor_id === child.id, mode "peer") SYNCHRONOUSLY here — before spawn
-      // resolves and before the child's first turn. This is the single
-      // spawn-time registration that makes a child addressable the instant
-      // spawn returns: Inbox.send's ESRCH pre-check (reg.get) and
-      // any later relay both resolve against this row without waiting for the
-      // child to arm anything on its first turn. turn_count/status start at 0/
-      // "pending"; the per-step turn heartbeat (registry.updateTurn) advances
-      // them later. No double-registration: nothing on the first-turn path
-      // (prompt.ts) re-registers a peer — it only reads (reg.get) and updates
-      // (updateTurn/updateStatus). Prerequisite for T43 (--topic reuse).
+      // peer 必须在 spawn 返回前注册，保证首次执行前也可通过 Inbox.accept 接收输入。
       return yield* Effect.acquireUseRelease(
         instanceRef
           ? executions.reserve(child.id, child.id, instanceRef.directory).pipe(Effect.provideService(InstanceRef, instanceRef))
@@ -756,7 +744,7 @@ export const layer = Layer.effect(
               description: input.description,
               background: input.background,
               notifyOnCompletion: input.notifyOnCompletion,
-              wakeEpoch,
+              expectedEpoch,
               model: input.model,
               lifecycle: input.lifecycle ?? "persistent",
               actorMode: "peer",
@@ -771,7 +759,7 @@ export const layer = Layer.effect(
       )
     })
 
-    const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: SpawnInput, wakeEpoch?: number) {
+    const spawnSubagent = Effect.fn("Actor.spawnSubagent")(function* (input: SpawnInput, expectedEpoch?: number) {
       const actorID = yield* actorReg.allocateActorID(input.sessionID, input.agentType)
 
       const watermark = input.context === "full" ? yield* session.lastMainMessageID(input.sessionID) : undefined
@@ -825,7 +813,7 @@ export const layer = Layer.effect(
               description: input.description,
               background: input.background,
               notifyOnCompletion: input.notifyOnCompletion,
-              wakeEpoch,
+              expectedEpoch,
               model: input.model,
               lifecycle: input.lifecycle ?? "ephemeral",
               actorMode: "subagent",
@@ -843,25 +831,24 @@ export const layer = Layer.effect(
     const spawn = Effect.fn("Actor.spawn")(function* (input: SpawnInput) {
       const tq = inboxControllerRef.current
       // Bind delivery to the parent's epoch before any child execution can exist.
-      const wakeEpoch = tq ? yield* tq.getEpoch(input.parentSessionID ?? input.sessionID) : undefined
-      if (input.mode === "peer") return yield* spawnPeer(input, wakeEpoch)
-      return yield* spawnSubagent(input, wakeEpoch)
+      const expectedEpoch = tq ? yield* tq.getEpoch(input.parentSessionID ?? input.sessionID) : undefined
+      if (input.mode === "peer") return yield* spawnPeer(input, expectedEpoch)
+      return yield* spawnSubagent(input, expectedEpoch)
     })
 
     const cancel: (
       sessionID: SessionID,
       actorID: string,
       mode: "graceful" | "forced",
-      options?: { wake?: boolean },
+      guard?: AdmissionGuard,
     ) => Effect.Effect<void> = Effect.fn("Actor.cancel")(function* (
       sessionID: SessionID,
       actorID: string,
       mode: "graceful" | "forced",
-      options?: { wake?: boolean },
+      guard?: AdmissionGuard,
     ) {
-      const wake = options?.wake !== false
       const children = yield* actorReg.listByParent(sessionID, actorID)
-      yield* Effect.forEach(children, (c) => cancel(sessionID, c.actorID, mode, options), {
+      yield* Effect.forEach(children, (c) => cancel(sessionID, c.actorID, mode, guard), {
         concurrency: "unbounded",
         discard: true,
       })
@@ -869,7 +856,6 @@ export const layer = Layer.effect(
       // (continuation acquire/attach before runTurn marks running).
       const execution = yield* executions.current(sessionID, actorID)
       if (execution) {
-        if (!wake) execution.groupAbort = true
         yield* executions.requestCancel(execution)
         yield* state.cancelActor(sessionID, actorID)
         yield* executions.interrupt(execution)
@@ -878,8 +864,6 @@ export const layer = Layer.effect(
       const forkContext = forkContexts.get(forkContextKey(sessionID, actorID))
       const actor = yield* actorReg.get(sessionID, actorID)
       // Registry-only cancel (no live ActorExecution fiber).
-      // R006: quiet abort (`wake:false`) must still materialize a cancelled
-      // notification — wake only suppresses auto-fork, not durable delivery.
       // Skip when the row is already idle (terminal already delivered) or when
       // prior lastOutcome is already cancelled (execution-path notify won the race).
       if (!actor || actor.status === "idle") return
@@ -892,7 +876,7 @@ export const layer = Layer.effect(
       const after = yield* actorReg.get(sessionID, actorID)
       if (!after || after.status !== "idle" || after.lastOutcome !== "cancelled") return
       if (priorOutcome === "cancelled") return
-      yield* notifyTerminal({ sessionID, actorID, source: "pending", status: "cancelled", wake })
+      yield* notifyTerminal({ sessionID, actorID, source: "pending", status: "cancelled", ...guard })
       if (forkContext) yield* clearForkContext(forkContext.execution)
     })
 

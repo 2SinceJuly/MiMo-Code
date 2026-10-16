@@ -523,7 +523,14 @@ export const MachineProvenance = z
   .meta({ ref: "MachineProvenance" })
 export type MachineProvenance = z.infer<typeof MachineProvenance>
 
-export const Provenance = z.union([HookProvenance, MachineProvenance]).meta({ ref: "Provenance" })
+export const AgentProvenance = z.object({
+  source: z.literal("agent"),
+  senderSessionID: SessionID.zod.optional(),
+  senderActorID: z.string().optional(),
+}).meta({ ref: "AgentProvenance" })
+export type AgentProvenance = z.infer<typeof AgentProvenance>
+
+export const Provenance = z.union([HookProvenance, MachineProvenance, AgentProvenance]).meta({ ref: "Provenance" })
 export type Provenance = z.infer<typeof Provenance>
 
 export const User = Base.extend({
@@ -1485,12 +1492,7 @@ export function renderedOrder(
     (msg) =>
       msg.info.sessionID !== sessionID ||
       msg.info.role !== "user" ||
-      !hidden.has(msg.info.id) ||
-      !!msg.info.provenance ||
-      (msg.parts.length > 0 &&
-        msg.parts.every(
-          (part) => (part.type === "text" && part.synthetic) || part.type === "compaction" || part.type === "checkpoint",
-        )),
+      !hidden.has(msg.info.id),
   )
   const deliveries = new Map<MessageID, MessageID[]>()
   for (const receipt of [...receipts].sort((a, b) => a.id.localeCompare(b.id))) {
