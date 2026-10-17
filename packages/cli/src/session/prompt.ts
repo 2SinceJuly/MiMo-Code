@@ -21,7 +21,7 @@ import { Log } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent, resolveStoredAgent } from "../agent/agent"
-import { decideAskRouting, hasActorTool, resolveInvalidOutputPolicy } from "@/agent/config"
+import { decideAskRouting, hasActorTool } from "@/agent/config"
 import { makeTerminalNotifier } from "@/actor/notification"
 import { ActorExecution } from "@/actor/execution"
 import { parseReturnHeader } from "@/actor/return-header"
@@ -568,7 +568,6 @@ export function predictContext(history: readonly MessageV2.WithParts[]) {
 }
 
 const OUTPUT_LENGTH_CONTINUATION_LIMIT = Flag.MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT
-const INVALID_OUTPUT_CONTINUATION_LIMIT = Flag.MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT
 const TEXT_TOOL_CALL_RETRY_LIMIT = Flag.MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT
 
 const log = Log.create({ service: "session.prompt" })
@@ -3672,14 +3671,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         let lastFinishedForPrune: MessageV2.Assistant | undefined
         let lastModelForPrune: Provider.Model | undefined
         let outputLengthContinuations = 0
-        // Shared local counter for "model finished but produced nothing usable"
-        // (think-only / empty). T04's generic-invalid retries reuse this same
-        // counter — do not add a second one. Local to runLoop so a fresh user
-        // turn resets it (no cross-message pollution), same as outputLengthContinuations.
-        let invalidContinuations = 0
-        // Structured-output-only retry: cap comes from lastUser.format.retryCount (default 2),
-        // kept separate from invalidContinuations (generic invalid). Local to runLoop;
-        // resets on the next user turn.
+        // Structured-output-only retry: cap comes from lastUser.format.retryCount (default 2).
+        // Local to runLoop; resets on the next user turn. Empty/think-only output
+        // is retried inside processor.process via SessionRetry.policy instead.
         let structuredRetries = 0
         // Bounded retries for text-form tool calls (model wrote a tool call as
         // prose text instead of a structured tool_use). Local to runLoop so each
@@ -4207,70 +4201,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return true
         })
 
-        // think-only (reasoning only) / empty (nothing at all) steps finish with
-        // a non-tool stop but carry no usable answer. Without intervention the loop
-        // breaks and hands the user an assistant with no final text. Nudge the model
-        // to produce a final answer or call a real tool; give up (write a terminal
-        // error) once the shared counter is exhausted so we never loop forever.
-        const autoContinueInvalidOutput = Effect.fn("SessionPrompt.autoContinueInvalidOutput")(function* (input: {
-          lastUser: MessageV2.User
+        // Stale empty / think-only assistant left in history (resume, crash). Drop
+        // it and start a fresh step — the new step's process() raises
+        // InvalidOutputError on empty output so SessionRetry.policy owns retries.
+        const dropEmptyAssistant = Effect.fn("SessionPrompt.dropEmptyAssistant")(function* (input: {
           assistant: MessageV2.Assistant
-          reason: string
         }) {
           if (input.assistant.error || input.assistant.summary || input.assistant.structured !== undefined) return false
-          if (invalidContinuations >= INVALID_OUTPUT_CONTINUATION_LIMIT) {
-            input.assistant.error = new MessageV2.InvalidOutputError({ message: input.reason }).toObject()
-            yield* sessions.updateMessage(input.assistant)
-            yield* bus.publish(Session.Event.Error, {
-              sessionID: input.assistant.sessionID,
-              error: input.assistant.error,
-            })
-            return false
-          }
-
-          invalidContinuations++
-          yield* slog.info("auto-continuing invalid output", { attempt: invalidContinuations, reason: input.reason })
-          const policy = resolveInvalidOutputPolicy({
-            agentName: input.lastUser.agent,
-            agentID: input.lastUser.agentID,
+          yield* slog.info("dropping empty assistant", { messageID: input.assistant.id })
+          yield* sessions.removeMessage({
+            sessionID: input.assistant.sessionID,
+            messageID: input.assistant.id,
           })
-          const reminder =
-            policy === "checkpoint"
-              ? [
-                  "Your checkpoint writer turn ended without a completion signal.",
-                  "Do not answer or continue the parent session's task. Work only on the authorized checkpoint and memory paths already provided to you.",
-                  "If any authorized edits remain, finish them now. If they are complete, call no more tools and reply exactly CHECKPOINT_COMPLETE.",
-                ]
-              : policy === "actor"
-                ? [
-                    "Your previous response contained no usable result for the parent agent (it had only reasoning, or was empty).",
-                    "Provide a final result to the parent agent now, or call a valid tool to complete the delegated task.",
-                    "Do not respond with only reasoning/thinking.",
-                  ]
-                : [
-                    "Your previous response contained no usable answer (it had only reasoning, or was empty).",
-                    "Provide a final answer to the user now, or call a valid tool to make progress on the task.",
-                    "Do not respond with only reasoning/thinking.",
-                  ]
-          const msg = yield* sessions.updateMessage({
-            id: MessageID.ascending(),
-            role: "user" as const,
-            sessionID: input.lastUser.sessionID,
-            agentID: input.lastUser.agentID,
-            agent: input.lastUser.agent,
-            model: input.lastUser.model,
-            tools: input.lastUser.tools,
-            format: input.lastUser.format,
-            time: { created: Date.now() },
-          })
-          yield* sessions.updatePart({
-            id: PartID.ascending(),
-            messageID: msg.id,
-            sessionID: msg.sessionID,
-            type: "text",
-            synthetic: true,
-            text: ["<system-reminder>", ...reminder, "</system-reminder>"].join("\n"),
-          } satisfies MessageV2.TextPart)
           return true
         })
 
@@ -4340,9 +4282,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // json_schema mode but the model never produced structured output (plain
         // text stop, empty, think-only, or any other non-tool terminal). Retry up
         // to lastUser.format.retryCount with a repair nudge; on exhaustion write a
-        // StructuredOutputError carrying the *real* retry count. Separate from
-        // invalidContinuations: structured retries are bounded by the per-request
-        // retryCount, not the generic invalid-output limit.
+        // StructuredOutputError carrying the *real* retry count. Structured retries
+        // are bounded by the per-request retryCount. Empty/think-only for text
+        // format is retried inside processor.process via SessionRetry.policy.
         const autoRetryStructuredOutput = Effect.fn("SessionPrompt.autoRetryStructuredOutput")(function* (input: {
           lastUser: MessageV2.User
           assistant: MessageV2.Assistant
@@ -4633,8 +4575,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               break
             }
             if (classification.type === "think-only" || classification.type === "invalid") {
-              const reason = classification.type === "invalid" ? classification.reason : "think-only"
-              if (yield* autoContinueInvalidOutput({ lastUser, assistant: lastAssistant, reason })) continue
+              if (yield* dropEmptyAssistant({ assistant: lastAssistant })) continue
               yield* slog.info("exiting loop", { classification: classification.type })
               break
             }
@@ -5287,15 +5228,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       return "continue" as const
                     return "break" as const
                   }
-
+                  // Tool residue / unreplayable empty turn: process() left it in
+                  // place. Drop it and start a fresh step (SessionRetry already
+                  // covered the clean-replay case inside process).
                   if (
                     (forkClassification.type === "think-only" || forkClassification.type === "invalid") &&
                     format.type !== "json_schema"
                   ) {
-                    const reason =
-                      forkClassification.type === "invalid" ? forkClassification.reason : "think-only"
-                    if (yield* autoContinueInvalidOutput({ lastUser, assistant: handle.message, reason }))
-                      return "continue" as const
+                    if (yield* dropEmptyAssistant({ assistant: handle.message })) return "continue" as const
                     return "break" as const
                   }
 
@@ -5591,14 +5531,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   if (yield* autoRetryStructuredOutput({ lastUser, assistant: handle.message })) return "continue" as const
                   return "break" as const
                 }
-
+                // Tool residue / unreplayable empty turn: process() left it in
+                // place. Drop it and start a fresh step (SessionRetry already
+                // covered the clean-replay case inside process).
                 if (
                   (classification.type === "think-only" || classification.type === "invalid") &&
                   format.type !== "json_schema"
                 ) {
-                  const reason = classification.type === "invalid" ? classification.reason : "think-only"
-                  if (yield* autoContinueInvalidOutput({ lastUser, assistant: handle.message, reason }))
-                    return "continue" as const
+                  if (yield* dropEmptyAssistant({ assistant: handle.message })) return "continue" as const
                   return "break" as const
                 }
 
