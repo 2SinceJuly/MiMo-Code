@@ -24,6 +24,8 @@ import * as InboxSync from "./sync"
 import { ExecutionOwnership } from "@/session/execution-ownership"
 import { EffectBridge } from "@/effect"
 import { bindScopedRef } from "@/effect/scoped-ref"
+import { Instance } from "@/project/instance"
+import * as InstanceState from "@/effect/instance-state"
 
 const log = Log.create({ service: "inbox" })
 
@@ -280,7 +282,16 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         const sched = schedulerRef.current
         if (!sched || stopping.has(lane.sessionID)) return
         const bridge = yield* EffectBridge.make()
-        void bridge.promise(sched.kick(lane)).catch(() => undefined)
+        const directory = yield* InstanceState.directory
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => ({ release: Instance.claim(directory), transferred: false })),
+          (owner) => Effect.sync(() => {
+            const work = bridge.promise(sched.kick(lane))
+            owner.transferred = true
+            void work.then(owner.release, owner.release)
+          }),
+          (owner) => owner.transferred ? Effect.void : Effect.sync(owner.release),
+        ).pipe(Effect.uninterruptible)
       })
 
     const accept = Effect.fn("Inbox.accept")(function* (input: AcceptInput, guard?: AdmissionGuard) {
