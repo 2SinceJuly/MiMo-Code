@@ -339,6 +339,11 @@ export function decide(
   if (MessageV2.AuthError.isInstance(error)) {
     return { retryable: false, phase, scope, kind: "terminal", message: error.data.message, ...(hostCode ? { hostCode, hostRetryClass: hostClass! } : {}) }
   }
+  // InvalidOutputError = model returned only reasoning or empty body. Transient quality
+  // failure — the request itself succeeded, so a fresh attempt may produce usable output.
+  if (MessageV2.InvalidOutputError.isInstance(error)) {
+    return { retryable: true, phase, scope, kind: "unknown", message: error.data.message || "Empty model output" }
+  }
   if (
     !hostCode &&
     !(error instanceof Error) &&
