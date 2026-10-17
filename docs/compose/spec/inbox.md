@@ -267,4 +267,3 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | (m) | GC | 已结算记录在 `time_updated` 后 7 天清理；`accepted`/`claimed` 不清理 |
 | (n) | fork 继承上下文 | 原会话含插话（输入受理早于 delivery）时，fork 后新会话渲染的消息序列与原会话逐条一致（角色、内容、顺序）；新会话无 inbox 记录；按 `messageID` 截断时按渲染顺序截断 |
 | (o) | `noReply` prompt | 不产生 inbox 记录；之后的 prompt 不会执行它，也不会因它多出一次模型请求；下一次运行时对模型可见 |
-
