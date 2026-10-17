@@ -650,7 +650,7 @@ it.live(
         Effect.gen(function* () {
           const { processors, session, provider } = yield* boot()
 
-          yield* llm.push(reply().reason("one").reset(), reply().reason("two").stop())
+          yield* llm.push(reply().reason("one").reset(), reply().reason("two").text("ok").stop())
 
           const chat = yield* session.create({})
           const parent = yield* user(chat.id, "reason")
@@ -794,7 +794,7 @@ it.live(
 
           yield* llm.error(503, { error: "boom" })
           yield* llm.error(503, { error: "boom" })
-          yield* llm.text("")
+          yield* llm.text("ok")
 
           const chat = yield* session.create({})
           const parent = yield* user(chat.id, "retry")

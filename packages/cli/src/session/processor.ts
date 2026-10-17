@@ -967,18 +967,25 @@ export const layer: Layer.Layer<
             // shell so the retry attempt has a live assistant to write into.
             // Length finish is owned by autoContinueOutputLength; json_schema
             // empty output is owned by structured-output retry.
+            // Only replay when the stream is retrySafe (no tool side effects) and
+            // the turn has no tool residue — otherwise the runLoop's
+            // dropEmptyAssistant starts a fresh step instead of replaying.
             if (!ctx.needsOverflowHandling && !ctx.textNgramRepeat && !ctx.blocked && !ctx.assistantMessage.error) {
+              const parts = MessageV2.parts(ctx.assistantMessage.id)
               const classification = classifyAssistantStep({
                 phase: "after-process",
                 lastUser: streamInput.user,
                 assistant: ctx.assistantMessage,
-                parts: MessageV2.parts(ctx.assistantMessage.id),
+                parts,
                 processResult: "stop",
               })
+              const hasToolParts = parts.some((part) => part.type === "tool")
               if (
                 (classification.type === "think-only" || classification.type === "invalid") &&
                 ctx.assistantMessage.finish !== "length" &&
-                streamInput.user.format?.type !== "json_schema"
+                streamInput.user.format?.type !== "json_schema" &&
+                ctx.retrySafe &&
+                !hasToolParts
               ) {
                 const reason = classification.type === "invalid" ? classification.reason : "think-only"
                 slog.info("invalid output, dropping empty turn", { reason, finish: ctx.assistantMessage.finish })

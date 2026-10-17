@@ -5228,6 +5228,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       return "continue" as const
                     return "break" as const
                   }
+                  // Tool residue / unreplayable empty turn: process() left it in
+                  // place. Drop it and start a fresh step (SessionRetry already
+                  // covered the clean-replay case inside process).
+                  if (
+                    (forkClassification.type === "think-only" || forkClassification.type === "invalid") &&
+                    format.type !== "json_schema"
+                  ) {
+                    if (yield* dropEmptyAssistant({ assistant: handle.message })) return "continue" as const
+                    return "break" as const
+                  }
 
                   if (forkClassification.type === "final" && forkClassification.degraded)
                     yield* slog.warn("degraded final on abnormal finish", { finish: handle.message.finish })
@@ -5519,6 +5529,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 }
                 if (classification.type !== "continue" && !handle.message.error && format.type === "json_schema") {
                   if (yield* autoRetryStructuredOutput({ lastUser, assistant: handle.message })) return "continue" as const
+                  return "break" as const
+                }
+                // Tool residue / unreplayable empty turn: process() left it in
+                // place. Drop it and start a fresh step (SessionRetry already
+                // covered the clean-replay case inside process).
+                if (
+                  (classification.type === "think-only" || classification.type === "invalid") &&
+                  format.type !== "json_schema"
+                ) {
+                  if (yield* dropEmptyAssistant({ assistant: handle.message })) return "continue" as const
                   return "break" as const
                 }
 
