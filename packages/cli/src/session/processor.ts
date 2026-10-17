@@ -9,6 +9,7 @@ import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
 import { Snapshot } from "@/snapshot"
 import * as Session from "./session"
+import { classifyAssistantStep } from "./classify"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
@@ -958,6 +959,41 @@ export const layer: Layer.Layer<
               Stream.runDrain,
               Effect.ensuring(closeTools()),
             )
+
+            // Empty / think-only output is a failed step. Raise InvalidOutputError
+            // so SessionRetry.policy (decide → retryable unknown) owns the retry
+            // budget instead of a parallel counter. Drop the empty turn from the
+            // database first so it never sits in session history; recreate a clean
+            // shell so the retry attempt has a live assistant to write into.
+            // Length finish is owned by autoContinueOutputLength; json_schema
+            // empty output is owned by structured-output retry.
+            if (!ctx.needsOverflowHandling && !ctx.textNgramRepeat && !ctx.blocked && !ctx.assistantMessage.error) {
+              const classification = classifyAssistantStep({
+                phase: "after-process",
+                lastUser: streamInput.user,
+                assistant: ctx.assistantMessage,
+                parts: MessageV2.parts(ctx.assistantMessage.id),
+                processResult: "stop",
+              })
+              if (
+                (classification.type === "think-only" || classification.type === "invalid") &&
+                ctx.assistantMessage.finish !== "length" &&
+                streamInput.user.format?.type !== "json_schema"
+              ) {
+                const reason = classification.type === "invalid" ? classification.reason : "think-only"
+                slog.info("invalid output, dropping empty turn", { reason, finish: ctx.assistantMessage.finish })
+                yield* session.removeMessage({
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                })
+                ctx.assistantMessage.finish = undefined
+                ctx.assistantMessage.error = undefined
+                ctx.assistantMessage.time.completed = undefined
+                ctx.stepPartIds = []
+                yield* session.updateMessage(ctx.assistantMessage)
+                return yield* Effect.fail(new MessageV2.InvalidOutputError({ message: reason }))
+              }
+            }
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {

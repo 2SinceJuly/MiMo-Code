@@ -60,7 +60,6 @@ import { TestLLMServer } from "../lib/llm-server"
 import { reply } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
 import { inboxServiceRef } from "../../src/inbox/inbox-ref"
-import { Flag } from "../../src/flag/flag"
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -1411,9 +1410,8 @@ describe("Actor.spawn structured output (P3)", () => {
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
 
-        yield* llm.push(
-          ...Array.from({ length: Flag.MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT + 1 }, () => reply().stop()),
-        )
+        // SessionRetry unknown budget: 1 retry after the initial attempt.
+        yield* llm.push(...Array.from({ length: 2 }, () => reply().stop()))
 
         const result = yield* actor.spawn({
           mode: "subagent",
@@ -1429,7 +1427,15 @@ describe("Actor.spawn structured output (P3)", () => {
         const outcome = yield* Deferred.await(result.outcome)
         expect(outcome.status).toBe("failure")
       }),
-      { git: true, config: providerCfg },
+      {
+        git: true,
+        config: (url: string) => ({
+          ...providerCfg(url),
+          retry: {
+            unknown: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 1000 },
+          },
+        }),
+      },
     ),
   )
 })
