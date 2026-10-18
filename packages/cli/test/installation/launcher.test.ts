@@ -239,7 +239,7 @@ describe("ensureBinary", () => {
       await expect(ensureBinary({ root: tmp.path, target, version: "9.9.9", url })).rejects.toThrow(/Checksum mismatch/)
       expect(requests).toEqual([new URL(url).pathname, `${new URL(url).pathname}.sha256`])
       expect(fs.existsSync(dest)).toBe(false)
-      expect(fs.readdirSync(tmp.path)).toEqual(["a.tar.gz", "build"])
+      expect(fs.readdirSync(tmp.path).sort()).toEqual(["a.tar.gz", "build"])
     } finally {
       await server.stop(true)
     }
