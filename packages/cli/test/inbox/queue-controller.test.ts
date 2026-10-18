@@ -294,6 +294,86 @@ describe("Inbox controller", () => {
     ),
   )
 
+  for (const inputType of ["prompt", "text", "actor_notification"]) it.live(
+    `filtered observation retains ${inputType} input preceding an ignored notification`,
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const tq = yield* InboxController.Service
+      const session = yield* sessions.create({ title: "filtered batch" })
+      const lane = { sessionID: session.id, agentID: "main" }
+      yield* tq.accept({ lane, ...userMessage(session.id), type: "prompt" })
+      const revision = yield* tq.observeInput(lane, -1)
+      yield* tq.accept({
+        lane, ...userMessage(session.id, "interrupting input"), type: inputType,
+        ...(inputType === "prompt" ? {} : { senderSessionID: session.id, senderActorID: "other" }),
+      })
+      yield* tq.accept({
+        lane, ...userMessage(session.id, "ignored notification"), type: "actor_notification",
+        senderSessionID: session.id, senderActorID: "child",
+      })
+      const batch = yield* tq.claimNext(lane, 1)
+      yield* tq.ack(lane, batch!.claimFrontier, batch!.receipts.map((receipt) => ({
+        receiptId: receipt.id, outcome: "success" as const,
+      })), 1)
+      Database.use((db) => db.update(InboxTable).set({ created_at: 123, time_updated: 123 })
+        .where(eq(InboxTable.receiver_session_id, session.id)).run())
+      expect(yield* tq.observeInput(lane, revision, {
+        ignoreActorNotification: { sessionID: session.id, actorID: "child" },
+      }).pipe(Effect.timeout("5 seconds"))).toBe(revision + 2)
+    })),
+  )
+
+  it.live(
+    "filtered observation preserves interruption when receipt history no longer matches revision",
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const tq = yield* InboxController.Service
+      const session = yield* sessions.create({ title: "filtered receipt boundary" })
+      const lane = { sessionID: session.id, agentID: "main" }
+      const initial = yield* tq.accept({ lane, ...userMessage(session.id), type: "prompt" })
+      const revision = yield* tq.observeInput(lane, -1)
+      yield* tq.accept({ lane, ...userMessage(session.id), type: "prompt" })
+      yield* tq.accept({
+        lane, ...userMessage(session.id), type: "actor_notification",
+        senderSessionID: session.id, senderActorID: "child",
+      })
+      Database.use((db) => db.delete(InboxTable).where(eq(InboxTable.id, initial.id)).run())
+      expect(yield* tq.observeInput(lane, revision, {
+        ignoreActorNotification: { sessionID: session.id, actorID: "child" },
+      }).pipe(Effect.timeout("5 seconds"))).toBe(3)
+    })),
+  )
+
+  it.live(
+    "filtered observation ignores multiple target notifications then observes a foreign sender",
+    provideTmpdirInstance(() => Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const tq = yield* InboxController.Service
+      const session = yield* sessions.create({ title: "filtered subscription" })
+      const foreign = yield* sessions.create({ title: "foreign sender" })
+      const lane = { sessionID: session.id, agentID: "main" }
+      const options = { ignoreActorNotification: { sessionID: session.id, actorID: "child" } }
+      for (let i = 0; i < 2; i++) yield* tq.accept({
+        lane, ...userMessage(session.id), type: "actor_notification",
+        senderSessionID: session.id, senderActorID: "child",
+      })
+      const wait = yield* tq.observeInput(lane, 0, options).pipe(Effect.forkChild)
+      yield* Effect.sleep("20 millis")
+      expect(wait.pollUnsafe()).toBeUndefined()
+      yield* tq.accept({
+        lane, ...userMessage(session.id), type: "actor_notification",
+        senderSessionID: session.id, senderActorID: "child",
+      })
+      yield* Effect.sleep("20 millis")
+      expect(wait.pollUnsafe()).toBeUndefined()
+      yield* tq.accept({
+        lane, ...userMessage(session.id), type: "actor_notification",
+        senderSessionID: foreign.id, senderActorID: "child",
+      })
+      expect(yield* Fiber.join(wait).pipe(Effect.timeout("5 seconds"))).toBe(4)
+    })),
+  )
+
   it.live(
     "reconcileOnBoot cancels claimed rows (process restart mid-claim)",
     provideTmpdirInstance(() =>

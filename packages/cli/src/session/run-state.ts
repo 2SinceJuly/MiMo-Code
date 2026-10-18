@@ -12,7 +12,7 @@ import { ExecutionOwnership } from "./execution-ownership"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID, agentID?: string) => Effect.Effect<void, Session.BusyError>
-  readonly sessionExecutionSnapshot: (sessionID: SessionID) => Effect.Effect<{ readonly isIdle: () => boolean }>
+  readonly sessionExecutionSnapshot: (sessionID: SessionID, agentID?: string) => Effect.Effect<{ readonly isIdle: () => boolean; readonly isCancelled: () => boolean }>
   readonly executionSnapshot: (sessionID: SessionID, agentID: string) => Effect.Effect<{
     readonly fiber: Fiber.Fiber<MessageV2.WithParts> | undefined
     readonly isCurrent: () => boolean
@@ -67,6 +67,8 @@ export const layer = Layer.effect(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
         const runners: RunnersBySession = new Map()
+        const cancellations = new Map<SessionID, number>()
+        const actorCancellations = new Map<SessionID, Map<string, number>>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             const all = [...runners.values()].flatMap((byAgent) => [...byAgent.values()])
@@ -77,7 +79,7 @@ export const layer = Layer.effect(
             runners.clear()
           }),
         )
-        return { runners, scope }
+        return { runners, scope, cancellations, actorCancellations }
       }),
     )
 
@@ -135,9 +137,15 @@ export const layer = Layer.effect(
       return { active, check, guard: (work: Effect.Effect<MessageV2.WithParts>) => check.pipe(Effect.andThen(work)) }
     })
 
-    const sessionExecutionSnapshot = Effect.fn("SessionRunState.sessionExecutionSnapshot")(function* (sessionID: SessionID) {
+    const sessionExecutionSnapshot = Effect.fn("SessionRunState.sessionExecutionSnapshot")(function* (sessionID: SessionID, agentID?: string) {
       const data = yield* InstanceState.get(state)
-      return { isIdle: () => ![...(data.runners.get(sessionID)?.values() ?? [])].some((entry) => entry.busy) }
+      const generation = data.cancellations.get(sessionID) ?? 0
+      const actorGeneration = agentID === undefined ? undefined : data.actorCancellations.get(sessionID)?.get(agentID) ?? 0
+      return {
+        isIdle: () => ![...(data.runners.get(sessionID)?.values() ?? [])].some((entry) => entry.busy),
+        isCancelled: () => (data.cancellations.get(sessionID) ?? 0) !== generation ||
+          (agentID !== undefined && (data.actorCancellations.get(sessionID)?.get(agentID) ?? 0) !== actorGeneration),
+      }
     })
 
     const executionSnapshot = Effect.fn("SessionRunState.executionSnapshot")(function* (sessionID: SessionID, agentID: string) {
@@ -216,6 +224,7 @@ export const layer = Layer.effect(
     // are removed only when NO runner under this session is still busy.
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
+      data.cancellations.set(sessionID, (data.cancellations.get(sessionID) ?? 0) + 1)
       const byAgent = data.runners.get(sessionID)
       if (!byAgent || byAgent.size === 0) {
         yield* status.set(sessionID, { type: "idle" })
@@ -246,6 +255,12 @@ export const layer = Layer.effect(
       agentID: string,
     ) {
       const data = yield* InstanceState.get(state)
+      let cancellations = data.actorCancellations.get(sessionID)
+      if (!cancellations) {
+        cancellations = new Map()
+        data.actorCancellations.set(sessionID, cancellations)
+      }
+      cancellations.set(agentID, (cancellations.get(agentID) ?? 0) + 1)
       const existing = data.runners.get(sessionID)?.get(agentID)
       if (!existing || !existing.busy) return
       yield* existing.cancel

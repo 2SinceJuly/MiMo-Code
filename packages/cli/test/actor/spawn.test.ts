@@ -339,23 +339,30 @@ describe("Actor.spawn peer mode", () => {
         // Queue a stop response so the prompt loop can run to completion.
         yield* llm.text("done")
 
-        const result = yield* actor.spawn({
-          mode: "peer",
-          sessionID: parent.id,
-          agentType: "build",
-          task: "test task",
-          context: "none",
-          tools: ["read"],
-          background: true,
-          model: ref,
-        })
+        yield* Effect.acquireUseRelease(
+          actor.spawn({
+            mode: "peer",
+            sessionID: parent.id,
+            agentType: "build",
+            task: "test task",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+          }),
+          (result) => Effect.gen(function* () {
+            expect(result.actorID).not.toBe(parent.id)
+            expect(result.sessionID as string).toBe(result.actorID)
 
-        expect(result.actorID).not.toBe(parent.id)
-        expect(result.sessionID as string).toBe(result.actorID)
-
-        const row = yield* reg.get(result.sessionID, result.actorID)
-        expect(row?.mode).toBe("peer")
-        expect(row?.agent).toBe("build")
+            const row = yield* reg.get(result.sessionID, result.actorID)
+            expect(row?.mode).toBe("peer")
+            expect(row?.agent).toBe("build")
+          }),
+          (result) => Effect.gen(function* () {
+            yield* actor.cancel(result.sessionID, result.actorID, "forced")
+            yield* Deferred.await(result.outcome)
+          }),
+        )
       }),
       { git: true, config: providerCfg },
     ),
@@ -1018,19 +1025,26 @@ describe("Actor.spawn description field (F2a)", () => {
 
         yield* llm.text("done")
 
-        const result = yield* actor.spawn({
-          mode: "subagent",
-          sessionID: parent.id,
-          agentType: "build",
-          task: "x".repeat(500),  // long, would be sliced to 200 chars under the bug
-          context: "none",
-          tools: ["read"],
-          background: true,
-          model: ref,
-        })
-
-        const row = yield* reg.get(result.sessionID, result.actorID)
-        expect(row?.description).toBe("build")  // agentType, NOT first 200 chars of task
+        yield* Effect.acquireUseRelease(
+          actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "build",
+            task: "x".repeat(500),  // long, would be sliced to 200 chars under the bug
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+          }),
+          (result) => Effect.gen(function* () {
+            const row = yield* reg.get(result.sessionID, result.actorID)
+            expect(row?.description).toBe("build")  // agentType, NOT first 200 chars of task
+          }),
+          (result) => Effect.gen(function* () {
+            yield* actor.cancel(result.sessionID, result.actorID, "forced")
+            yield* Deferred.await(result.outcome)
+          }),
+        )
       }),
       { git: true, config: providerCfg },
     ),
@@ -1050,20 +1064,27 @@ describe("Actor.spawn description field (F2a)", () => {
 
         yield* llm.text("done")
 
-        const result = yield* actor.spawn({
-          mode: "subagent",
-          sessionID: parent.id,
-          agentType: "build",
-          task: "long prompt body",
-          description: "explore: find lexer files",
-          context: "none",
-          tools: ["read"],
-          background: true,
-          model: ref,
-        })
-
-        const row = yield* reg.get(result.sessionID, result.actorID)
-        expect(row?.description).toBe("explore: find lexer files")
+        yield* Effect.acquireUseRelease(
+          actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "build",
+            task: "long prompt body",
+            description: "explore: find lexer files",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+          }),
+          (result) => Effect.gen(function* () {
+            const row = yield* reg.get(result.sessionID, result.actorID)
+            expect(row?.description).toBe("explore: find lexer files")
+          }),
+          (result) => Effect.gen(function* () {
+            yield* actor.cancel(result.sessionID, result.actorID, "forced")
+            yield* Deferred.await(result.outcome)
+          }),
+        )
       }),
       { git: true, config: providerCfg },
     ),

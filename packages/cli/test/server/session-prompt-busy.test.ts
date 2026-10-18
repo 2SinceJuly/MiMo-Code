@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { Hono } from "hono"
 import { ErrorMiddleware } from "../../src/server/middleware"
 import { Server } from "../../src/server/server"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
+import { inboxServiceRef } from "../../src/inbox/inbox-ref"
+import * as Inbox from "../../src/inbox/inbox"
+import { Actor } from "../../src/actor/spawn"
+import { AppRuntime } from "../../src/effect/app-runtime"
+import { schedulerRef } from "../../src/inbox/scheduler"
 import { MessageID, type SessionID } from "../../src/session/schema"
 import { MessageTable } from "../../src/session/session.sql"
 import type { MessageV2 } from "../../src/session/message-v2"
@@ -67,6 +72,7 @@ function client(directory: string) {
       signal,
     })
   return {
+    directory,
     request,
     post,
     async session() {
@@ -189,6 +195,38 @@ describe("ErrorMiddleware → BusyError mapping", () => {
 })
 
 describe("HTTP Inbox admission", () => {
+  test("a seedless inbox remains pending until a real HTTP input wakes and consumes it", () => fixture(async (http, llm) => {
+    const session = await http.session()
+    const input = await Instance.provide({ directory: http.directory, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+      yield* Actor.Service
+      const inbox = inboxServiceRef.current
+      if (!inbox) throw new Error("Inbox service missing")
+      yield* Inbox.Service.use(scoped => Effect.sync(() => {
+        expect(scoped).not.toBe(inbox)
+        expect(inboxServiceRef.current).toBe(scoped)
+      })).pipe(Effect.provide(Layer.fresh(Inbox.defaultLayer)), Effect.scoped)
+      expect(inboxServiceRef.current).toBe(inbox)
+      const input = yield* inbox.accept({ receiverSessionID: session.id, receiverActorID: "main", content: "HTTP-SEEDLESS-INBOX" })
+      const scheduler = schedulerRef.current
+      if (!scheduler) throw new Error("Inbox scheduler missing")
+      yield* scheduler.kick({ sessionID: session.id, agentID: "main" })
+      return input
+    })) })
+    await Bun.sleep(100)
+    expect((await http.receipt(session.id, input.inboxID)).state).toBe("accepted")
+    expect(await Effect.runPromise(llm.calls)).toBe(0)
+    await Effect.runPromise(llm.text("HTTP-SEED-RESPONSE"))
+    const response = await http.post(`/session/${session.id}/prompt_async`, { agent: "build", model,
+      parts: [{ type: "text", text: "HTTP-VALID-SEED" }] })
+    expect(response.status).toBe(202)
+    const receipt = await response.json() as { receiptId: string }
+    await until(() => http.receipt(session.id, receipt.receiptId), value => value.state === "settled")
+    expect(await http.receipt(session.id, input.inboxID)).toMatchObject({ state: "settled", outcome: "success", consumed: true })
+    expect(await Effect.runPromise(llm.calls)).toBe(1)
+    const inputs = await Effect.runPromise(llm.inputs)
+    expect(JSON.stringify(inputs[0].messages)).toContain("HTTP-SEEDLESS-INBOX")
+    expect(JSON.stringify(inputs[0].messages)).toContain("HTTP-VALID-SEED")
+  }), 30_000)
   for (const content of [
     { name: "whitespace-only", part: { type: "text", text: " \t\n  " } },
     { name: "ignored-only", part: { type: "text", text: "ignored scaffolding", ignored: true } },

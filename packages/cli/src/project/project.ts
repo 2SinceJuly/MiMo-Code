@@ -19,6 +19,7 @@ import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
+import { childProcessEnv } from "@/util/child-process-env"
 
 async function setupProjectIdEnvironment(workingDir: string): Promise<void> {
   const mainGit = resolveMainGitDir(workingDir)
@@ -159,7 +160,11 @@ export const layer: Layer.Layer<
     const git = Effect.fnUntraced(
       function* (args: string[], opts?: { cwd?: string }) {
         const handle = yield* spawner.spawn(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
+          ChildProcess.make("git", args, {
+            cwd: opts?.cwd,
+            env: childProcessEnv({ GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES }),
+            stdin: "ignore",
+          }),
         )
         const [text, stderr] = yield* Effect.all(
           [Stream.mkString(Stream.decodeText(handle.stdout)), Stream.mkString(Stream.decodeText(handle.stderr))],
@@ -213,8 +218,15 @@ export const layer: Layer.Layer<
           }
         }
 
-        const dotgitMatches = yield* fs.up({ targets: [".git"], start: directory }).pipe(Effect.orDie)
-        const dotgit = dotgitMatches[0]
+        const dotgit = yield* Effect.gen(function* () {
+          if (process.env.GIT_CEILING_DIRECTORIES) {
+            const result = yield* git(["rev-parse", "--show-toplevel"], { cwd: directory })
+            if (result.code !== 0) return undefined
+            return pathSvc.join(resolveGitPath(directory, result.text.trim()), ".git")
+          }
+          const matches = yield* fs.up({ targets: [".git"], start: directory }).pipe(Effect.orDie)
+          return matches[0]
+        })
 
         if (!dotgit) {
           return {

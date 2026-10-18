@@ -1788,6 +1788,58 @@ describe("main automatically waits for subagent executions", () => {
     20000,
   )
 
+  for (const boundary of ["accepted", "claimed"] as const) it.live(
+    `actor cancellation at spawn receipt ${boundary} prevents detached lane work and permits fresh input`,
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const executions = yield* ActorExecution.Service
+      const controller = yield* InboxController.Service
+      const bridge = yield* EffectBridge.make()
+      const actor = spawnRef.current
+      if (!actor) throw new Error("Actor service missing")
+      const parent = yield* sessions.create({ title: "cancel before runner admission" })
+      let cancelled = false
+      let receiptID: string | undefined
+      let actorID: string | undefined
+      let childSessionID: SessionID | undefined
+      let cancellation: Fiber.Fiber<void> | undefined
+      const onReceipt = (event: GlobalEvent) => {
+        if (cancelled || event.payload.type !== ReceiptUpdated.type) return
+        const receipt = ReceiptUpdated.properties.parse(event.payload.properties)
+        if (receipt.agentID === "main" || receipt.state !== boundary) return
+        const execution = executions.currentUnsafe(receipt.sessionID as SessionID, receipt.agentID)
+        if (!execution) throw new Error("Spawn execution missing")
+        cancelled = true
+        receiptID = receipt.receiptId
+        actorID = receipt.agentID
+        childSessionID = receipt.sessionID as SessionID
+        Effect.runSync(executions.requestCancel(execution))
+        cancellation = bridge.fork(actor.cancel(childSessionID, actorID, "forced"))
+      }
+      yield* Effect.acquireRelease(Effect.sync(() => GlobalBus.on("event", onReceipt)),
+        () => Effect.sync(() => { GlobalBus.off("event", onReceipt) }))
+      const spawned = yield* actor.spawn({ sessionID: parent.id, mode: "subagent", agentType: "build",
+        task: "CANCELLED-SPAWN", context: "none", tools: [], background: true })
+      expect((yield* Deferred.await(spawned.outcome).pipe(Effect.timeout("5 seconds"))).status).toBe("cancelled")
+      if (!receiptID || !actorID || !childSessionID || !cancellation) throw new Error("Spawn cancellation missing")
+      yield* Fiber.join(cancellation).pipe(Effect.timeout("5 seconds"))
+      const receipt = yield* controller.getReceipt(receiptID)
+      expect(receipt).toMatchObject({ state: "cancelled", outcome: "never_ran", consumed: false })
+      expect(receipt.deliveryMessageID).toBeUndefined()
+      expect(yield* llm.calls).toBe(0)
+      expect(yield* executions.current(childSessionID, actorID)).toBeUndefined()
+      yield* llm.text("FRESH-ACTOR-INPUT")
+      const nextID = MessageID.ascending()
+      const next = yield* prompt.prompt({ sessionID: childSessionID, agentID: actorID, messageID: nextID,
+        agent: "build", source: "hook", parts: [{ type: "text", text: "Fresh valid hook" }] }).pipe(Effect.timeout("10 seconds"))
+      expect(next.info.role === "assistant" && next.info.parentID).toBe(nextID)
+      expect(next.parts.some(p => p.type === "text" && p.text === "FRESH-ACTOR-INPUT")).toBe(true)
+      expect(yield* llm.calls).toBe(1)
+    }), { git: true, config }),
+    20000,
+  )
+
   it.live(
     "actor cancellation after claim and before runLoop settles unread input without a model request",
     provideTmpdirServer(({ llm }) => Effect.gen(function* () {
@@ -1840,6 +1892,40 @@ describe("main automatically waits for subagent executions", () => {
       expect(messages.some((message) => message.info.id === input.inputMessageID)).toBe(true)
       expect(yield* executions.current(child.sessionID, child.actorID)).toBeUndefined()
       expect(yield* controller.listAccepted(receipt.lane)).toEqual([])
+    }), { git: true, config }),
+    20000,
+  )
+
+  it.live(
+    "explicit wait continues through its target's terminal notification until execution exits",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const registry = yield* ActorRegistry.Service
+      const inbox = inboxServiceRef.current
+      if (!inbox) throw new Error("Inbox service missing")
+      const session = yield* sessions.create({ title: "target notification preserves wait" })
+      const held = yield* child(session.id, "child-a")
+      yield* llm.tool("actor", { operation: { action: "wait", actor_id: "child-a", timeout_ms: 10000 } })
+      yield* llm.text("CHILD-ACKNOWLEDGED")
+      const main = yield* start(session.id)
+      const waitParts = sessions.messages({ sessionID: session.id }).pipe(Effect.map((messages) =>
+        messages.flatMap((message) => message.parts).filter((part) => part.type === "tool" && part.tool === "actor")))
+      yield* until(waitParts.pipe(Effect.map((parts) => parts.some((part) => part.type === "tool" && part.state.status === "running"))))
+      yield* makeTerminalNotifier({ inbox, registry, sessions })({
+        sessionID: session.id, actorID: "child-a", source: "spawn", status: "failed", result: "PARTIAL-DELIVERY",
+      })
+      yield* Effect.sleep("50 millis")
+      const pending = yield* waitParts
+      expect(pending.some((part) => part.type === "tool" && part.state.status === "running")).toBe(true)
+      expect(yield* llm.calls).toBe(1)
+      expect(held.execution.cancelled).toBe(false)
+      yield* complete(held)
+      yield* Fiber.join(main).pipe(Effect.timeout("5 seconds"))
+      const completed = (yield* waitParts).find((part) => part.type === "tool" && part.state.status === "completed")
+      if (!completed || completed.type !== "tool" || completed.state.status !== "completed") throw new Error("Actor wait did not finish")
+      expect(completed.state.output).toContain('"status":"idle"')
+      expect(completed.state.output).not.toContain('"status":"interrupted"')
+      expect(yield* llm.calls).toBe(2)
     }), { git: true, config }),
     20000,
   )

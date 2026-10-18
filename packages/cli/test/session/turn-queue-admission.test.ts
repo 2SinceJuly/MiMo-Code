@@ -1,9 +1,12 @@
 import { describe, expect } from "bun:test"
-import { Deferred, Effect, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import path from "node:path"
+import { Global } from "../../src/global"
 import { AppLayer } from "../../src/effect/app-runtime"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Session } from "../../src/session"
-import { SessionPrompt } from "../../src/session/prompt"
+import { injectScheduledPrompt, SessionPrompt } from "../../src/session/prompt"
+import { inboxServiceRef } from "../../src/inbox/inbox-ref"
 import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
@@ -147,6 +150,275 @@ function structuredTool(input: Record<string, unknown>) {
 }
 
 describe("InboxController admission and claim acceptance without child execution", () => {
+  it.live(
+    "seedless main inbox stops scheduling and a later valid prompt consumes both receipts",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const { session, prompt, tq } = yield* setup("Seedless main inbox")
+      const inbox = inboxServiceRef.current
+      const scheduler = schedulerRef.current
+      if (!inbox || !scheduler) throw new Error("Inbox scheduler missing")
+      const input = yield* inbox.accept({ receiverSessionID: session.id, receiverActorID: "main", content: "SEEDLESS-INBOX" })
+      let guardChecks = 0
+      yield* scheduler.kick({ sessionID: session.id, agentID: "main" }, Effect.sync(() => { guardChecks++ }))
+        .pipe(Effect.timeout("5 seconds"))
+      yield* Effect.sleep("100 millis")
+      expect(guardChecks).toBe(1)
+      expect((yield* tq.getReceipt(input.inboxID)).state).toBe("accepted")
+      expect(yield* llm.calls).toBe(0)
+      yield* llm.text("SEEDED-RESPONSE")
+      const nextID = MessageID.ascending()
+      answer(yield* prompt.prompt({ sessionID: session.id, messageID: nextID, agent: "build",
+        parts: [{ type: "text", text: "VALID-SEED-INPUT" }] }).pipe(Effect.timeout("10 seconds")), "SEEDED-RESPONSE", nextID)
+      yield* successful(input.inboxID)
+      yield* successful((yield* receiptFor(session.id, nextID)).id)
+      expect(yield* llm.calls).toBe(1)
+      expect(JSON.stringify((yield* llm.inputs)[0].messages)).toContain("SEEDLESS-INBOX")
+      expect(JSON.stringify((yield* llm.inputs)[0].messages)).toContain("VALID-SEED-INPUT")
+    }), { git: true, config }),
+    30_000,
+  )
+
+  it.live(
+    "internal structured retry persists task identity for a real write",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const { session, sessions, prompt } = yield* setup("Internal continuation task identity")
+      const target = path.join(Global.Path.data, "memory", "sessions", session.id, "tasks", "T3", "progress.md")
+      yield* llm.text("Missing structured result")
+      yield* llm.tool("write", { file_path: target, content: "CONTINUATION-TASK" })
+      yield* llm.tool("StructuredOutput", { answer: "DONE" })
+      const result = yield* prompt.prompt({ sessionID: session.id, task_id: "T3", agent: "build",
+        format: { type: "json_schema", schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] }, retryCount: 1 },
+        parts: [{ type: "text", text: "Complete task three with structured output" }] })
+      expect(result.info.role === "assistant" && result.info.structured).toEqual({ answer: "DONE" })
+      const users = (yield* sessions.messages({ sessionID: session.id })).filter(m => m.info.role === "user")
+      expect(users).toHaveLength(2)
+      expect(users.every(m => m.info.role === "user" && m.info.task_id === "T3")).toBe(true)
+      expect(users[1].parts.every(p => p.type === "text" && p.synthetic)).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(target).text())).toBe("CONTINUATION-TASK")
+      expect(yield* llm.calls).toBe(3)
+    }), { git: true, config: url => ({ ...config(url), permission: { "*": "allow" } }) }),
+    30_000,
+  )
+
+  for (const kindOfTask of ["cron", "loop"] as const) it.live(
+    `independent synthetic ${kindOfTask} has no historical task write authority`,
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const { session, sessions, prompt } = yield* setup(`Synthetic ${kindOfTask} task isolation`)
+      const target = path.join(Global.Path.data, "memory", "sessions", session.id, "tasks", "T3", "progress.md")
+      yield* llm.tool("write", { file_path: target, content: "TASK-OWNER" })
+      yield* llm.text("TASK-OWNER-DONE")
+      yield* prompt.prompt({ sessionID: session.id, task_id: "T3", agent: "build",
+        parts: [{ type: "text", text: "Write task three progress" }] })
+      expect(yield* Effect.promise(() => Bun.file(target).text())).toBe("TASK-OWNER")
+      yield* llm.tool("write", { file_path: target, content: "SCHEDULED-OVERWRITE" })
+      yield* llm.text("SCHEDULED-DONE")
+      yield* injectScheduledPrompt({ sessionID: session.id, value: "Independent scheduled request", origin: {
+        kind: "cron", taskId: `scheduled-${kindOfTask}`, kindOfTask,
+      } })
+      const messages = yield* sessions.messages({ sessionID: session.id })
+      const scheduled = messages.findLast(m => m.info.role === "user")
+      expect(scheduled?.info.role === "user" && scheduled.info.task_id).toBeUndefined()
+      const tools = messages.filter(m => m.info.role === "assistant" && m.info.parentID === scheduled?.info.id)
+        .flatMap(m => m.parts).filter(p => p.type === "tool")
+      expect(tools).toHaveLength(1)
+      expect(tools[0]).toMatchObject({ state: { status: "error", error: expect.stringContaining("reserved for the checkpoint-writer") } })
+      expect(yield* Effect.promise(() => Bun.file(target).text())).toBe("TASK-OWNER")
+      expect(yield* llm.calls).toBe(4)
+    }), { git: true, config: url => ({ ...config(url), permission: { "*": "allow" } }) }),
+    30_000,
+  )
+  it.live(
+    "cancel after acceptance during title persistence settles the unclaimed prompt and permits new input",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const tq = yield* InboxController.Service
+      const session = yield* sessions.create()
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const mutableSessions = sessions as { -readonly [Key in keyof typeof sessions]: typeof sessions[Key] }
+      const original = sessions.setTitleIfDefault
+      let pause = true
+      mutableSessions.setTitleIfDefault = (...args: Parameters<typeof original>) => Effect.gen(function* () {
+        if (pause && args[0].sessionID === session.id) {
+          pause = false
+          yield* Deferred.succeed(entered, undefined)
+          yield* Deferred.await(release)
+        }
+        return yield* original(...args)
+      })
+      yield* Effect.addFinalizer(() => Effect.sync(() => { mutableSessions.setTitleIfDefault = original }))
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined))
+      yield* Effect.addFinalizer(() => prompt.cancel(session.id))
+      const messageID = MessageID.ascending()
+      const running = yield* prompt.prompt({ sessionID: session.id, messageID, agent: "build",
+        parts: [{ type: "text", text: "12345" }] }).pipe(Effect.forkChild)
+      yield* Deferred.await(entered).pipe(Effect.timeout("5 seconds"))
+      const accepted = yield* receiptFor(session.id, messageID)
+      expect(accepted.state).toBe("accepted")
+      yield* prompt.cancel(session.id)
+      expect((yield* tq.getReceipt(accepted.id)).state).toBe("cancelled")
+      yield* Deferred.succeed(release, undefined)
+      const result = yield* Fiber.join(running).pipe(Effect.timeout("5 seconds"))
+      expect(result.info.id).toBe(messageID)
+      expect(result.info.role).toBe("user")
+      expect(yield* llm.calls).toBe(0)
+      yield* llm.text("AFTER-CANCEL")
+      const nextID = MessageID.ascending()
+      answer(yield* prompt.prompt({ sessionID: session.id, messageID: nextID, agent: "build",
+        parts: [{ type: "text", text: "New epoch request" }] }), "AFTER-CANCEL", nextID)
+      yield* successful((yield* receiptFor(session.id, nextID)).id)
+      expect(yield* llm.calls).toBe(1)
+    }), { git: true, config }),
+    30_000,
+  )
+
+  for (const firstFails of [false, true]) it.live(
+    `receipt result is independent of the next scheduled run when firstFails=${firstFails}`,
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const { session, prompt, tq } = yield* setup("Independent lane results")
+      const firstGate = yield* responseGate()
+      const secondGate = yield* responseGate()
+      const thirdGate = yield* responseGate()
+      const firstID = MessageID.ascending()
+      const secondID = MessageID.ascending()
+      const settling = yield* Deferred.make<void>()
+      const releaseSettlement = yield* Deferred.make<void>()
+      let firstSettlement = true
+      const secondSettling = yield* Deferred.make<void>()
+      const releaseSecondSettlement = yield* Deferred.make<void>()
+      let secondSettlement = true
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseSecondSettlement, undefined))
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseSettlement, undefined))
+      yield* Effect.acquireRelease(Effect.sync(() => {
+        const previous = inboxControllerRef.current
+        inboxControllerRef.current = { ...tq,
+          ack: (...args) => Effect.gen(function* () {
+            const result = yield* tq.ack(...args)
+            if (args[0].sessionID === session.id && firstSettlement) {
+              firstSettlement = false
+              yield* Deferred.succeed(settling, undefined)
+              yield* Deferred.await(releaseSettlement)
+            } else if (args[0].sessionID === session.id && secondSettlement && args[2].some(item => item.receiptId === receipts(session.id).find(row => row.input_message_id === secondID)?.id)) {
+              secondSettlement = false
+              yield* Deferred.succeed(secondSettling, undefined)
+              yield* Deferred.await(releaseSecondSettlement)
+            }
+            return result
+          }),
+        }
+        return previous
+      }), previous => Effect.sync(() => { inboxControllerRef.current = previous }))
+      if (firstFails) yield* llm.error(400, { error: { message: "first-failed", type: "invalid_request_error" } })
+      else yield* llm.hold("FIRST-OK", firstGate.promise)
+      if (firstFails) yield* llm.hold("SECOND-OK", secondGate.promise)
+      else yield* llm.error(400, { error: { message: "second-failed", type: "invalid_request_error" } })
+      yield* llm.hold("THIRD-OK", thirdGate.promise)
+      const a = yield* prompt.prompt({ sessionID: session.id, messageID: firstID, agent: "build",
+        parts: [{ type: "text", text: "First independent request" }] }).pipe(Effect.forkChild)
+      firstGate.resolve()
+      yield* Deferred.await(settling).pipe(Effect.timeout("5 seconds"))
+      const b = yield* prompt.prompt({ sessionID: session.id, messageID: secondID, agent: "build",
+        parts: [{ type: "text", text: "Second independent request" }] }).pipe(Effect.forkChild)
+      while (receipts(session.id).length < 2) yield* Effect.sleep("1 millis")
+      yield* Deferred.succeed(releaseSettlement, undefined)
+      yield* llm.wait(2).pipe(Effect.timeout("5 seconds"))
+      const aExit = yield* Fiber.await(a).pipe(Effect.timeout("5 seconds"))
+      if (firstFails) {
+        expect(Exit.isSuccess(aExit)).toBe(true)
+        if (Exit.isSuccess(aExit)) {
+          expect(aExit.value.info.role).toBe("assistant")
+          expect(aExit.value.info.role === "assistant" && JSON.stringify(aExit.value.info.error)).toContain("first-failed")
+        }
+      } else {
+        expect(Exit.isSuccess(aExit)).toBe(true)
+        if (Exit.isSuccess(aExit)) answer(aExit.value, "FIRST-OK", firstID)
+      }
+      secondGate.resolve()
+      yield* Deferred.await(secondSettling).pipe(Effect.timeout("5 seconds"))
+      const thirdID = MessageID.ascending()
+      const c = yield* prompt.prompt({ sessionID: session.id, messageID: thirdID, agent: "build",
+        parts: [{ type: "text", text: "Third independent request" }] }).pipe(Effect.forkChild)
+      while (receipts(session.id).length < 3) yield* Effect.sleep("1 millis")
+      yield* Deferred.succeed(releaseSecondSettlement, undefined)
+      yield* llm.wait(3).pipe(Effect.timeout("5 seconds"))
+      const secondResult = yield* Fiber.join(b).pipe(Effect.timeout("5 seconds"))
+      if (firstFails) answer(secondResult, "SECOND-OK", secondID)
+      else {
+        expect(secondResult.info.role).toBe("assistant")
+        expect(secondResult.info.role === "assistant" && secondResult.info.parentID).toBe(secondID)
+        expect(secondResult.info.role === "assistant" && JSON.stringify(secondResult.info.error)).toContain("second-failed")
+      }
+      expect(c.pollUnsafe()).toBeUndefined()
+      thirdGate.resolve()
+      answer(yield* Fiber.join(c).pipe(Effect.timeout("5 seconds")), "THIRD-OK", thirdID)
+      const firstReceipt = yield* receiptFor(session.id, firstID)
+      const secondReceipt = yield* receiptFor(session.id, secondID)
+      expect(firstReceipt.outcome).toBe(firstFails ? "assistant_error" : "success")
+      expect(secondReceipt.outcome).toBe(firstFails ? "success" : "assistant_error")
+      yield* successful((yield* receiptFor(session.id, thirdID)).id)
+      expect(yield* llm.calls).toBe(3)
+    }), { git: true, config }),
+    30_000,
+  )
+
+  it.live(
+    "extended inputs select their own task identity for real writes and restored execution",
+    provideTmpdirServer(({ llm }) => Effect.gen(function* () {
+      const { session, sessions, prompt } = yield* setup("Task identity per admitted input")
+      const expansion = yield* pauseFirstExtension(session.id)
+      const firstGate = yield* responseGate()
+      const thirdPath = path.join(Global.Path.data, "memory", "sessions", session.id, "tasks", "T3", "progress.md")
+      const fourthPath = path.join(Global.Path.data, "memory", "sessions", session.id, "tasks", "T4", "progress.md")
+      yield* llm.push(reply().wait(firstGate.promise)
+        .tool("write", { file_path: fourthPath, content: "T4 initial" }))
+      yield* llm.tool("write", { file_path: thirdPath, content: "T4 cross-task" })
+      yield* llm.text("T4-WRITTEN")
+      const firstID = MessageID.ascending()
+      const fourthID = MessageID.ascending()
+      const running = yield* prompt.prompt({ sessionID: session.id, messageID: firstID, agent: "build", task_id: "T3",
+        parts: [{ type: "text", text: "Task three request" }] }).pipe(Effect.forkChild)
+      yield* Deferred.await(expansion.entered).pipe(Effect.timeout("5 seconds"))
+      yield* prompt.promptAsync({ sessionID: session.id, messageID: fourthID, agent: "build", task_id: "T4",
+        parts: [{ type: "text", text: "Task four request" }] })
+      yield* Deferred.succeed(expansion.release, undefined)
+      yield* llm.wait(1).pipe(Effect.timeout("5 seconds"))
+      expect((yield* receiptFor(session.id, fourthID)).state).toBe("claimed")
+      firstGate.resolve()
+      answer(yield* Fiber.join(running).pipe(Effect.timeout("10 seconds")), "T4-WRITTEN", fourthID)
+      const parts = (yield* sessions.messages({ sessionID: session.id })).flatMap(m => m.parts)
+      expect(parts.find(p => p.type === "tool" && p.state.input.file_path === fourthPath))
+        .toMatchObject({ state: { status: "completed" } })
+      expect(parts.find(p => p.type === "tool" && p.state.input.file_path === thirdPath))
+        .toMatchObject({ state: { status: "error", error: expect.stringContaining("reserved for the checkpoint-writer") } })
+      expect(yield* Effect.promise(() => Bun.file(fourthPath).text())).toBe("T4 initial")
+      expect(yield* Effect.promise(() => Bun.file(thirdPath).exists())).toBe(false)
+      const stored = (yield* sessions.messages({ sessionID: session.id })).find(m => m.info.id === fourthID)
+      expect(stored?.info.role === "user" && stored.info.task_id).toBe("T4")
+
+      const restoredID = MessageID.ascending()
+      yield* prompt.prompt({ sessionID: session.id, messageID: restoredID, agent: "build", task_id: "T3", noReply: true,
+        parts: [{ type: "text", text: "Persist task three for restored execution" }] })
+      yield* llm.tool("write", { file_path: thirdPath, content: "T3 restored" })
+      yield* llm.text("T3-RESTORED")
+      answer(yield* prompt.loop({ sessionID: session.id }), "T3-RESTORED", restoredID)
+      expect(yield* Effect.promise(() => Bun.file(thirdPath).text())).toBe("T3 restored")
+      expect(yield* Effect.promise(() => Bun.file(fourthPath).text())).toBe("T4 initial")
+
+      const clearID = MessageID.ascending()
+      yield* llm.tool("write", { file_path: thirdPath, content: "Unbound overwrite" })
+      yield* llm.text("TASK-CLEARED")
+      answer(yield* prompt.prompt({ sessionID: session.id, messageID: clearID, agent: "build",
+        parts: [{ type: "text", text: "A new input without a task" }] }), "TASK-CLEARED", clearID)
+      const lastTools = (yield* sessions.messages({ sessionID: session.id })).filter(m =>
+        m.info.role === "assistant" && m.info.parentID === clearID).flatMap(m => m.parts).filter(p => p.type === "tool")
+      expect(lastTools).toHaveLength(1)
+      expect(lastTools[0]).toMatchObject({ state: { status: "error", error: expect.stringContaining("reserved for the checkpoint-writer") } })
+      expect(yield* Effect.promise(() => Bun.file(thirdPath).text())).toBe("T3 restored")
+    }), { git: true, config: url => ({ ...config(url), permission: { "*": "allow" } }) }),
+    30_000,
+  )
+
   it.live(
     "failed delegated subtask anchors its delivery once and is not replayed by the next prompt",
     provideTmpdirServer(

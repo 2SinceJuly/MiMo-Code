@@ -138,7 +138,7 @@ describe("bin/mimo launcher", () => {
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("downloaded-run:hi")
     } finally {
-      server.stop()
+      await server.stop(true)
     }
   })
 

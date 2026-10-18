@@ -555,6 +555,7 @@ export const User = Base.extend({
   system: z.string().optional(),
   systemMode: z.enum(["append", "replace-agent"]).optional(),
   harness: z.enum(["auto", "codex", "default"]).optional(),
+  task_id: z.string().optional(),
   tools: z.record(z.string(), z.boolean()).optional(),
   provenance: Provenance.optional(),
 }).meta({

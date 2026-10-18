@@ -8,7 +8,8 @@ import type { Lane } from "./schema"
  * the kick only starts a Runner lease when the lane is idle.
  */
 export type LaneScheduler = {
-  readonly kick: (lane: Lane) => Effect.Effect<void>
+  readonly guard?: (lane: Lane) => Effect.Effect<Effect.Effect<void>>
+  readonly kick: (lane: Lane, guard?: Effect.Effect<void>) => Effect.Effect<void>
 }
 
 export const schedulerRef: { current: LaneScheduler | undefined } = { current: undefined }

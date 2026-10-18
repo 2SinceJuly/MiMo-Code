@@ -529,13 +529,13 @@ describe("POST /sync/replay atomic session restore", () => {
         const before = state(data.info.id)
         const events = structuredClone(data.payload.events)
         events.push({
-          id: `${data.info.id}-valid-epoch`, type: "session.turn_queue.delta.1", aggregateID: data.info.id, seq: events.length,
+          id: `${data.info.id}-valid-epoch`, type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version), aggregateID: data.info.id, seq: events.length,
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: 7, time_updated: 1 } },
         })
         if (invalid === "unknown type") events.push({ ...events.at(-1)!, id: `${data.info.id}-unknown`, seq: events.length, type: "unknown.event.1" })
         if (invalid === "first sequence gap") for (const event of events) event.seq++
         if (invalid === "invalid queue epoch") events.push({
-          id: `${data.info.id}-bad-epoch`, type: "session.turn_queue.delta.1", aggregateID: data.info.id, seq: events.length,
+          id: `${data.info.id}-bad-epoch`, type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version), aggregateID: data.info.id, seq: events.length,
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: -1, time_updated: 1 } },
         })
         const payload = mode === "events-only" ? { directory: http.directory, events }
@@ -565,7 +565,7 @@ describe("POST /sync/replay atomic session restore", () => {
         }
         const message = invalid === "nested message session" || invalid === "message ID collision" || invalid === "malformed message payload"
         const events = [...data.payload.events, {
-          id: `${data.info.id}-valid-epoch`, type: "session.turn_queue.delta.1", aggregateID: data.info.id, seq: data.payload.events.length,
+          id: `${data.info.id}-valid-epoch`, type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version), aggregateID: data.info.id, seq: data.payload.events.length,
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: 7, time_updated: 1 } },
         }, {
           id: `${data.info.id}-bad-owner`, aggregateID: data.info.id, seq: data.payload.events.length + 1,
@@ -601,11 +601,11 @@ describe("POST /sync/replay atomic session restore", () => {
         const victimBefore = state(template.id)
         const events = [...data.payload.events, {
           id: `${data.info.id}-queue-valid`, aggregateID: data.info.id, seq: data.payload.events.length,
-          type: "session.turn_queue.delta.1",
+          type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version),
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: 7, time_updated: 102 } },
         }, {
           id: `${data.info.id}-queue-foreign`, aggregateID: data.info.id, seq: data.payload.events.length + 1,
-          type: "session.turn_queue.delta.1",
+          type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version),
           data: { sessionID: template.id, epoch: { session_id: template.id, epoch: 99, time_updated: 103 } },
         }]
         const payload = mode === "events-only" ? { directory: http.directory, events }
@@ -636,11 +636,11 @@ describe("POST /sync/replay atomic session restore", () => {
         const before = state(data.info.id)
         const events = [...data.payload.events, {
           id: `${data.info.id}-queue-valid`, aggregateID: data.info.id, seq: data.payload.events.length,
-          type: "session.turn_queue.delta.1",
+          type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version),
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: 7, time_updated: 102 } },
         }, {
           id: data.payload.events[0].id, aggregateID: data.info.id, seq: data.payload.events.length + 1,
-          type: "session.turn_queue.delta.1",
+          type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version),
           data: { sessionID: data.info.id, epoch: { session_id: data.info.id, epoch: 8, time_updated: 103 } },
         }]
         const payload = mode === "events-only" ? { directory: http.directory, events }
@@ -651,6 +651,7 @@ describe("POST /sync/replay atomic session restore", () => {
         try {
           const response = await http.post("/sync/replay", payload)
           expect(response.status).toBe(500)
+          expect((await response.json()).data.message).toContain("UNIQUE constraint failed: event.id")
           expect(state(data.info.id)).toEqual(before)
           expect(emitted).toEqual([])
           expect(await Effect.runPromise(llm.calls)).toBe(0)

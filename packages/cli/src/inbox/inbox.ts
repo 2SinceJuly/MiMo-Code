@@ -16,6 +16,7 @@ import * as Project from "@/project/project"
 import { SessionTable } from "@/session/session.sql"
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
+import { bindScopedRef } from "@/effect/scoped-ref"
 
 const GC_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -178,10 +179,7 @@ export const layer = Layer.effect(
       }))
     }
     const impl = Service.of({ accept })
-    inboxServiceRef.current = impl
-    yield* Effect.addFinalizer(() => Effect.sync(() => {
-      if (inboxServiceRef.current === impl) inboxServiceRef.current = undefined
-    }))
+    yield* bindScopedRef(inboxServiceRef, impl)
     return impl
   }),
 ).pipe(Layer.provide(Controller.defaultLayer))

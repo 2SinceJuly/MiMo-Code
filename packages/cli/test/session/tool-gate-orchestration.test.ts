@@ -88,6 +88,7 @@ describe("tool gate orchestration", () => {
                 })
                 .pipe(Effect.timeout("10 seconds"))
               expect(yield* Effect.promise(() => Bun.file(path.join(dir, "example.txt")).text())).toBe("example\n")
+              expect(yield* Effect.promise(() => Bun.file(path.join(dir, "ready.txt")).text())).toBe("command complete")
               const execution = (yield* sessions.messages({ sessionID: session.id }))
                 .flatMap((message) => message.parts)
                 .find((part) => part.type === "tool" && part.callID === "exec-call")

@@ -36,6 +36,7 @@ export class ReceiptNotFound extends Error {
 }
 
 export interface AdmissionGuard {
+  deferKick?: boolean
   isCancelled?: () => boolean
   expectedEpoch?: number
 }
@@ -64,7 +65,11 @@ export interface Interface {
     expectedEpoch?: number,
     limit?: number,
   ) => Effect.Effect<{ receipts: Receipt[]; claimFrontier: MessageID | undefined } | undefined>
-  readonly observeInput: (lane: Lane, afterRevision: number) => Effect.Effect<number>
+  readonly observeInput: (
+    lane: Lane,
+    afterRevision: number,
+    options?: { ignoreActorNotification: { sessionID: SessionID; actorID: string } },
+  ) => Effect.Effect<number>
   readonly withStop: <A, E, R>(sessionID: SessionID, work: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   readonly abortSession: (sessionID: SessionID) => Effect.Effect<number>
   readonly getEpoch: (sessionID: SessionID) => Effect.Effect<number>
@@ -142,17 +147,6 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       )
       return row?.epoch ?? 0
     })
-
-    const loadLane = (lane: Lane) =>
-      Effect.sync(() =>
-        Database.use((db) =>
-          db
-            .select()
-            .from(InboxLaneStateTable)
-            .where(and(eq(InboxLaneStateTable.session_id, lane.sessionID), eq(InboxLaneStateTable.agent_id, lane.agentID)))
-            .get(),
-        ),
-      )
 
     const publish = (receipt: Receipt) =>
       bus
@@ -283,10 +277,11 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         if (!sched || stopping.has(lane.sessionID)) return
         const bridge = yield* EffectBridge.make()
         const directory = yield* InstanceState.directory
+        const guard = sched.guard ? yield* sched.guard(lane) : undefined
         yield* Effect.acquireUseRelease(
           Effect.sync(() => ({ release: Instance.claim(directory), transferred: false })),
           (owner) => Effect.sync(() => {
-            const work = bridge.promise(sched.kick(lane))
+            const work = bridge.promise(sched.kick(lane, guard))
             owner.transferred = true
             void work.then(owner.release, owner.release)
           }),
@@ -326,7 +321,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           if (waiters.size === 0) inputWaiters.delete(waiterKey(input.lane))
         }
         yield* publish(receipt)
-        if (!input.legacyInboxID) yield* maybeKick(input.lane)
+        if (!guard?.deferKick && !input.legacyInboxID) yield* maybeKick(input.lane)
       } else if (!guard && !input.legacyInboxID && (receipt.state === "accepted" || receipt.state === "claimed")) {
         yield* maybeKick(input.lane)
       }
@@ -489,29 +484,56 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return yield* claim(lane, runId, expectedEpoch, true, limit)
     })
 
-    const observeInput = Effect.fn("Inbox.observeInput")(function* (lane: Lane, afterRevision: number) {
+    const observeInput = Effect.fn("Inbox.observeInput")(function* (
+      lane: Lane,
+      afterRevision: number,
+      options?: { ignoreActorNotification: { sessionID: SessionID; actorID: string } },
+    ) {
       const key = waiterKey(lane)
-      const current = yield* loadLane(lane)
-      const rev = current?.input_revision ?? 0
-      if (rev > afterRevision) return rev
-
-      const deferred = yield* Deferred.make<number>()
-      let set = inputWaiters.get(key)
-      if (!set) {
-        set = new Set()
-        inputWaiters.set(key, set)
+      const read = () => Effect.sync(() => Database.transaction((db) => {
+        const revision = db.select().from(InboxLaneStateTable).where(and(
+          eq(InboxLaneStateTable.session_id, lane.sessionID), eq(InboxLaneStateTable.agent_id, lane.agentID),
+        )).get()?.input_revision ?? 0
+        if (!options || afterRevision < 0 || revision <= afterRevision) return { revision, relevant: true }
+        const admitted = and(
+          eq(InboxTable.receiver_session_id, lane.sessionID), eq(InboxTable.receiver_actor_id, lane.agentID),
+          promptOnly, sql`${InboxTable.idempotency_key} not like 'import-history:%'`,
+        )
+        const count = db.select({ count: sql<number>`count(*)` }).from(InboxTable).where(admitted).get()!.count
+        if (count !== revision) return { revision, relevant: true }
+        // rowid 保留受理顺序；revision 与 receipt 在同一事务写入，状态变化不影响输入边界。
+        const rows = db.select().from(InboxTable).where(admitted)
+          .orderBy(sql`${InboxTable}.rowid desc`).limit(revision - afterRevision).all()
+        const source = options.ignoreActorNotification
+        return { revision, relevant: rows.length < revision - afterRevision || rows.some((row) =>
+          row.type !== "actor_notification" || row.sender_session_id !== source.sessionID || row.sender_actor_id !== source.actorID,
+        ) }
+      }))
+      for (;;) {
+        const current = yield* read()
+        if (current.revision > afterRevision) {
+          if (current.relevant) return current.revision
+          afterRevision = current.revision
+        }
+        const deferred = yield* Deferred.make<number>()
+        let set = inputWaiters.get(key)
+        if (!set) {
+          set = new Set()
+          inputWaiters.set(key, set)
+        }
+        // 订阅前后读取 revision，避免遗漏并发受理。
+        set.add(deferred)
+        const next = yield* read()
+        if (next.revision > afterRevision) {
+          set.delete(deferred)
+          if (next.relevant) return next.revision
+          afterRevision = next.revision
+          continue
+        }
+        yield* Deferred.await(deferred).pipe(
+          Effect.ensuring(Effect.sync(() => set.delete(deferred))),
+        )
       }
-      // 订阅前后读取 revision，避免遗漏并发受理。
-      set.add(deferred)
-      const current2 = yield* loadLane(lane)
-      const rev2 = current2?.input_revision ?? 0
-      if (rev2 > afterRevision) {
-        set.delete(deferred)
-        return rev2
-      }
-      return yield* Deferred.await(deferred).pipe(
-        Effect.ensuring(Effect.sync(() => set?.delete(deferred))),
-      )
     })
 
     const abortSession = Effect.fn("Inbox.abortSession")(function* (sessionID: SessionID) {

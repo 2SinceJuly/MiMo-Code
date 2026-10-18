@@ -1,19 +1,31 @@
 import * as fs from "fs"
 import * as path from "path"
 import * as crypto from "crypto"
+import { spawnSync } from "node:child_process"
 import { ProjectID } from "./schema"
+import { childProcessEnv } from "../util/child-process-env"
+
+function resolveGitCommonDir(startDir: string): string | null {
+  const result = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+    cwd: startDir,
+    encoding: "utf-8",
+    env: childProcessEnv({ GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES }),
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) return null
+  return path.resolve(startDir, result.stdout.trim())
+}
 
 export function resolveMainGitDir(startDir: string): string | null {
+  // Git 负责显式发现边界的路径列表、符号链接和平台语义。
+  if (process.env.GIT_CEILING_DIRECTORIES) return resolveGitCommonDir(startDir)
   let dir = path.resolve(startDir)
   while (true) {
     const candidate = path.join(dir, ".git")
     if (fs.existsSync(candidate)) {
       const stat = fs.statSync(candidate)
       if (stat.isDirectory()) return candidate
-      const content = fs.readFileSync(candidate, "utf-8").trim()
-      const match = content.match(/^gitdir:\s*(.+)$/)
-      if (!match) return null
-      return path.resolve(match[1], "../..")
+      return resolveGitCommonDir(startDir)
     }
     const parent = path.dirname(dir)
     if (parent === dir) return null

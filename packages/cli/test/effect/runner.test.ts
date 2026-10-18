@@ -181,22 +181,59 @@ describe("Runner", () => {
   )
 
   it.live(
-    "concurrent callers all receive same error",
+    "concurrent independent work runs after a failed predecessor",
     Effect.gen(function* () {
       const s = yield* Scope.Scope
       const runner = Runner.make<string, string>(s)
+      const calls = yield* Ref.make(0)
       const work = Effect.gen(function* () {
+        yield* Ref.update(calls, (n) => n + 1)
         yield* Effect.sleep("10 millis")
         return yield* Effect.fail("boom")
       })
 
       const [a, b] = yield* Effect.all(
-        [runner.ensureRunning(work).pipe(Effect.exit), runner.ensureRunning(work).pipe(Effect.exit)],
+        [runner.ensureRunning(work).pipe(Effect.exit), runner.ensureRunning(Effect.gen(function* () {
+          yield* Ref.update(calls, (n) => n + 1)
+          return "second-result"
+        })).pipe(Effect.exit)],
         { concurrency: "unbounded" },
       )
 
       expect(Exit.isFailure(a)).toBe(true)
-      expect(Exit.isFailure(b)).toBe(true)
+      expect(Exit.isFailure(a) && Cause.squash(a.cause)).toBe("boom")
+      expect(b).toEqual(Exit.succeed("second-result"))
+      expect(yield* Ref.get(calls)).toBe(2)
+    }),
+  )
+
+  it.live(
+    "independent work runs after a predecessor defect without inheriting it",
+    Effect.gen(function* () {
+      const scope = yield* Scope.Scope
+      const runner = Runner.make<string>(scope)
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const order: string[] = []
+      const first = yield* runner.ensureRunning(Effect.gen(function* () {
+        order.push("first")
+        yield* Deferred.succeed(entered, undefined)
+        yield* Deferred.await(release)
+        return yield* Effect.die(new Error("first-failed"))
+      })).pipe(Effect.forkChild)
+      yield* Deferred.await(entered)
+      const second = yield* runner.ensureRunning(Effect.sync(() => {
+        order.push("second")
+        return "second-success"
+      })).pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+      expect(order).toEqual(["first"])
+      yield* Deferred.succeed(release, undefined)
+      const firstExit = yield* Fiber.await(first)
+      expect(Exit.isFailure(firstExit)).toBe(true)
+      if (Exit.isFailure(firstExit)) expect(Cause.pretty(firstExit.cause)).toContain("first-failed")
+      expect(yield* Fiber.join(second)).toBe("second-success")
+      expect(order).toEqual(["first", "second"])
     }),
   )
 

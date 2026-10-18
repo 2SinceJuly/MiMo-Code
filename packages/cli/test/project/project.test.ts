@@ -3,6 +3,7 @@ import { Project } from "../../src/project"
 import { Log } from "../../src/util"
 import { $ } from "bun"
 import path from "path"
+import fs from "fs/promises"
 import { tmpdir, withTmpdirOutsideGit } from "../fixture/fixture"
 import { GlobalBus } from "../../src/bus/global"
 import { ProjectID } from "../../src/project/schema"
@@ -101,6 +102,45 @@ describe("Project.fromDirectory", () => {
 
     const idFile = path.join(tmp.path, ".git", "mimocode-project-id")
     expect(await Bun.file(idFile).exists()).toBe(true)
+  })
+
+  test("honors Git discovery ceilings without changing project containment", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const boundary = path.join(tmp.path, "boundary")
+    const child = path.join(boundary, "child")
+    const sibling = path.join(tmp.path, "sibling")
+    await fs.mkdir(child, { recursive: true })
+    await fs.mkdir(sibling)
+    const previous = process.env.GIT_CEILING_DIRECTORIES
+    try {
+      process.env.GIT_CEILING_DIRECTORIES = [sibling, boundary].join(path.delimiter)
+      const hidden = await $`git rev-parse --show-toplevel`.cwd(child).quiet().nothrow()
+      expect(hidden.exitCode).not.toBe(0)
+      const { project, sandbox } = await run((svc) => svc.fromDirectory(child))
+      expect(project.id).toBe(ProjectID.global)
+      expect(project.worktree).toBe("/")
+      expect(project.vcs).toBeUndefined()
+      expect(sandbox).toBe("/")
+
+      process.env.GIT_CEILING_DIRECTORIES = sibling
+      const ancestor = await run((svc) => svc.fromDirectory(child))
+      expect(ancestor.project.worktree).toBe(tmp.path)
+      expect(ancestor.sandbox).toBe(tmp.path)
+      expect(ancestor.project.vcs).toBe("git")
+
+      await $`git init`.cwd(boundary).quiet()
+      process.env.GIT_CEILING_DIRECTORIES = boundary
+      const local = await run((svc) => svc.fromDirectory(boundary))
+      expect(local.project.worktree).toBe(boundary)
+      expect(local.sandbox).toBe(boundary)
+      expect(local.project.vcs).toBe("git")
+      const excluded = await run((svc) => svc.fromDirectory(child))
+      expect(excluded.project.worktree).toBe("/")
+      expect(excluded.project.vcs).toBeUndefined()
+    } finally {
+      if (previous === undefined) delete process.env.GIT_CEILING_DIRECTORIES
+      else process.env.GIT_CEILING_DIRECTORIES = previous
+    }
   })
 
   test("returns global for non-git directory", () =>

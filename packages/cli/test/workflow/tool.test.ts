@@ -327,6 +327,8 @@ describe("WorkflowTool run", () => {
             title: "wf by name",
             permission: [{ permission: "*", pattern: "*", action: "allow" }],
           })
+          const prompt = yield* SessionPrompt.Service
+          yield* Effect.addFinalizer(() => prompt.cancel(parent.id).pipe(Effect.asVoid))
           yield* llm.text("done")
           const ctx = {
             sessionID: parent.id,
@@ -337,9 +339,7 @@ describe("WorkflowTool run", () => {
             metadata: () => Effect.void,
             ask: () => Effect.void,
           }
-          // async: true keeps the tool fire-and-forget — the test only needs to
-          // verify name resolution + start, not full deep-research execution
-          // (which would require mocking many LLM rounds).
+          // async 返回后 execution 仍属于此测试，必须在 fixture 关闭前终止。
           const res = yield* def.execute(
             { operation: "run", name: "deep-research", args: "Q?", async: true },
             ctx as any,

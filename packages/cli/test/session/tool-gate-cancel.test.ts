@@ -10,6 +10,9 @@ import { Deferred, Effect, Fiber, Layer } from "effect"
 import { SessionPrompt } from "../../src/session/prompt"
 import { Session } from "../../src/session"
 import { SessionRunState } from "../../src/session/run-state"
+import { MessageID } from "../../src/session/schema"
+import { InboxTable } from "../../src/inbox/inbox.sql"
+import { Database, eq } from "../../src/storage"
 import { Bus } from "../../src/bus"
 import { Question } from "../../src/question"
 import { MessageV2 } from "../../src/session/message-v2"
@@ -644,9 +647,11 @@ for (const recovery of ["send", "resume", "edit"] as const) {
               const initialize = spyOn(Tool, "init").mockImplementation(gated)
               yield* Effect.addFinalizer(() => Effect.sync(() => initialize.mockRestore()))
               yield* Effect.addFinalizer(() => prompt.cancel(session.id))
+              const firstMessageID = MessageID.ascending()
               const first = yield* prompt
                 .prompt({
                   sessionID: session.id,
+                  messageID: firstMessageID,
                   agent: "build",
                   harness: "default",
                   parts: [{ type: "text", text: "First cold request" }],
@@ -654,14 +659,26 @@ for (const recovery of ["send", "resume", "edit"] as const) {
                 .pipe(Effect.forkChild)
               yield* Deferred.await(entered).pipe(Effect.timeout("10 seconds"))
               yield* prompt.cancel(session.id)
-              yield* Fiber.join(first)
+              const firstResult = yield* Fiber.join(first)
               const stopped = yield* sessions.messages({ sessionID: session.id })
               const interrupted = stopped.find((message) => message.info.role === "assistant")
               expect(interrupted?.info).toMatchObject({
+                parentID: firstMessageID,
                 error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+              })
+              const receipts = Database.use((db) => db.select().from(InboxTable)
+                .where(eq(InboxTable.receiver_session_id, session.id)).all())
+              expect(receipts).toHaveLength(1)
+              expect(receipts[0]).toMatchObject({
+                input_message_id: firstMessageID,
+                state: "cancelled",
+                outcome: "never_ran",
+                consumed: false,
+                delivery_message_id: null,
               })
               expect(server.captures).toHaveLength(0)
               if (interrupted?.info.role !== "assistant") throw new Error("missing interrupted assistant")
+              expect(firstResult).toEqual(interrupted)
               const originalParentID = interrupted.info.parentID
               const originalUser = stopped.find((message) => message.info.id === originalParentID)!
               if (recovery === "edit") {

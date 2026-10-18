@@ -179,14 +179,10 @@ export const make = <A, E = never, B = never>(
             }
             if (opts?.onReentryWarn)
               yield* opts.onReentryWarn({ label: opts.label ?? "(unlabeled)", existingRunId: st.run.id })
-            // Live fiber: NO pending-attach (C-01). Serialize — wait for the
-            // current run, then start this work as a new exclusive run. The
-            // Controller mailbox owns multi-work admission; one pending slot
-            // was a second consumer and is gone.
-            const fiber = st.run.fiber
+            // NO pending-attach: 每个调用保留独立 work，前一次结果仅用于等待执行权释放。
             return [
-              Fiber.await(fiber).pipe(
-                Effect.ignore,
+              Deferred.await(st.run.done).pipe(
+                Effect.exit,
                 Effect.andThen(Effect.suspend(() => ensureRunningAt(work, generation, beforeAcquire))),
               ),
               st,

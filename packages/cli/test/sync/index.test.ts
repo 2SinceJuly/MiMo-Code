@@ -160,7 +160,7 @@ describe("SyncEvent", () => {
       const before = QueueSync.capture(session.id)
       const history = Database.use((db) => db.select().from(EventTable).all())
       const event = {
-        id: "bad-queue", type: "session.turn_queue.delta.1", seq: 0, aggregateID: other,
+        id: "bad-queue", type: SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version), seq: 0, aggregateID: other,
         data: { sessionID: session.id, epoch: { session_id: session.id, epoch: 99, time_updated: 1 } },
       }
       expect(() => SyncEvent.replay(event)).toThrow(SyncEvent.ReplayValidationError)
@@ -214,7 +214,7 @@ describe("SyncEvent", () => {
       const published = spyOn(GlobalBus, "emit")
       try {
         for (const update of updates) {
-          const first = next(own.id, "session.turn_queue.delta.1", { sessionID: own.id, epoch: { session_id: own.id, epoch: 2, time_updated: 1 } })
+          const first = next(own.id, SyncEvent.versionedType(QueueSync.Event.Delta.type, QueueSync.Event.Delta.version), { sessionID: own.id, epoch: { session_id: own.id, epoch: 2, time_updated: 1 } })
           const bad = { ...next(own.id, update.type, update.data), seq: first.seq + 1 }
           expect(() => SyncEvent.replayAll([first, bad], { publish: true })).toThrow(SyncEvent.ReplayValidationError)
           expect(state()).toEqual(before)

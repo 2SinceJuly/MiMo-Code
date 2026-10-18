@@ -650,29 +650,29 @@ describe("WorkflowRuntime list + resume", () => {
         const script = [`export const meta = { name: "t", description: "d" }`, `return await agent("x")`].join("\n")
         const { runID } = yield* runtime.start({ script, sessionID: parent.id, parentActorID: "main", model: ref })
         const first = yield* runtime.wait({ runID })
-        expect(first.status).toBe("completed")
+        expect(first).toEqual({ status: "completed", result: "done" })
+        const journal = yield* WorkflowPersistence.loadJournal(runID)
+        expect([...journal.results.values()]).toEqual(["done"])
+        expect(yield* WorkflowPersistence.readScript(runID)).toBe(script)
 
-        // Fire two resume(sameRunID) concurrently. Without the lock both pass the
-        // live-guard (status is "completed") and both re-launch. With the lock the
-        // second serializes behind the first and sees status "running" → resumed:false.
-        const results = yield* Effect.all([runtime.resume({ runID }), runtime.resume({ runID })], {
-          concurrency: "unbounded",
-        })
-
-        // PRIMARY (and discriminating): exactly one re-launch happened — locked: 1
-        // true + 1 false; unlocked: 2 true (double-launch).
-        expect(results.filter((r) => r.resumed).length).toBe(1)
-        expect(results.filter((r) => !r.resumed).length).toBe(1)
-
-        // The single relaunched pass replays cleanly to completion.
-        const out = yield* runtime.wait({ runID })
-        expect(out.status).toBe("completed")
-        expect((out as { result: unknown }).result).toBe("done") // replayed cached value
-
-        // SANITY: the surviving entry is a pure cache replay (no spawn) — a double-
-        // launch that re-spawned would show agentCount > 0.
-        const st = yield* runtime.status({ runID })
-        expect(st.agentCount).toBe(0)
+        for (let pass = 0; pass < 20; pass++) {
+          const results = yield* Effect.all([runtime.resume({ runID }), runtime.resume({ runID })], {
+            concurrency: "unbounded",
+          })
+          expect(results.filter((r) => r.resumed).length).toBe(1)
+          expect(results.filter((r) => !r.resumed).length).toBe(1)
+          expect(yield* runtime.wait({ runID })).toEqual({ status: "completed", result: "done" })
+          const st = yield* runtime.status({ runID })
+          expect(st.agentCount).toBe(0)
+          expect(st.succeeded).toBe(1)
+          expect(st.failed).toBe(0)
+          const persisted = yield* WorkflowPersistence.load(runID)
+          expect(persisted?.status).toBe("completed")
+          expect(persisted?.succeeded).toBe(1)
+          expect(persisted?.failed).toBe(0)
+          expect([...(yield* WorkflowPersistence.loadJournal(runID)).results.values()]).toEqual(["done"])
+        }
+        expect(yield* llm.calls).toBe(1)
 
         // Settle the relaunched fiber's terminal tail (bus.publish + inbox.send run
         // AFTER Deferred.succeed, so wait() returns before the fiber is fully done)

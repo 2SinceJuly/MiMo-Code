@@ -196,7 +196,9 @@ export const layer: Layer.Layer<
       const afterRev = input.afterRevision ?? (tq ? yield* tq.observeInput(lane, -1) : 0)
       const interrupted = yield* Deferred.make<void>()
       if (tq) {
-        yield* tq.observeInput(lane, afterRev).pipe(
+        yield* tq.observeInput(lane, afterRev, {
+          ignoreActorNotification: { sessionID: input.sessionID, actorID: input.actor_id },
+        }).pipe(
           Effect.flatMap(() => Deferred.succeed(interrupted, undefined)),
           Effect.forkScoped,
         )
