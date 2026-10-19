@@ -3452,6 +3452,15 @@ function Task(props: ToolProps<typeof ActorTool>) {
     return actors.find((a) => a.actor_id === actorId)
   })
 
+  // Send addresses a peer via to_actor_id — look that actor up only for its
+  // human description (`Sent message to — <desc>`), same shape as wait.
+  const sendTargetEntry = createMemo(() => {
+    const to = input().to_actor_id ?? (props.metadata.receiver_actor_id as string | undefined)
+    if (!to) return undefined
+    const actors = sync.data.actor[props.part.sessionID]
+    return actors?.find((a) => a.actor_id === to)
+  })
+
   const targetSession = createMemo(() => {
     return metaSessionId() ?? actorEntry()?.session_id
   })
@@ -3466,14 +3475,14 @@ function Task(props: ToolProps<typeof ActorTool>) {
 
   const resolvedDescription = createMemo(() => {
     if (input().description) return input().description
-    return actorEntry()?.description
+    return actorEntry()?.description ?? sendTargetEntry()?.description
   })
 
   const completeKey = createMemo(() =>
     actorToolCompleteKey({
       action: inputAction(),
       description: input().description,
-      actorDescription: actorEntry()?.description,
+      actorDescription: actorEntry()?.description ?? sendTargetEntry()?.description,
       toActorId: input().to_actor_id,
       actorId: input().actor_id,
       title: props.part.state.status === "running" || props.part.state.status === "completed" ? props.part.state.title : undefined,
@@ -3535,11 +3544,10 @@ function Task(props: ToolProps<typeof ActorTool>) {
           ? props.part.state.title
           : undefined,
       description: input().description,
-      actorDescription: actorEntry()?.description,
+      actorDescription: actorEntry()?.description ?? sendTargetEntry()?.description,
       subagentType: agent,
       toActorId: input().to_actor_id ?? (props.metadata.receiver_actor_id as string | undefined),
       actorId: input().actor_id ?? input().to_actor_id,
-      content: input().content,
     })
 
     if ((status === "cancelled" && action !== "cancel") || status === "stopped") {

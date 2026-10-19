@@ -17,7 +17,7 @@ export function isActorToolRunning(input: {
 export function actorToolPendingLabel(action?: string): string {
   switch (action) {
     case "send":
-      return "Sending..."
+      return "Sending message..."
     case "wait":
       return "Waiting..."
     case "status":
@@ -64,11 +64,6 @@ export function actorToolCompleteKey(input: {
   }
 }
 
-function clip(text: string, max: number) {
-  const flat = text.replace(/\s+/g, " ").trim()
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
-}
-
 /**
  * A finished actor call is not automatically a success. `send` can complete with
  * title "Send failed: receiver not found", wait/run land on
@@ -81,8 +76,8 @@ export function actorToolOutcomeFailed(input: { partStatus: string; title?: stri
   if (!title) return false
   // Success titles are explicit — never let a target name like "failed-agent"
   // flip a completed send into a failure.
-  if (/^Sent to\b/i.test(title)) return false
-  if (/^Send failed\b/i.test(title)) return true
+  if (/^Sent to\b/i.test(title) || /^Sent message to\b/i.test(title)) return false
+  if (/^Send failed\b/i.test(title) || /^Send message failed\b/i.test(title)) return true
   if (/^Actor \w+: unknown\b/i.test(title)) return true
   if (/^Actor (?:wait|run): (?:timeout|interrupted)\b/i.test(title)) return true
   // lastOutcome=/failed and any remaining explicit failure wording
@@ -92,6 +87,10 @@ export function actorToolOutcomeFailed(input: { partStatus: string; title?: stri
 /**
  * One-line body for the actor tool once it leaves the pending fallback.
  * Multi-line live-progress (toolcounts) is layered on by the TUI caller.
+ *
+ * Keep every action on the same `Label — actor desc` shape as wait:
+ * `Waiting for — …` / `Waited for — …` → send is
+ * `Sending message to — …` / `Sent message to — …`.
  */
 export function actorToolBody(input: {
   action?: string
@@ -103,34 +102,27 @@ export function actorToolBody(input: {
   agent?: string
   toActorId?: string
   actorId?: string
-  content?: string
 }): string {
   const desc = input.description ?? input.actorDescription
   const agent = input.subagentType ?? input.agent ?? "General"
   const failed = actorToolOutcomeFailed(input)
-  // Prefer the tool's own non-success title (specific reason) over a generic
-  // label — but not the spawn/run description title, which is just the task name.
-  if (failed && input.title && !/Task — /.test(input.title)) return input.title
+  const target = desc ?? input.toActorId ?? input.actorId ?? ""
+  const line = (label: string) => (target ? `${label} — ${target}` : label)
 
   if (input.action === "send") {
-    const to = input.toActorId ?? input.actorId ?? "peer"
-    const label = failed ? `Send failed — ${to}` : input.partStatus === "running" ? `Sending to ${to}` : `Sent to ${to}`
-    const preview = input.content ? clip(input.content, 60) : ""
-    return preview && !failed ? `${label} — ${preview}` : label
+    return line(failed ? "Send message failed" : input.partStatus === "running" ? "Sending message to" : "Sent message to")
   }
 
   if (input.action === "cancel") {
-    const label = failed ? "Cancel failed" : input.partStatus === "running" ? "Cancelling" : "Cancelled"
-    return desc ? `${label} — ${desc}` : `${label} — ${input.actorId ?? ""}`.trimEnd()
+    return line(failed ? "Cancel failed" : input.partStatus === "running" ? "Cancelling" : "Cancelled")
   }
 
   if (input.action === "wait") {
-    const label = failed ? "Wait failed" : input.partStatus === "completed" ? "Waited for" : "Waiting for"
-    return desc ? `${label} — ${desc}` : `${label} — ${input.actorId ?? ""}`.trimEnd()
+    return line(failed ? "Wait failed" : input.partStatus === "completed" ? "Waited for" : "Waiting for")
   }
 
   if (input.action === "status") {
-    return desc ? `Status — ${desc}` : `Status — ${input.actorId ?? ""}`.trimEnd()
+    return line("Status")
   }
 
   if (input.action === "models") {

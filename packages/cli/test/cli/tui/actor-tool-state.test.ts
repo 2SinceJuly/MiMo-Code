@@ -28,7 +28,7 @@ describe("actor tool running state", () => {
 
 describe("actor tool pending label", () => {
   test("does not call every action a delegation", () => {
-    expect(actorToolPendingLabel("send")).toBe("Sending...")
+    expect(actorToolPendingLabel("send")).toBe("Sending message...")
     expect(actorToolPendingLabel("wait")).toBe("Waiting...")
     expect(actorToolPendingLabel("status")).toBe("Checking status...")
     expect(actorToolPendingLabel("cancel")).toBe("Cancelling...")
@@ -67,35 +67,27 @@ describe("actor tool complete key", () => {
 })
 
 describe("actor tool body", () => {
-  test("send shows the receiver and a clipped content preview", () => {
-    expect(
-      actorToolBody({
-        action: "send",
-        partStatus: "completed",
-        toActorId: "general-2",
-        content: "Please re-review the footer fix.",
-      }),
-    ).toBe("Sent to general-2 — Please re-review the footer fix.")
+  test("send matches wait's Label — actor desc shape", () => {
+    // Desktop: "Send message to subtask" / "Sending message to subtask".
+    // TUI wait: `Waiting for — ${desc}` / `Waited for — ${desc}`.
     expect(
       actorToolBody({
         action: "send",
         partStatus: "running",
-        toActorId: "general-2",
+        actorDescription: "Review final unmount-only footer fix",
       }),
-    ).toBe("Sending to general-2")
-  })
-
-  test("send clips long content to one line", () => {
-    const body = actorToolBody({
-      action: "send",
-      partStatus: "completed",
-      toActorId: "general-2",
-      content: "x".repeat(120),
-    })
-    expect(body.startsWith("Sent to general-2 — ")).toBe(true)
-    expect(body.length).toBeLessThan("Sent to general-2 — ".length + 62)
-    expect(body.endsWith("…")).toBe(true)
-    expect(body.includes("\n")).toBe(false)
+    ).toBe("Sending message to — Review final unmount-only footer fix")
+    expect(
+      actorToolBody({
+        action: "send",
+        partStatus: "completed",
+        actorDescription: "Review final unmount-only footer fix",
+      }),
+    ).toBe("Sent message to — Review final unmount-only footer fix")
+    // No registry description yet — fall back to to_actor_id, still same shape.
+    expect(actorToolBody({ action: "send", partStatus: "completed", toActorId: "general-2" })).toBe(
+      "Sent message to — general-2",
+    )
   })
 
   test("wait/cancel/status fall back to actor id when no description exists", () => {
@@ -126,10 +118,11 @@ describe("actor tool body", () => {
 
   test("does not claim success when the tool failed", () => {
     // Regression from review: send can finish with a completed tool state and
-    // title "Send failed: …" — past-tense "Sent to" must not cover that.
+    // title "Send failed: …" — past-tense "Sent message to" must not cover that.
     expect(actorToolOutcomeFailed({ partStatus: "error" })).toBe(true)
     expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Send failed: receiver not found" })).toBe(true)
     expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent to general-2" })).toBe(false)
+    expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent message to general-2" })).toBe(false)
     // Target name must not flip a successful send into a failure.
     expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent to failed-agent" })).toBe(false)
     expect(actorToolOutcomeFailed({ partStatus: "running" })).toBe(false)
@@ -138,19 +131,17 @@ describe("actor tool body", () => {
       actorToolBody({
         action: "send",
         partStatus: "completed",
-        toActorId: "general-2",
+        actorDescription: "Review fix",
         title: "Send failed: receiver not found",
-        content: "please review",
       }),
-    ).toBe("Send failed: receiver not found")
+    ).toBe("Send message failed — Review fix")
     expect(
       actorToolBody({
         action: "send",
         partStatus: "error",
         toActorId: "general-2",
-        content: "please review",
       }),
-    ).toBe("Send failed — general-2")
+    ).toBe("Send message failed — general-2")
     expect(actorToolBody({ action: "wait", partStatus: "error", description: "Review fix" })).toBe(
       "Wait failed — Review fix",
     )
@@ -177,14 +168,25 @@ describe("actor tool body", () => {
       expect(actorToolOutcomeFailed({ partStatus: "completed", title })).toBe(false)
     }
 
+    // Same `Label — desc` shape as wait — not the raw tool title.
     expect(
-      actorToolBody({ action: "wait", partStatus: "completed", actorId: "explore-1", title: "Actor wait: timeout" }),
-    ).toBe("Actor wait: timeout")
+      actorToolBody({
+        action: "wait",
+        partStatus: "completed",
+        actorDescription: "Review fix",
+        title: "Actor wait: timeout",
+      }),
+    ).toBe("Wait failed — Review fix")
     expect(
-      actorToolBody({ action: "cancel", partStatus: "completed", actorId: "explore-1", title: "Actor cancel: unknown" }),
-    ).toBe("Actor cancel: unknown")
-    expect(actorToolBody({ action: "wait", partStatus: "completed", description: "Review fix", title: "Actor wait: idle" })).toBe(
-      "Waited for — Review fix",
-    )
+      actorToolBody({
+        action: "cancel",
+        partStatus: "completed",
+        actorId: "explore-1",
+        title: "Actor cancel: unknown",
+      }),
+    ).toBe("Cancel failed — explore-1")
+    expect(
+      actorToolBody({ action: "wait", partStatus: "completed", description: "Review fix", title: "Actor wait: idle" }),
+    ).toBe("Waited for — Review fix")
   })
 })
