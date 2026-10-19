@@ -584,6 +584,7 @@ export const layer: Layer.Layer<
             model: original.model,
             format: original.format,
             tools: original.tools,
+            task_id: original.task_id,
             system: promptConfig.system,
             systemMode: promptConfig.systemMode,
             harness: promptConfig.harness,
@@ -627,6 +628,7 @@ export const layer: Layer.Layer<
               time: { created: Date.now() },
               agent: userMessage.agent,
               model: userMessage.model,
+              task_id: userMessage.task_id,
             })
             const text =
               (input.overflow

@@ -24,6 +24,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionPrompt } from "../../src/session/prompt"
+import { defaultLayer as CronBridgeDefaultLayer } from "../../src/session/cron-bridge"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { SessionStatus } from "../../src/session/status"
@@ -166,6 +167,7 @@ function makeLayer() {
   const proc = SessionProcessor.layer.pipe(Layer.provide(summary), Layer.provideMerge(deps))
   const prune = SessionPrune.layer.pipe(Layer.provide(checkpoint), Layer.provideMerge(deps))
   const prompt = SessionPrompt.layer.pipe(
+    Layer.provide(CronBridgeDefaultLayer),
     Layer.provide(Goal.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(summary),
@@ -325,6 +327,8 @@ describe("WorkflowTool run", () => {
             title: "wf by name",
             permission: [{ permission: "*", pattern: "*", action: "allow" }],
           })
+          const prompt = yield* SessionPrompt.Service
+          yield* Effect.addFinalizer(() => prompt.cancel(parent.id).pipe(Effect.asVoid))
           yield* llm.text("done")
           const ctx = {
             sessionID: parent.id,
@@ -335,9 +339,7 @@ describe("WorkflowTool run", () => {
             metadata: () => Effect.void,
             ask: () => Effect.void,
           }
-          // async: true keeps the tool fire-and-forget — the test only needs to
-          // verify name resolution + start, not full deep-research execution
-          // (which would require mocking many LLM rounds).
+          // async 返回后 execution 仍属于此测试，必须在 fixture 关闭前终止。
           const res = yield* def.execute(
             { operation: "run", name: "deep-research", args: "Q?", async: true },
             ctx as any,

@@ -1,15 +1,27 @@
-import { test, type TestOptions } from "bun:test"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { afterEach, test, type TestOptions } from "bun:test"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import * as TestClock from "effect/testing/TestClock"
 import * as TestConsole from "effect/testing/TestConsole"
+import { Log } from "../../src/util"
 
 type Body<A, E, R> = Effect.Effect<A, E, R> | (() => Effect.Effect<A, E, R>)
 
 const body = <A, E, R>(value: Body<A, E, R>) => Effect.suspend(() => (typeof value === "function" ? value() : value))
+const running = new Map<Fiber.Fiber<unknown, unknown>, () => void>()
 
-const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) =>
-  Effect.gen(function* () {
+afterEach(async () => {
+  await Promise.all(
+    [...running].map(([fiber, cancel]) => {
+      cancel()
+      return Effect.runPromise(Fiber.interrupt(fiber))
+    }),
+  )
+  await Log.flush()
+})
+
+const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) => {
+  const fiber = Effect.gen(function* () {
     const exit = yield* body(value).pipe(Effect.scoped, Effect.provide(layer), Effect.exit)
     if (Exit.isFailure(exit)) {
       for (const err of Cause.prettyErrors(exit.cause)) {
@@ -17,7 +29,16 @@ const run = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer
       }
     }
     return yield* exit
-  }).pipe(Effect.runPromise)
+  }).pipe(Effect.ensuring(Effect.promise(() => Log.flush())), Effect.runFork)
+  fiber.addObserver(() => running.delete(fiber))
+  return new Promise<A>((resolve, reject) => {
+    const cancel = fiber.addObserver((exit) => {
+      if (Exit.isSuccess(exit)) resolve(exit.value)
+      else reject(Cause.squash(exit.cause))
+    })
+    if (!fiber.pollUnsafe()) running.set(fiber, cancel)
+  })
+}
 
 const make = <R, E>(testLayer: Layer.Layer<R, E>, liveLayer: Layer.Layer<R, E>) => {
   const effect = <A, E2>(name: string, value: Body<A, E2, R | Scope.Scope>, opts?: number | TestOptions) =>

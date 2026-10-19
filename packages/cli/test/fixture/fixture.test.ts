@@ -2,7 +2,9 @@ import { $ } from "bun"
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { tmpdir, cleanupTmpdir } from "./fixture"
+import { Deferred, Effect, Fiber } from "effect"
+import { Instance } from "../../src/project/instance"
+import { tmpdir, cleanupTmpdir, provideInstance } from "./fixture"
 
 describe("tmpdir", () => {
   test("disables fsmonitor for git fixtures", async () => {
@@ -44,6 +46,24 @@ describe("tmpdir", () => {
       .then(() => true)
       .catch(() => false)
     expect(exists).toBe(false)
+  })
+
+  test("interrupting an instance effect waits for its finalizers and releases admission", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const started = Effect.runSync(Deferred.make<void>())
+    let finalized = false
+    const fiber = Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sleep("20 millis").pipe(
+        Effect.andThen(Effect.sync(() => { finalized = true })),
+      ))
+      yield* Deferred.succeed(started, undefined)
+      yield* Effect.never
+    }).pipe(Effect.scoped, provideInstance(tmp.path), Effect.runFork)
+    await Effect.runPromise(Deferred.await(started))
+    await Effect.runPromise(Fiber.interrupt(fiber))
+    expect(finalized).toBe(true)
+    await Instance.disposeDirectory(tmp.path)
+    expect(Instance.refreshStatus(tmp.path).state).toBe("applied")
   })
 
   test("reports cleanup failures", async () => {
