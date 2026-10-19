@@ -130,6 +130,8 @@ describe("actor tool body", () => {
     expect(actorToolOutcomeFailed({ partStatus: "error" })).toBe(true)
     expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Send failed: receiver not found" })).toBe(true)
     expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent to general-2" })).toBe(false)
+    // Target name must not flip a successful send into a failure.
+    expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent to failed-agent" })).toBe(false)
     expect(actorToolOutcomeFailed({ partStatus: "running" })).toBe(false)
 
     expect(
@@ -154,6 +156,35 @@ describe("actor tool body", () => {
     )
     expect(actorToolBody({ action: "cancel", partStatus: "error", actorId: "explore-1" })).toBe(
       "Cancel failed — explore-1",
+    )
+  })
+
+  test("non-success wait/cancel terminals are not success past-tense", () => {
+    // Titles ActorTool.execute emits without the word "fail".
+    for (const title of [
+      "Actor wait: timeout",
+      "Actor wait: interrupted by user message",
+      "Actor wait: unknown",
+      "Actor run: timeout",
+      "Actor run: interrupted by user message",
+      "Actor status: unknown",
+      "Actor cancel: unknown",
+      "Actor wait: idle/failed",
+    ]) {
+      expect(actorToolOutcomeFailed({ partStatus: "completed", title })).toBe(true)
+    }
+    for (const title of ["Actor wait: idle", "Actor wait: idle/success", "Actor cancel: cancelled", "Actor cancel: idle"]) {
+      expect(actorToolOutcomeFailed({ partStatus: "completed", title })).toBe(false)
+    }
+
+    expect(
+      actorToolBody({ action: "wait", partStatus: "completed", actorId: "explore-1", title: "Actor wait: timeout" }),
+    ).toBe("Actor wait: timeout")
+    expect(
+      actorToolBody({ action: "cancel", partStatus: "completed", actorId: "explore-1", title: "Actor cancel: unknown" }),
+    ).toBe("Actor cancel: unknown")
+    expect(actorToolBody({ action: "wait", partStatus: "completed", description: "Review fix", title: "Actor wait: idle" })).toBe(
+      "Waited for — Review fix",
     )
   })
 })

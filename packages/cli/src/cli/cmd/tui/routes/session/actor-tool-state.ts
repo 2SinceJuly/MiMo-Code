@@ -71,12 +71,22 @@ function clip(text: string, max: number) {
 
 /**
  * A finished actor call is not automatically a success. `send` can complete with
- * title "Send failed: receiver not found", and any action can land on
- * `partStatus === "error"`. Past-tense success labels must not cover those.
+ * title "Send failed: receiver not found", wait/run land on
+ * "… timeout|interrupted|unknown", and any action can hit `partStatus ===
+ * "error"`. Past-tense success labels must not cover those.
  */
 export function actorToolOutcomeFailed(input: { partStatus: string; title?: string }): boolean {
   if (input.partStatus === "error") return true
-  return /\bfail(?:ed|ure)?\b/i.test(input.title ?? "")
+  const title = input.title ?? ""
+  if (!title) return false
+  // Success titles are explicit — never let a target name like "failed-agent"
+  // flip a completed send into a failure.
+  if (/^Sent to\b/i.test(title)) return false
+  if (/^Send failed\b/i.test(title)) return true
+  if (/^Actor \w+: unknown\b/i.test(title)) return true
+  if (/^Actor (?:wait|run): (?:timeout|interrupted)\b/i.test(title)) return true
+  // lastOutcome=/failed and any remaining explicit failure wording
+  return /(?:^|[:/\s])fail(?:ed|ure)?\b/i.test(title)
 }
 
 /**
@@ -98,9 +108,9 @@ export function actorToolBody(input: {
   const desc = input.description ?? input.actorDescription
   const agent = input.subagentType ?? input.agent ?? "General"
   const failed = actorToolOutcomeFailed(input)
-  // The tool's own failure title carries the specific reason (e.g. "Send
-  // failed: receiver not found") — prefer it over a generic label.
-  if (failed && input.title && /\bfail/i.test(input.title)) return input.title
+  // Prefer the tool's own non-success title (specific reason) over a generic
+  // label — but not the spawn/run description title, which is just the task name.
+  if (failed && input.title && !/Task — /.test(input.title)) return input.title
 
   if (input.action === "send") {
     const to = input.toActorId ?? input.actorId ?? "peer"
