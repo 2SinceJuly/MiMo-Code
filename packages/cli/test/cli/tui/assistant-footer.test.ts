@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { shouldShowAssistantFooter } from "../../../src/cli/cmd/tui/util/assistant-footer"
+import {
+  hasPriorFinalAssistant,
+  shouldShowAssistantFooter,
+} from "../../../src/cli/cmd/tui/util/assistant-footer"
 
 const base = {
   recovering: false,
@@ -8,6 +11,13 @@ const base = {
   isLast: true,
   hasPriorFinal: false,
 }
+
+const assistant = (input: {
+  id: string
+  parentID: string
+  finish?: string
+  error?: { name?: string }
+}) => ({ role: "assistant", ...input })
 
 describe("shouldShowAssistantFooter", () => {
   test("shows for a recovering row even when it is not last", () => {
@@ -40,5 +50,42 @@ describe("shouldShowAssistantFooter", () => {
 
   test("shows the last row for a non-tool-calls, non-final finish (length, cancelled, …)", () => {
     expect(shouldShowAssistantFooter({ ...base, finish: "length", isLast: true })).toBe(true)
+  })
+})
+
+describe("hasPriorFinalAssistant", () => {
+  test("ignores settled rows from earlier turns", () => {
+    // Turn 1 closed with stop. Turn 2 is mid-loop on tool-calls — that live last
+    // row must stay mounted or the footer hole reappears on turn 2+.
+    const messages = [
+      assistant({ id: "m1", parentID: "u1", finish: "stop" }),
+      assistant({ id: "m2", parentID: "u2", finish: "tool-calls" }),
+    ]
+    expect(hasPriorFinalAssistant(messages, { id: "m2", parentID: "u2" })).toBe(false)
+  })
+
+  test("sees a settled row inside the same turn", () => {
+    const messages = [
+      assistant({ id: "m1", parentID: "u1", finish: "stop" }),
+      assistant({ id: "m2", parentID: "u1", finish: "tool-calls" }),
+    ]
+    expect(hasPriorFinalAssistant(messages, { id: "m2", parentID: "u1" })).toBe(true)
+  })
+
+  test("treats a prior aborted row as owning the turn footer", () => {
+    const messages = [
+      assistant({ id: "m1", parentID: "u1", error: { name: "MessageAbortedError" } }),
+      assistant({ id: "m2", parentID: "u1", finish: "tool-calls" }),
+    ]
+    expect(hasPriorFinalAssistant(messages, { id: "m2", parentID: "u1" })).toBe(true)
+  })
+
+  test("ignores later and non-assistant rows", () => {
+    const messages = [
+      { role: "user", id: "m0", parentID: "u1" },
+      assistant({ id: "m3", parentID: "u1", finish: "stop" }),
+      assistant({ id: "m1", parentID: "u1", finish: "tool-calls" }),
+    ]
+    expect(hasPriorFinalAssistant(messages, { id: "m1", parentID: "u1" })).toBe(false)
   })
 })
