@@ -110,7 +110,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
 import { shouldHideTool } from "../../util/tool-visibility"
-import { shouldShowAssistantFooter } from "../../util/assistant-footer"
+import { isFinalAssistantFinish, shouldShowAssistantFooter } from "../../util/assistant-footer"
 import { planSwitchTarget } from "./plan-switch"
 
 addDefaultParsers(parsers.parsers)
@@ -1791,9 +1791,7 @@ function AssistantMessage(props: {
     Model.name(ctx.providers(), props.message.providerID, props.message.modelID),
   )
 
-  const final = createMemo(() => {
-    return props.message.finish && props.message.finish !== "tool-calls"
-  })
+  const final = createMemo(() => isFinalAssistantFinish(props.message.finish))
 
   // The completion footer (▣ Agent · model · duration) is the last row of the
   // scrollable transcript and must stay mounted — including when the last

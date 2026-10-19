@@ -8,6 +8,12 @@
  * at the process→complete transition. Orchestrator (the only reason that gate
  * existed) is gone, so a trailing tool-calls row no longer needs suppressing.
  */
+
+/** A settled turn step: finish is known and is not a mid-loop tool-calls hop. */
+export function isFinalAssistantFinish(finish: string | undefined): boolean {
+  return Boolean(finish) && finish !== "tool-calls"
+}
+
 export function shouldShowAssistantFooter(input: {
   recovering: boolean
   aborted: boolean
@@ -16,7 +22,6 @@ export function shouldShowAssistantFooter(input: {
 }): boolean {
   if (input.recovering) return true
   if (input.aborted) return true
-  const isFinal = Boolean(input.finish) && input.finish !== "tool-calls"
-  if (isFinal) return true
+  if (isFinalAssistantFinish(input.finish)) return true
   return input.isLast
 }

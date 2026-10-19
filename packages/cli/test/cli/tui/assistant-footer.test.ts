@@ -33,7 +33,7 @@ describe("shouldShowAssistantFooter", () => {
     expect(shouldShowAssistantFooter({ ...base, finish: "tool-calls", isLast: true })).toBe(true)
   })
 
-  test("shows the last row for a non-tool-calls, non-final finish (length, cancelled, …)", () => {
-    expect(shouldShowAssistantFooter({ ...base, finish: "length", isLast: true })).toBe(true)
+  test("shows for a settled non-tool-calls finish (length, cancelled, …) even when not last", () => {
+    expect(shouldShowAssistantFooter({ ...base, finish: "length", isLast: false })).toBe(true)
   })
 })
