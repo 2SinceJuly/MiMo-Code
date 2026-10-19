@@ -245,6 +245,7 @@ async function trust() {
         "XiaomiMiMo/MiMo-Code",
         "--env",
         "release",
+        "--allow-publish",
         "--yes",
       ],
       { stdio: ["inherit", "inherit", "inherit"] },
