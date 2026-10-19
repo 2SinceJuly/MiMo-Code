@@ -110,6 +110,8 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
 import { shouldHideTool } from "../../util/tool-visibility"
+import { shouldShowAssistantFooter } from "../../util/assistant-footer"
+import { scheduleFollowStickyBottom } from "../../util/sticky-follow"
 import { planSwitchTarget } from "./plan-switch"
 
 addDefaultParsers(parsers.parsers)
@@ -314,8 +316,16 @@ export function Session() {
   let lastSwitch: string | undefined = undefined
   event.on("message.part.updated", (evt) => {
     const part = evt.properties.part
-    if (part.type !== "tool") return
     if (part.sessionID !== route.sessionID) return
+
+    // Tool process→complete (and any part row) can grow the transcript after
+    // opentui has already snapped sticky bottom, clipping the footer for a
+    // frame. Re-snap after layout while the user is still following.
+    if (part.type === "tool") {
+      scheduleFollowStickyBottom(scroll as never, { setTimeout, clearTimeout })
+    }
+
+    if (part.type !== "tool") return
     if (part.id === lastSwitch) return
 
     const agent = planSwitchTarget(part)
@@ -1794,22 +1804,28 @@ function AssistantMessage(props: {
     return props.message.finish && props.message.finish !== "tool-calls"
   })
 
-  // The completion footer (▣ Agent · model · duration) must render exactly once
-  // per turn. A turn can produce several assistant messages: mid-loop ones finish
-  // with "tool-calls", the closing one finishes with "stop". In Orchestrator mode
-  // the turn characteristically ends on a "tool-calls" message (spawning
-  // subagents / handing off) that trails the final "stop" message — so `props.last`
-  // and `final()` land on two different messages and BOTH draw a footer (the stop
-  // one with a duration, the trailing tool-calls one without). Suppress the footer
-  // for a trailing message that already finished with "tool-calls"; still show it
-  // while a last message is streaming (finish undefined) or for the final/aborted
-  // message, which preserves non-orchestrator behavior.
-  const showFooter = createMemo(() => {
-    if (props.recovering) return true
-    if (props.message.error?.name === "MessageAbortedError") return true
-    if (final()) return true
-    return props.last && props.message.finish !== "tool-calls"
-  })
+  // The completion footer (▣ Agent · model · duration) is the last row of the
+  // scrollable transcript. Keep it mounted for the live last message — including
+  // mid-loop finish="tool-calls" steps — so sticky bottom never clips a hole
+  // where the row used to be. A trailing Orchestrator tool-calls message that
+  // follows an already-final turn stays suppressed so the stop message keeps
+  // the single duration footer.
+  const showFooter = createMemo(() =>
+    shouldShowAssistantFooter({
+      recovering: props.recovering,
+      aborted: props.message.error?.name === "MessageAbortedError",
+      finish: props.message.finish,
+      isLast: props.last,
+      hasPriorFinal: messages().some(
+        (m) =>
+          m.role === "assistant" &&
+          m.id < props.message.id &&
+          m.finish &&
+          m.finish !== "tool-calls" &&
+          m.error?.name !== "MessageAbortedError",
+      ),
+    }),
+  )
 
   const duration = createMemo(() => {
     if (!final()) return 0
