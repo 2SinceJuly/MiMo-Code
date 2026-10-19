@@ -110,6 +110,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
 import { shouldHideTool } from "../../util/tool-visibility"
+import { isFinalAssistantFinish, shouldShowAssistantFooter } from "../../util/assistant-footer"
 import { planSwitchTarget } from "./plan-switch"
 
 addDefaultParsers(parsers.parsers)
@@ -1790,26 +1791,21 @@ function AssistantMessage(props: {
     Model.name(ctx.providers(), props.message.providerID, props.message.modelID),
   )
 
-  const final = createMemo(() => {
-    return props.message.finish && props.message.finish !== "tool-calls"
-  })
+  const final = createMemo(() => isFinalAssistantFinish(props.message.finish))
 
-  // The completion footer (▣ Agent · model · duration) must render exactly once
-  // per turn. A turn can produce several assistant messages: mid-loop ones finish
-  // with "tool-calls", the closing one finishes with "stop". In Orchestrator mode
-  // the turn characteristically ends on a "tool-calls" message (spawning
-  // subagents / handing off) that trails the final "stop" message — so `props.last`
-  // and `final()` land on two different messages and BOTH draw a footer (the stop
-  // one with a duration, the trailing tool-calls one without). Suppress the footer
-  // for a trailing message that already finished with "tool-calls"; still show it
-  // while a last message is streaming (finish undefined) or for the final/aborted
-  // message, which preserves non-orchestrator behavior.
-  const showFooter = createMemo(() => {
-    if (props.recovering) return true
-    if (props.message.error?.name === "MessageAbortedError") return true
-    if (final()) return true
-    return props.last && props.message.finish !== "tool-calls"
-  })
+  // The completion footer (▣ Agent · model · duration) is the last row of the
+  // scrollable transcript and must stay mounted — including when the last
+  // message's finish is "tool-calls". The old gate unmounted that row on every
+  // mid-loop tool-calls step, so the last line vanished until the next assistant
+  // message appeared. Orchestrator (the only reason for that gate) is gone.
+  const showFooter = createMemo(() =>
+    shouldShowAssistantFooter({
+      recovering: props.recovering,
+      aborted: props.message.error?.name === "MessageAbortedError",
+      finish: props.message.finish,
+      isLast: props.last,
+    }),
+  )
 
   const duration = createMemo(() => {
     if (!final()) return 0
