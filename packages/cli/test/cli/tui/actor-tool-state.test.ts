@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { isActorToolRunning } from "@/cli/cmd/tui/routes/session/actor-tool-state"
+import {
+  actorToolBody,
+  actorToolCompleteKey,
+  actorToolPendingLabel,
+  isActorToolRunning,
+} from "@/cli/cmd/tui/routes/session/actor-tool-state"
 
 describe("actor tool running state", () => {
   test("keeps a completed spawn active while its background actor runs", () => {
@@ -17,5 +22,104 @@ describe("actor tool running state", () => {
     expect(isActorToolRunning({ partStatus: "running", action: "wait", actorStatus: "idle" })).toBe(true)
     expect(isActorToolRunning({ partStatus: "running", action: "status" })).toBe(true)
     expect(isActorToolRunning({ partStatus: "completed", action: "spawn", actorStatus: "idle" })).toBe(false)
+  })
+})
+
+describe("actor tool pending label", () => {
+  test("does not call every action a delegation", () => {
+    expect(actorToolPendingLabel("send")).toBe("Sending...")
+    expect(actorToolPendingLabel("wait")).toBe("Waiting...")
+    expect(actorToolPendingLabel("status")).toBe("Checking status...")
+    expect(actorToolPendingLabel("cancel")).toBe("Cancelling...")
+    expect(actorToolPendingLabel("models")).toBe("Listing models...")
+    expect(actorToolPendingLabel("spawn")).toBe("Delegating...")
+    expect(actorToolPendingLabel("run")).toBe("Delegating...")
+    expect(actorToolPendingLabel(undefined)).toBe("Delegating...")
+  })
+})
+
+describe("actor tool complete key", () => {
+  test("send leaves the pending fallback via to_actor_id, not description", () => {
+    // Regression: actor send has no description field. Falling back to
+    // description alone left InlineTool on "~ Delegating..." forever.
+    expect(actorToolCompleteKey({ action: "send", toActorId: "general-2" })).toBe("general-2")
+    expect(actorToolCompleteKey({ action: "send", toActorId: "general-2" })).toBeTruthy()
+    expect(actorToolCompleteKey({ action: "send", title: "Sent to general-2" })).toBe("Sent to general-2")
+    expect(actorToolCompleteKey({ action: "send", toActorId: "general-2", description: "ignored" })).toBe("ignored")
+  })
+
+  test("snapshot actions key off actor_id when no description is present", () => {
+    for (const action of ["wait", "status", "cancel"]) {
+      expect(actorToolCompleteKey({ action, actorId: "explore-1" })).toBe("explore-1")
+      expect(actorToolCompleteKey({ action, title: "Actor wait: completed" })).toBe("Actor wait: completed")
+    }
+    expect(actorToolCompleteKey({ action: "models", title: "Available models" })).toBe("Available models")
+    expect(actorToolCompleteKey({ action: "models" })).toBe(true)
+  })
+
+  test("spawn/run still prefer description and stay pending without one", () => {
+    expect(actorToolCompleteKey({ action: "spawn", description: "Review fix" })).toBe("Review fix")
+    expect(actorToolCompleteKey({ action: "run", description: "Tiny lookup" })).toBe("Tiny lookup")
+    expect(actorToolCompleteKey({ action: "spawn" })).toBeUndefined()
+    expect(actorToolCompleteKey({ action: "run" })).toBeUndefined()
+  })
+})
+
+describe("actor tool body", () => {
+  test("send shows the receiver and a clipped content preview", () => {
+    expect(
+      actorToolBody({
+        action: "send",
+        partStatus: "completed",
+        toActorId: "general-2",
+        content: "Please re-review the footer fix.",
+      }),
+    ).toBe("Sent to general-2 — Please re-review the footer fix.")
+    expect(
+      actorToolBody({
+        action: "send",
+        partStatus: "running",
+        toActorId: "general-2",
+      }),
+    ).toBe("Sending to general-2")
+  })
+
+  test("send clips long content to one line", () => {
+    const body = actorToolBody({
+      action: "send",
+      partStatus: "completed",
+      toActorId: "general-2",
+      content: "x".repeat(120),
+    })
+    expect(body.startsWith("Sent to general-2 — ")).toBe(true)
+    expect(body.length).toBeLessThan("Sent to general-2 — ".length + 62)
+    expect(body.endsWith("…")).toBe(true)
+    expect(body.includes("\n")).toBe(false)
+  })
+
+  test("wait/cancel/status fall back to actor id when no description exists", () => {
+    expect(actorToolBody({ action: "wait", partStatus: "running", actorId: "explore-1" })).toBe(
+      "Waiting for — explore-1",
+    )
+    expect(actorToolBody({ action: "wait", partStatus: "completed", description: "Review fix" })).toBe(
+      "Waited for — Review fix",
+    )
+    expect(actorToolBody({ action: "cancel", partStatus: "running", description: "Review fix" })).toBe(
+      "Cancelling — Review fix",
+    )
+    expect(actorToolBody({ action: "status", partStatus: "completed", actorId: "explore-1" })).toBe(
+      "Status — explore-1",
+    )
+    expect(actorToolBody({ action: "models", partStatus: "completed" })).toBe("List models")
+  })
+
+  test("spawn/run keep the description header shape", () => {
+    // TUI callers pass Locale.titlecase(subagent_type) through as subagentType.
+    expect(
+      actorToolBody({ action: "spawn", partStatus: "completed", description: "Review fix", subagentType: "General" }),
+    ).toBe("Background General Task — Review fix")
+    expect(
+      actorToolBody({ action: "run", partStatus: "running", description: "Tiny lookup", subagentType: "Explore" }),
+    ).toBe("Explore Task — Tiny lookup")
   })
 })
