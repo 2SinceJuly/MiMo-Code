@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { buildTipKeys, pickDisplayKey, tipWeight } from "../../../../src/cli/cmd/tui/feature-plugins/home/tips-view"
+import {
+  buildTipKeys,
+  hasUsableCredentials,
+  pickDisplayKey,
+  tipWeight,
+} from "../../../../src/cli/cmd/tui/feature-plugins/home/tips-view"
 import { dict as en } from "../../../../src/cli/cmd/tui/i18n/en"
 import { dict as es } from "../../../../src/cli/cmd/tui/i18n/es"
 import { dict as fr } from "../../../../src/cli/cmd/tui/i18n/fr"
@@ -52,25 +57,33 @@ describe("buildTipKeys", () => {
   })
 })
 
-describe("pickDisplayKey", () => {
-  test("forces the login tip when no provider is authenticated", () => {
-    expect(
-      pickDisplayKey({ authenticatedCount: 0, rotationKey: "tui.tips.theme" }),
-    ).toBe("tui.tips.login")
+describe("hasUsableCredentials", () => {
+  test("is false when no computed provider carries credentials", () => {
+    // mimo is always in the computed list — presence alone must not count.
+    expect(hasUsableCredentials([])).toBe(false)
+    expect(hasUsableCredentials([{ source: "custom", options: {} }])).toBe(false)
+    expect(hasUsableCredentials([{ source: "config", options: { apiKey: "" } }])).toBe(false)
   })
 
-  test("keeps the rotation tip once any provider is authenticated", () => {
-    expect(
-      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.theme" }),
-    ).toBe("tui.tips.theme")
+  test("is true when any computed provider carries known credentials", () => {
+    expect(hasUsableCredentials([{ source: "env", key: "sk-env" }])).toBe(true)
+    expect(hasUsableCredentials([{ source: "env", options: {} }])).toBe(true)
+    expect(hasUsableCredentials([{ source: "config", options: { apiKey: "sk-config" } }])).toBe(true)
+    expect(hasUsableCredentials([{ source: "custom", options: {} }, { source: "api", key: "sk-api" }])).toBe(true)
+  })
+})
+
+describe("pickDisplayKey", () => {
+  test("forces the login tip when the install has no credentials", () => {
+    expect(pickDisplayKey({ hasCredentials: false, rotationKey: "tui.tips.theme" })).toBe("tui.tips.login")
+  })
+
+  test("keeps the rotation tip once credentials exist", () => {
+    expect(pickDisplayKey({ hasCredentials: true, rotationKey: "tui.tips.theme" })).toBe("tui.tips.theme")
   })
 
   test("does not lock compose-next over the rotation", () => {
-    expect(
-      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.compose_next" }),
-    ).toBe("tui.tips.compose_next")
-    expect(
-      pickDisplayKey({ authenticatedCount: 1, rotationKey: "tui.tips.theme" }),
-    ).toBe("tui.tips.theme")
+    expect(pickDisplayKey({ hasCredentials: true, rotationKey: "tui.tips.compose_next" })).toBe("tui.tips.compose_next")
+    expect(pickDisplayKey({ hasCredentials: true, rotationKey: "tui.tips.theme" })).toBe("tui.tips.theme")
   })
 })
