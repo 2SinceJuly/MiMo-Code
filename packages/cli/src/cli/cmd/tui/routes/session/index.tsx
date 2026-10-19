@@ -110,8 +110,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
 import { shouldHideTool } from "../../util/tool-visibility"
-import { shouldShowAssistantFooter, hasPriorFinalAssistant } from "../../util/assistant-footer"
-import { scheduleFollowStickyBottom } from "../../util/sticky-follow"
+import { shouldShowAssistantFooter } from "../../util/assistant-footer"
 import { planSwitchTarget } from "./plan-switch"
 
 addDefaultParsers(parsers.parsers)
@@ -316,16 +315,8 @@ export function Session() {
   let lastSwitch: string | undefined = undefined
   event.on("message.part.updated", (evt) => {
     const part = evt.properties.part
-    if (part.sessionID !== route.sessionID) return
-
-    // Tool process→complete can grow the transcript after opentui has already
-    // snapped sticky bottom, clipping the footer for a frame. Re-snap after
-    // layout while the user is still following.
-    if (part.type === "tool") {
-      scheduleFollowStickyBottom(scroll as never, { setTimeout, clearTimeout })
-    }
-
     if (part.type !== "tool") return
+    if (part.sessionID !== route.sessionID) return
     if (part.id === lastSwitch) return
 
     const agent = planSwitchTarget(part)
@@ -1805,18 +1796,16 @@ function AssistantMessage(props: {
   })
 
   // The completion footer (▣ Agent · model · duration) is the last row of the
-  // scrollable transcript. Keep it mounted for the live last message — including
-  // mid-loop finish="tool-calls" steps — so sticky bottom never clips a hole
-  // where the row used to be. A trailing Orchestrator tool-calls message that
-  // follows an already-settled turn stays suppressed so the stop/aborted message
-  // keeps the single duration footer. Prior-turn rows are ignored (parentID).
+  // scrollable transcript and must stay mounted — including when the last
+  // message's finish is "tool-calls". The old gate unmounted that row on every
+  // mid-loop tool-calls step, so the last line vanished until the next assistant
+  // message appeared. Orchestrator (the only reason for that gate) is gone.
   const showFooter = createMemo(() =>
     shouldShowAssistantFooter({
       recovering: props.recovering,
       aborted: props.message.error?.name === "MessageAbortedError",
       finish: props.message.finish,
       isLast: props.last,
-      hasPriorFinal: hasPriorFinalAssistant(messages(), props.message),
     }),
   )
 
