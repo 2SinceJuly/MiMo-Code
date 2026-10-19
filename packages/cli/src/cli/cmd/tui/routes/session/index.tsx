@@ -3530,6 +3530,10 @@ function Task(props: ToolProps<typeof ActorTool>) {
     let header = actorToolBody({
       action,
       partStatus: props.part.state.status,
+      title:
+        props.part.state.status === "running" || props.part.state.status === "completed"
+          ? props.part.state.title
+          : undefined,
       description: input().description,
       actorDescription: actorEntry()?.description,
       subagentType: agent,

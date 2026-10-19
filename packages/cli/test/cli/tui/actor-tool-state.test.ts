@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   actorToolBody,
   actorToolCompleteKey,
+  actorToolOutcomeFailed,
   actorToolPendingLabel,
   isActorToolRunning,
 } from "@/cli/cmd/tui/routes/session/actor-tool-state"
@@ -121,5 +122,38 @@ describe("actor tool body", () => {
     expect(
       actorToolBody({ action: "run", partStatus: "running", description: "Tiny lookup", subagentType: "Explore" }),
     ).toBe("Explore Task — Tiny lookup")
+  })
+
+  test("does not claim success when the tool failed", () => {
+    // Regression from review: send can finish with a completed tool state and
+    // title "Send failed: …" — past-tense "Sent to" must not cover that.
+    expect(actorToolOutcomeFailed({ partStatus: "error" })).toBe(true)
+    expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Send failed: receiver not found" })).toBe(true)
+    expect(actorToolOutcomeFailed({ partStatus: "completed", title: "Sent to general-2" })).toBe(false)
+    expect(actorToolOutcomeFailed({ partStatus: "running" })).toBe(false)
+
+    expect(
+      actorToolBody({
+        action: "send",
+        partStatus: "completed",
+        toActorId: "general-2",
+        title: "Send failed: receiver not found",
+        content: "please review",
+      }),
+    ).toBe("Send failed: receiver not found")
+    expect(
+      actorToolBody({
+        action: "send",
+        partStatus: "error",
+        toActorId: "general-2",
+        content: "please review",
+      }),
+    ).toBe("Send failed — general-2")
+    expect(actorToolBody({ action: "wait", partStatus: "error", description: "Review fix" })).toBe(
+      "Wait failed — Review fix",
+    )
+    expect(actorToolBody({ action: "cancel", partStatus: "error", actorId: "explore-1" })).toBe(
+      "Cancel failed — explore-1",
+    )
   })
 })
