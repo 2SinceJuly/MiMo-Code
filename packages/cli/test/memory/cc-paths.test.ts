@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import path from "node:path"
 import { parseCcPath } from "../../src/memory/paths"
 
 // Synthetic absolute paths that satisfy parseCcPath's `.claude/projects`
@@ -56,5 +57,27 @@ describe("parseCcPath", () => {
 
   test("non-md file returns null", () => {
     expect(parseCcPath("/home/u/.claude/projects/-foo/memory/x.txt")).toBeNull()
+  })
+
+  // Desktop engine-runtime [TP-R6-06]: CC uses the same native separator boundary.
+  test("Windows drive, UNC and mixed separators preserve CC slug and nested key", () => {
+    for (const input of [
+      path.win32.join("C:/example/.claude/projects/-example/memory", "sub/file.md"),
+      String.raw`\\server\share\.claude\projects\-example\memory\sub\file.md`,
+      String.raw`C:\example/.claude\projects/-example\memory/sub\file.md`,
+    ]) {
+      expect(parseCcPath(input)).toEqual({ scope: "cc", scope_id: "-example", key: "sub/file", type: "free" })
+    }
+  })
+
+  test("Windows non-CC layouts and non-markdown files stay excluded", () => {
+    expect(parseCcPath(String.raw`C:\example\projects\-example\memory\file.md`)).toBeNull()
+    expect(parseCcPath(String.raw`C:\example\.claude\projects\-example\memory\file.txt`)).toBeNull()
+  })
+
+  test.skipIf(process.platform === "win32")("POSIX CC backslash remains in the key", () => {
+    expect(parseCcPath(String.raw`/example/.claude/projects/-example/memory/sub\file.md`)).toEqual({
+      scope: "cc", scope_id: "-example", key: String.raw`sub\file`, type: "free",
+    })
   })
 })

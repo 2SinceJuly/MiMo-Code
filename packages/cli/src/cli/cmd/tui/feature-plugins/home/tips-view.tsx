@@ -135,15 +135,39 @@ export function tipWeight(key: string) {
   return PRIORITY_WEIGHTS[key] ?? 1
 }
 
+/** Credential fields already resolved onto a computed provider. */
+export type CredentialProvider = {
+  key?: string | undefined
+  source: string
+  options?: Record<string, unknown> | undefined
+}
+
+/**
+ * Show `/login` only when no computed provider carries credentials.
+ *
+ * One rule, any source: env keys land as `key` / `source === "env"`, config and
+ * auth-store API keys as `options.apiKey` / `key`. Bare list membership does
+ * not count — mimo is always listed. Keyless local-only config is the accepted
+ * gap (still recommends `/login`).
+ */
+export function hasUsableCredentials(providers: readonly CredentialProvider[]): boolean {
+  return providers.some((provider) => {
+    if (provider.key) return true
+    if (provider.source === "env") return true
+    const apiKey = provider.options?.apiKey
+    return typeof apiKey === "string" && apiKey.length > 0
+  })
+}
+
 /**
  * Display override for the rotating tip. A credential-less install shows
  * /login (default model needs auth); otherwise the weighted rotation wins.
  */
 export function pickDisplayKey(input: {
-  authenticatedCount: number
+  hasCredentials: boolean
   rotationKey: string
 }): string {
-  if (!input.authenticatedCount) return LOGIN_TIP
+  if (!input.hasCredentials) return LOGIN_TIP
   return input.rotationKey
 }
 
@@ -203,12 +227,11 @@ export function Tips() {
   })
   const interval = setInterval(() => setKey(pickWeighted(allKeys())), TIP_ROTATION_MS)
   onCleanup(() => clearInterval(interval))
-  // With no authenticated provider, surface the /login tip instead so a
-  // credential-less install knows how to proceed (the default model requires
-  // login). Otherwise the weighted rotation is shown as-is.
+  // Only known credentials on computed providers suppress /login. mimo's mere
+  // presence in that list is not a credential.
   const displayKey = createMemo(() =>
     pickDisplayKey({
-      authenticatedCount: sync.data.provider_next.authenticated.length,
+      hasCredentials: hasUsableCredentials(sync.data.provider),
       rotationKey: key(),
     }),
   )

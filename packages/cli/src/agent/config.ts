@@ -21,26 +21,6 @@ export function hasActorTool(agent: Pick<Info, "name" | "mode" | "toolAllowlist"
   return agent.mode !== "subagent" || SYSTEM_SPAWNED_AGENT_TYPES.has(agent.name)
 }
 
-export type InvalidOutputPolicy = "primary" | "actor" | "checkpoint"
-
-/** System agents must opt into an invalid-output contract instead of inheriting
- * the user-facing primary retry when they run with agentID "main". */
-export const SYSTEM_INVALID_OUTPUT_POLICIES: Readonly<Record<string, InvalidOutputPolicy>> = {
-  "checkpoint-writer": "checkpoint",
-  dream: "actor",
-  distill: "actor",
-}
-
-export function resolveInvalidOutputPolicy(input: {
-  agentName: string
-  agentID?: string
-}): InvalidOutputPolicy {
-  const system = SYSTEM_INVALID_OUTPUT_POLICIES[input.agentName]
-  if (system) return system
-  if (!input.agentID || input.agentID === "main") return "primary"
-  return "actor"
-}
-
 /** Background actor subagents still have an attached client to answer asks.
  * Other background actors can only reuse existing parent grants; system agents
  * remain non-interactive even when a parent grant is available.

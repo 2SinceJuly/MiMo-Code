@@ -93,6 +93,19 @@ still receive no memory block.
 - Desktop prompt assets (`desktop-base`) — engine supplies the block after pin
   bump; desktop should not duplicate it.
 
+## Native memory paths
+
+Memory reads and FTS reconciliation support Windows drive, UNC and mixed-separator
+paths as well as POSIX paths. `memory/paths.ts` normalizes separators only in the
+layout-matching representation shared by `parsePath` and `parseCcPath`; native
+filesystem paths remain the FTS identity and search result path. Nested keys use
+`/` for type detection. POSIX filenames containing backslashes keep their literal
+characters. This leaves checkpoint gating and memory write permissions unchanged.
+
+Desktop regression coverage is tracked by engine-runtime `TP-R6-06`: path parsing,
+native `buildPath` round-trips, filesystem reconciliation/search, fingerprint hits,
+updates/deletes, and the embedded Node memory tool.
+
 ## Tasks
 
 - [x] T1: `llm.ts` always inject `# Memory system` when `servesCheckpoint`; flag only filters ckpt extras — acceptance: with `MIMOCODE_DISABLE_CHECKPOINT=true`, main-agent system contains `# Memory system` + project MEMORY.md + notes.md and omits checkpoint-writer ownership / Active recall (covers: S2)

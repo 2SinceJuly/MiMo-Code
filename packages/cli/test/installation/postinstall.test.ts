@@ -114,7 +114,7 @@ describe("postinstall", () => {
       expect(fs.existsSync(dest)).toBe(true)
       expect(fs.readFileSync(dest, "utf8")).toBe("FAKE_BINARY")
     } finally {
-      server.stop()
+      await server.stop(true)
     }
   })
 

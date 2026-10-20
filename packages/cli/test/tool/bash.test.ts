@@ -250,14 +250,11 @@ describe("tool.bash git identity floor", () => {
       GIT_COMMITTER_EMAIL: undefined,
     })
     try {
-      // A truly non-git project outside ANY git tree. `outsideGit` alone is not
-      // enough on machines where /tmp itself is a git repo (Instance.worktree
-      // then becomes that repo root, not "/"). HOME is isolated by test/preload
-      // and is not a git worktree.
-      const fs = await import("fs/promises")
-      const path = await import("path")
-      const os = await import("os")
-      const dir = await fs.mkdtemp(path.join(process.env.HOME || os.homedir(), "bash-nongit-"))
+      await using tmp = await tmpdir()
+      const dir = path.join(tmp.path, "project")
+      await fs.mkdir(dir)
+      const ceiling = process.env.GIT_CEILING_DIRECTORIES
+      process.env.GIT_CEILING_DIRECTORIES = tmp.path
       try {
         await Instance.provide({
           directory: dir,
@@ -277,7 +274,8 @@ describe("tool.bash git identity floor", () => {
           },
         })
       } finally {
-        await fs.rm(dir, { recursive: true, force: true })
+        if (ceiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES
+        else process.env.GIT_CEILING_DIRECTORIES = ceiling
       }
     } finally {
       restoreEnv(saved)
@@ -504,21 +502,28 @@ describe("tool.bash permissions", () => {
   // fail-closed ones: an exemption that mis-fires silently authorizes an
   // irreversible action, so every case it CANNOT prove must still ask.
   each("skips bash_delete for a delete confined to the OS temp dir", async () => {
-    await using tmp = await tmpdir()
+    await using tmp = await tmpdir({ git: true })
     const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-bash-tmpdel-"))
     await Bun.write(path.join(scratch, "scratch.txt"), "x")
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
+        expect(Instance.worktree).toBe(tmp.path)
+        expect(Instance.containsPath(scratch)).toBe(false)
         const bash = await initBash()
         const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
-        await Effect.runPromise(
+        const result = await Effect.runPromise(
           bash.execute(
-            { command: `rm ${path.join(scratch, "scratch.txt")}`, description: "Remove scratch file" },
+            { command: `rm ${quote(path.join(scratch, "scratch.txt"))}`, description: "Remove scratch file" },
             capture(requests),
           ),
         )
+        expect(result.metadata.exit).toBe(0)
+        expect(await Bun.file(path.join(scratch, "scratch.txt")).exists()).toBe(false)
         expect(requests.find((r) => r.permission === "bash_delete")).toBeUndefined()
+        expect(requests.find((r) => r.permission === "external_directory")?.patterns).toContain(
+          glob(path.join(scratch, "*")),
+        )
       },
     })
     await fs.rm(scratch, { recursive: true, force: true })
@@ -549,6 +554,7 @@ describe("tool.bash permissions", () => {
 
   each("still asks for bash_delete when one target of several is outside temp", async () => {
     await using tmp = await tmpdir({
+      git: true,
       init: async (dir) => {
         await Bun.write(path.join(dir, "victim.txt"), "x")
       },
@@ -1085,10 +1091,12 @@ describe("tool.bash permissions", () => {
   })
 
   each("asks for external_directory permission when workdir is outside project", async () => {
-    await using tmp = await tmpdir()
+    await using tmp = await tmpdir({ git: true })
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
+        expect(Instance.worktree).toBe(tmp.path)
+        expect(Instance.containsPath(os.tmpdir())).toBe(false)
         const bash = await initBash()
         const err = new Error("stop after permission")
         const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
@@ -1451,6 +1459,32 @@ describe("tool.bash abort", () => {
           ),
         )
         expect(result.metadata.exit).toBe(42)
+      },
+    })
+  })
+
+  test("drains stdout and stderr after exit while metadata delivery is pending", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await initBash()
+        const result = await Effect.runPromise(
+          bash.execute(
+            {
+              command: `echo first && sleep 0.05 && echo final_stdout && echo final_stderr >&2`,
+              description: "Capture output through process exit",
+            },
+            {
+              ...ctx,
+              metadata: (input) =>
+                (input.metadata as { output?: string })?.output ? Effect.sleep("200 millis") : Effect.void,
+            },
+          ),
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("first")
+        expect(result.output).toContain("final_stdout")
+        expect(result.output).toContain("final_stderr")
       },
     })
   })

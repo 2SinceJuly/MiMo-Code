@@ -1,9 +1,10 @@
 /**
  * Integration tests for T01: a `finish=stop` step with no usable output
  * (think-only = reasoning only, or empty = nothing at all) must not silently
- * break into an empty assistant. The loop nudges the model to produce a final
- * answer; once the shared continuation counter is exhausted it writes an
- * InvalidOutputError terminal instead of looping forever.
+ * break into an empty assistant. process() drops the empty turn and raises
+ * InvalidOutputError so SessionRetry.policy (decide → retryable unknown) owns
+ * the retry budget; on exhaustion the terminal InvalidOutputError is written.
+ * No reminder message is injected.
  *
  * Driven through a real Session.prompt(...) against the scripted HTTP LLM stub.
  */
@@ -15,6 +16,7 @@ import { SessionPrefixSnapshot } from "../../src/session/prefix-snapshot"
 import { Server } from "../../src/server/server"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
+import { MessageV2 } from "../../src/session/message-v2"
 import { SessionPrompt } from "../../src/session/prompt"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
@@ -27,6 +29,12 @@ import {
 } from "../lib/scripted-llm-server"
 
 void Log.init({ print: false })
+
+function assistantOnly(
+  msgs: MessageV2.WithParts[],
+): (MessageV2.WithParts & { info: MessageV2.Assistant })[] {
+  return msgs.filter((m): m is MessageV2.WithParts & { info: MessageV2.Assistant } => m.info.role === "assistant")
+}
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -50,6 +58,10 @@ function writeConfig(dir: string, origin: string) {
       agent: {
         build: { model: "alibaba/qwen-plus" },
         "checkpoint-writer": { model: "alibaba/qwen-plus" },
+      },
+      // Empty/think-only output is retried via SessionRetry.policy (unknown budget).
+      retry: {
+        unknown: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 2000 },
       },
     }),
   )
@@ -91,11 +103,13 @@ function writeGPTConfig(dir: string, origin: string) {
 
 describe("invalid-output continuation — integration", () => {
   // [TP-SR-R21-07]
-  test("cancel after empty stop persistence remains recoverable", async () => {
+  test("empty stop is dropped and retried inside process; cancel after settle is clean", async () => {
     await using tmp = await tmpdir({ git: true })
+    // First sample is empty (dropped + retried inside process via SessionRetry);
+    // second sample is the recovered answer. advance() hangs after the successful
+    // step completes so cancel runs against a durable finished turn.
     const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: textStopResponse("recovered answer") }])
     const entered = Promise.withResolvers<void>()
-    // Completion is durable here, but output validity has not been classified.
     const advance = spyOn(SessionPrefixSnapshot, "advance").mockImplementation(() =>
       Effect.sync(entered.resolve).pipe(Effect.andThen(Effect.never)),
     )
@@ -117,42 +131,19 @@ describe("invalid-output continuation — integration", () => {
           yield* Fiber.join(fiber)
           advance.mockRestore()
           const afterCancel = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
-          const query = `?directory=${encodeURIComponent(tmp.path)}`
-          const app = Server.Default().app
-          const listed = yield* Effect.promise(() => Promise.resolve(app.request(`/session/${session.id}/recovery${query}`)))
-          const candidates = yield* Effect.promise(() => listed.json())
-          const resumed = yield* Effect.promise(() => Promise.resolve(app.request(`/session/${session.id}/resume${query}`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-          })))
-          for (let attempt = 0; resumed.status === 202 && attempt < 100; attempt++) {
-            const messages = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
-            if (messages.some((message) => message.info.role === "assistant" && message.info.time.completed && !message.info.error && message.parts.some((part) => part.type === "text" && part.text === "recovered answer"))) break
-            yield* Effect.sleep("50 millis")
-          }
-          const afterResume = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
-          return { atBarrier, afterCancel, afterResume, recoveryStatus: listed.status, candidates, resumeStatus: resumed.status, providerCalls: stub.captures.length }
+          return { atBarrier, afterCancel, providerCalls: stub.captures.length }
         })),
       })
       expect(result.afterCancel).toEqual(result.atBarrier)
-      const assistant = result.afterCancel.find((message) => message.info.role === "assistant")
-      expect(assistant?.info.role).toBe("assistant")
-      if (assistant?.info.role === "assistant") {
-        expect(assistant.info.finish).toBe("stop")
-        expect(assistant.info.time.completed).toBeDefined()
-        expect(assistant.info.error).toBeUndefined()
-      }
-      expect(assistant?.parts.map((part) => part.type)).toEqual(["step-start", "step-finish"])
-      expect(result.recoveryStatus).toBe(200)
-      expect(result.candidates).toMatchObject([{ kind: "assistant", assistantMessageID: assistant?.info.id }])
-      expect(result.resumeStatus).toBe(202)
+      const assistants = assistantOnly(result.afterCancel)
+      expect(assistants.length).toBe(1)
+      const assistant = assistants[0]!
+      expect(assistant.info.finish).toBe("stop")
+      expect(assistant.info.time.completed).toBeDefined()
+      expect(assistant.info.error).toBeUndefined()
+      // Empty attempt was dropped inside process; only the recovered turn remains.
+      expect(assistant.parts.some((part) => part.type === "text" && part.text === "recovered answer")).toBe(true)
       expect(result.providerCalls).toBe(2)
-      // [TP-SR-R21-27] The original empty container stays outside the request, not deleted merely for being empty.
-      expect(result.afterResume.find((message) => message.info.id === assistant?.info.id)).toEqual(assistant)
-      const users = result.afterResume.filter((message) => message.info.role === "user")
-      expect(users.map((message) => message.info.id)).toEqual(result.atBarrier.filter((message) => message.info.role === "user").map((message) => message.info.id))
-      const recovered = result.afterResume.find((message) => message.info.role === "assistant" && message.info.id !== assistant?.info.id)
-      expect(recovered?.info).toMatchObject({ role: "assistant", parentID: users[0].info.id, finish: "stop", time: { completed: expect.any(Number) } })
-      expect(recovered?.parts.some((part) => part.type === "text" && part.text === "recovered answer")).toBe(true)
     } finally {
       advance.mockRestore()
       await Instance.disposeAll()
@@ -160,7 +151,7 @@ describe("invalid-output continuation — integration", () => {
     }
   }, 30_000)
 
-  test("empty stop step is nudged, second call produces a non-empty final assistant", async () => {
+  test("empty stop step is deleted and retried, second call produces a non-empty final assistant", async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: textStopResponse("final answer") }])
     try {
@@ -178,11 +169,20 @@ describe("invalid-output continuation — integration", () => {
                 agent: "build",
                 parts: [{ type: "text", text: "Answer my question." }],
               })
-              // First empty stop => nudge + continue; second call => final text.
+              // First empty stop => delete + retry; second call => final text.
               expect(stub.captures.length).toBe(2)
               expect(result.info.role).toBe("assistant")
               if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
               expect(result.parts.some((p) => p.type === "text" && p.text === "final answer")).toBe(true)
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const assistants = assistantOnly(msgs)
+              expect(assistants.length).toBe(1)
+              expect(assistants[0]?.info.id).toBe(result.info.id)
+              const retry = stub.captures[1].messages as { role: string; content: unknown }[]
+              const nonSystem = retry.filter((m) => m.role !== "system")
+              expect(nonSystem.length).toBe(1)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
             }),
           ),
       })
@@ -191,7 +191,7 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("think-only (reasoning only) stop step is nudged, second call produces a final assistant", async () => {
+  test("think-only (reasoning only) stop step is deleted and retried, second call produces a final assistant", async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([
       { lines: reasoningStopResponse("let me think about this...") },
@@ -216,6 +216,15 @@ describe("invalid-output continuation — integration", () => {
               expect(result.info.role).toBe("assistant")
               if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
               expect(result.parts.some((p) => p.type === "text" && p.text === "final answer")).toBe(true)
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const assistants = assistantOnly(msgs)
+              expect(assistants.length).toBe(1)
+              expect(assistants.some((m) => m.parts.some((p) => p.type === "reasoning"))).toBe(false)
+              const retry = stub.captures[1].messages as { role: string; content: unknown }[]
+              const nonSystem = retry.filter((m) => m.role !== "system")
+              expect(nonSystem.length).toBe(1)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
             }),
           ),
       })
@@ -224,7 +233,7 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("ordinary actor gets a parent-facing invalid-output reminder", async () => {
+  test("ordinary actor retry deletes the empty turn and injects no reminder", async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: textStopResponse("actor result") }])
     try {
@@ -243,9 +252,15 @@ describe("invalid-output continuation — integration", () => {
                 agentID: "general-1",
                 parts: [{ type: "text", text: "Do delegated work." }],
               })
-              const retry = JSON.stringify(stub.captures[1].messages)
-              expect(retry).toContain("parent agent")
-              expect(retry).not.toContain("final answer to the user")
+              const retry = stub.captures[1].messages as { role: string; content: unknown }[]
+              const nonSystem = retry.filter((m) => m.role !== "system")
+              expect(nonSystem.length).toBe(1)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "general-1" })
+              const assistants = assistantOnly(msgs)
+              expect(assistants.length).toBe(1)
+              expect(assistants.some((m) => m.info.error)).toBe(false)
             }),
           ),
       })
@@ -254,7 +269,7 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("checkpoint-writer gets a scoped retry and converges on CHECKPOINT_COMPLETE", async () => {
+  test("checkpoint-writer retry deletes the empty turn and converges on CHECKPOINT_COMPLETE", async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([
       { lines: emptyStopResponse() },
@@ -275,11 +290,49 @@ describe("invalid-output continuation — integration", () => {
                 agent: "checkpoint-writer",
                 parts: [{ type: "text", text: "Update the checkpoint." }],
               })
-              const retry = JSON.stringify(stub.captures[1].messages)
-              expect(retry).toContain("checkpoint writer")
-              expect(retry).toContain("CHECKPOINT_COMPLETE")
-              expect(retry).not.toContain("final answer to the user")
+              const retry = stub.captures[1].messages as { role: string; content: unknown }[]
+              const nonSystem = retry.filter((m) => m.role !== "system")
+              expect(nonSystem.length).toBe(1)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("checkpoint writer turn ended"))).toBe(false)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("CHECKPOINT_COMPLETE"))).toBe(false)
+              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
               expect(result.parts.some((part) => part.type === "text" && part.text === "CHECKPOINT_COMPLETE")).toBe(true)
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  })
+
+  test("retry exhaustion writes a terminal InvalidOutputError", async () => {
+    await using tmp = await tmpdir({ git: true })
+    // writeConfig sets retry.unknown.maxRetries=1: initial attempt + 1 retry,
+    // then the empty stop is terminal under SessionRetry.policy.
+    const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: emptyStopResponse() }])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-exhaust" })
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              })
+              expect(stub.captures.length).toBe(2)
+              expect(result.info.role).toBe("assistant")
+              if (result.info.role === "assistant") expect(result.info.error?.name).toBe("InvalidOutputError")
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const assistants = assistantOnly(msgs)
+              // Empty attempts were dropped; only the terminal assistant remains.
+              expect(assistants.length).toBe(1)
+              expect(assistants[0]?.info.error?.name).toBe("InvalidOutputError")
             }),
           ),
       })

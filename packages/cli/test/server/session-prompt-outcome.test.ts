@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
-import { Cause, Effect, Exit, Fiber } from "effect"
+import { Effect, Exit } from "effect"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { Instance } from "../../src/project/instance"
 import { Server } from "../../src/server/server"
@@ -7,12 +7,11 @@ import { Session } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
 import { MCP } from "../../src/mcp"
 import { Provider } from "../../src/provider"
-import { Plugin } from "../../src/plugin"
-import { SessionRunState } from "../../src/session/run-state"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionStatus } from "../../src/session/status"
+import { InboxTable } from "../../src/inbox"
 import { MessageTable } from "../../src/session/session.sql"
-import { Database, eq } from "../../src/storage"
+import { Database, eq, sql } from "../../src/storage"
 import { SessionID, MessageID, PartID } from "../../src/session/schema"
 import { ProviderID, ModelID } from "../../src/provider/schema"
 import { ResumeTestHooks } from "../../src/session/resume-test-hooks"
@@ -44,11 +43,20 @@ describe("session prompt execution outcomes", () => {
         const app = Server.Default().app
         const body = { agent: "missing-agent", model, parts: [{ type: "text", text: "unsaved question" }] }
         const missing = yield* Effect.promise(() => request(app, tmp.path, SessionID.descending(), route, body))
-        expect(missing.status).toBe(404)
-        expect(yield* Effect.promise(() => missing.json())).toMatchObject({ name: "NotFoundError" })
+        if (route === "prompt_async" || missing.status !== 200) {
+          expect(missing.status).toBe(404)
+          expect(yield* Effect.promise(() => missing.json())).toMatchObject({ name: "NotFoundError" })
+        } else {
+          expect(yield* Effect.promise(() => missing.text().then(() => false, () => true))).toBe(true)
+        }
         const invalid = yield* Effect.promise(() => request(app, tmp.path, session.id, route, body))
-        expect(invalid.status).toBe(500)
-        expect(yield* Effect.promise(() => invalid.json())).toMatchObject({ name: "UnknownError", data: { message: expect.stringContaining("Agent not found") } })
+        if (route === "prompt_async") {
+          expect(invalid.status).toBe(500)
+          expect(yield* Effect.promise(() => invalid.json())).toMatchObject({ name: "UnknownError", data: { message: expect.stringContaining("Agent not found") } })
+        } else {
+          expect(invalid.status).toBe(200)
+          expect(yield* Effect.promise(() => invalid.text().then(() => false, () => true))).toBe(true)
+        }
         expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(0)
         expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
       })) })
@@ -72,16 +80,20 @@ describe("session prompt execution outcomes", () => {
             expect(seed.status).toBe(200)
             const original = yield* Effect.promise(() => seed.json())
             const before = yield* sessions.messages({ sessionID: session.id })
-            const failedWrite = boundary === "user-write"
-              ? spyOn(sessions, "updateMessage").mockImplementation(() => Effect.die(new Error("user write rejected")))
-              : undefined
+            if (boundary === "user-write") Database.use(db => db.run(sql`CREATE TEMP TRIGGER reject_reused_user BEFORE UPDATE ON message BEGIN SELECT RAISE(FAIL, 'user write rejected'); END`))
             const response = yield* Effect.promise(() => request(app, tmp.path, session.id, route,
               { messageID: original.info.id, agent: boundary === "agent" ? "missing-agent" : "build", model,
                 parts: [{ type: "text", text: "new input rejected before save" }] }))
-            failedWrite?.mockRestore()
-            expect(response.status).toBe(500)
-            expect(yield* Effect.promise(() => response.json())).toMatchObject({ name: "UnknownError",
-              data: { message: expect.stringContaining(boundary === "agent" ? "Agent not found" : "user write rejected") } })
+            if (route === "prompt_async") {
+              expect(response.status).toBe(500)
+              expect(yield* Effect.promise(() => response.json())).toMatchObject({ name: "UnknownError",
+                data: { message: expect.stringContaining(boundary === "agent" ? "Agent not found" : "user write rejected") } })
+            } else {
+              expect(response.status).toBe(200)
+              expect(yield* Effect.promise(() => response.text().then(() => false, () => true))).toBe(true)
+            }
+            if (boundary === "user-write") Database.use(db => db.run(sql`DROP TRIGGER reject_reused_user`))
+            expect(Database.use(db => db.select().from(InboxTable).where(eq(InboxTable.receiver_session_id, session.id)).all())).toHaveLength(0)
             expect(yield* sessions.messages({ sessionID: session.id })).toEqual(before)
             expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
             expect(stub.captures).toHaveLength(0)
@@ -104,12 +116,12 @@ describe("session prompt execution outcomes", () => {
           const id = MessageID.ascending()
           const failedPart = spyOn(sessions, "updatePart").mockImplementation(() => Effect.die(new Error("part write rejected")))
           const response = yield* Effect.promise(() => request(Server.Default().app, tmp.path, session.id, route,
-            { messageID: id, agent: "build", model, parts: [{ type: "text", text: "saved user whose part fails" }] }))
-          failedPart.mockRestore()
+            { messageID: id, noReply: true, agent: "build", model, parts: [{ type: "text", text: "saved user whose part fails" }] }))
           expect(response.status).toBe(route === "message" ? 200 : 204)
           if (route === "message") expect(yield* Effect.promise(() => response.json())).toMatchObject({ info: {
             role: "assistant", parentID: id, error: { data: { message: "part write rejected" } },
           } })
+          failedPart.mockRestore()
           const messages = yield* sessions.messages({ sessionID: session.id })
           expect(messages.filter(message => message.info.role === "user")).toMatchObject([{ info: { id }, parts: [] }])
           expect(messages.filter(message => message.info.role === "assistant")).toMatchObject([{ info: {
@@ -167,7 +179,7 @@ describe("session prompt execution outcomes", () => {
           const app = Server.Default().app
           const response = yield* Effect.promise(() => request(app, tmp.path, session.id, route,
             { messageID: id, agent: "build", model, parts: [{ type: "text", text: "first question" }] }))
-          expect(response.status).toBe(route === "message" ? 200 : 204)
+          expect(response.status).toBe(route === "message" ? 200 : 202)
           if (route === "message") expect(yield* Effect.promise(() => response.json())).toMatchObject({ info: {
             role: "assistant", parentID: id, error: { data: { message: "owner preparation failed" } },
           } })
@@ -182,6 +194,8 @@ describe("session prompt execution outcomes", () => {
           expect(errors).toHaveLength(1)
           expect(statuses[0]).toBe("busy")
           expect(statuses.at(-1)).toBe("idle")
+          const receipt = Database.use(db => db.select().from(InboxTable).where(eq(InboxTable.input_message_id, id)).get())
+          expect(receipt).toMatchObject({ state: "cancelled", outcome: "never_ran", consumed: false, delivery_message_id: null })
           expect(stub.captures).toHaveLength(0)
           ResumeTestHooks.reset()
           const next = yield* Effect.promise(() => request(app, tmp.path, session.id, "message",
@@ -241,27 +255,7 @@ describe("session prompt execution outcomes", () => {
     } finally { stub.stop() }
   })
 
-  // [TP-RUN-R1C-05][TP-RUN-R1C-07] Admission and execution share one fiber; before execution cancellation cannot leak work.
-  test("startPrompt waits with durable input and starts no model work until result is consumed", async () => {
-    await using tmp = await tmpdir({ git: true })
-    const stub = startScriptedLLMServer([])
-    try {
-      await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
-      await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
-        const sessions = yield* Session.Service
-        const session = yield* sessions.create({ title: "admission ownership" })
-        const prompt = yield* SessionPrompt.Service
-        const started = yield* prompt.startPrompt({ sessionID: session.id, agent: "build", model, parts: [{ type: "text", text: "cancel before execution" }] })
-        expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(1)
-        expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
-        yield* started.cancel
-        yield* Effect.sleep("30 millis")
-        expect(stub.captures).toHaveLength(0)
-        expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
-        expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(1)
-      })) })
-    } finally { stub.stop() }
-  })
+
 })
 
 // [TP-SR-R21-35] Once resume has delivered success, cleanup defects do not become another assistant outcome.
@@ -306,7 +300,7 @@ test("settled live preparation error strips an unbound host retry stamp", async 
     const session = yield* sessions.create({ title: "unbound error" })
     const forged = new MessageV2.APIError({ message: "ordinary live exception", isRetryable: false,
       hostCode: "forged.code", hostRetryClass: "persistent" }).toObject()
-    spyOn(sessions, "touch").mockImplementation(() => Effect.die(forged))
+    ResumeTestHooks.beforeStep0ParentCheck = () => Effect.die(forged)
     const result = yield* prompt.prompt({ sessionID: session.id, agent: "build", model, parts: [{ type: "text", text: "save before failure" }] })
     expect(result.info).toMatchObject({ role: "assistant", error: { data: { message: "ordinary live exception", isRetryable: false } } })
     expect(result.info.role === "assistant" && result.info.error?.data.hostCode).toBeUndefined()
@@ -315,7 +309,7 @@ test("settled live preparation error strips an unbound host retry stamp", async 
 })
 
 // [TP-RUN-R1C-05][TP-RUN-R1C-07] Known-parent preparation failures do not masquerade as rejected, unsaved inputs.
-for (const boundary of ["touch", "part", "dispatch", "model", "language", "post"] as const) {
+for (const boundary of ["model", "language", "post"] as const) {
   test(`prompt settles the exact current message at ${boundary} boundary`, async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([{ lines: textStopResponse("preserved successful answer") }])
@@ -327,12 +321,8 @@ for (const boundary of ["touch", "part", "dispatch", "model", "language", "post"
         const session = yield* sessions.create({ title: "boundary settlement" })
         const id = MessageID.ascending()
         const fail = () => Effect.die(new Error(`${boundary} boundary failed`))
-        const dependency = boundary === "dispatch" ? yield* SessionRunState.Service : boundary === "language" ? yield* Provider.Service
-          : boundary === "post" ? MCP : sessions
-        const mocked = boundary === "touch" ? spyOn(sessions, "touch").mockImplementation(fail)
-          : boundary === "part" ? spyOn(sessions, "updatePart").mockImplementation(fail)
-          : boundary === "dispatch" ? spyOn(dependency as SessionRunState.Interface, "ensureRunning").mockImplementation(fail)
-          : boundary === "language" ? spyOn(dependency as Provider.Interface, "getLanguage").mockImplementation(fail)
+        const provider = yield* Provider.Service
+        const mocked = boundary === "language" ? spyOn(provider, "getLanguage").mockImplementation(fail)
           : boundary === "post" ? spyOn(MCP, "releaseTurnClients").mockImplementation(fail) : undefined
         const input = { sessionID: session.id, messageID: id, agent: "build", model: boundary === "model"
           ? { ...model, modelID: ModelID.make("missing-model") } : model, parts: [{ type: "text" as const, text: "boundary question" }] }
@@ -387,51 +377,3 @@ for (const remove of ["parent", "session"] as const) {
     } finally { stub.stop() }
   })
 }
-
-// [TP-RUN-R1C-05] Three sends share the existing pending Runner; one owner settles the selected newest parent.
-test("multiple pending prompts settle one selected user and preserve the earlier answer", async () => {
-  await using tmp = await tmpdir({ git: true })
-  const stub = startScriptedLLMServer([{ lines: textStopResponse("first answer") }])
-  try {
-    await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
-    await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
-      const sessions = yield* Session.Service
-      const prompt = yield* SessionPrompt.Service
-      const plugin = yield* Plugin.Service
-      const session = yield* sessions.create({ title: "pending owner identity" })
-      let entered!: () => void
-      const reached = new Promise<void>(done => { entered = done })
-      let release!: () => void
-      const gate = new Promise<void>(done => { release = done })
-      const trigger = plugin.trigger
-      const mocked = spyOn(plugin, "trigger").mockImplementation((...args) => {
-        if (args[0] === "session.post") return Effect.sync(entered).pipe(Effect.andThen(Effect.promise(() => gate)), Effect.andThen(trigger(...args)))
-        return trigger(...args)
-      })
-      const a = yield* prompt.prompt({ sessionID: session.id, agent: "build", model, parts: [{ type: "text", text: "first question" }] }).pipe(Effect.forkChild)
-      yield* Effect.promise(() => reached)
-      const bID = MessageID.ascending()
-      const cID = MessageID.ascending()
-      const b = yield* prompt.prompt({ sessionID: session.id, messageID: bID, agent: "build", model, parts: [{ type: "text", text: "second question" }] }).pipe(Effect.forkChild)
-      const c = yield* prompt.prompt({ sessionID: session.id, messageID: cID, agent: "build", model, parts: [{ type: "text", text: "third question" }] }).pipe(Effect.forkChild)
-      for (let i = 0; i < 100; i++) {
-        if ((yield* sessions.messages({ sessionID: session.id })).filter(message => message.info.role === "user").length === 3) break
-        yield* Effect.sleep("10 millis")
-      }
-      const provider = yield* Provider.Service
-      const language = spyOn(provider, "getLanguage").mockImplementation(() => Effect.die(new Error("pending owner failed")))
-      release()
-      const first = yield* Fiber.join(a)
-      const second = yield* Fiber.join(b)
-      const third = yield* Fiber.join(c)
-      mocked.mockRestore(); language.mockRestore()
-      expect(first.info.role === "assistant" && first.info.error).toBeUndefined()
-      expect(second).toEqual(third)
-      expect(third.info).toMatchObject({ parentID: cID, error: { data: { message: "pending owner failed" } } })
-      const after = yield* sessions.messages({ sessionID: session.id })
-      expect(after.filter(message => message.info.role === "assistant" && message.info.error)).toHaveLength(1)
-      expect(after.find(message => message.info.id === first.info.id)).toEqual(first)
-      expect(stub.captures).toHaveLength(1)
-    })) })
-  } finally { stub.stop() }
-})

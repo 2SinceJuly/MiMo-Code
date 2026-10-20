@@ -87,10 +87,12 @@ describe("sandbox non-deterministic mode", () => {
 
 const runtime = ManagedRuntime.make(Layer.mergeAll(Truncate.defaultLayer, Agent.defaultLayer))
 
-const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-test-toolscript-"))
+const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mimocode-test-toolscript-"))
+const tmp = path.join(tmpRoot, "project")
+await fs.mkdir(tmp)
 afterAll(async () => {
   await Instance.disposeAll()
-  await fs.rm(tmp, { recursive: true, force: true })
+  await fs.rm(tmpRoot, { recursive: true, force: true })
 })
 
 function fakeDef(id: string, execute: (args: any) => Promise<string>): Tool.Def {
@@ -119,11 +121,14 @@ async function runToolScript(
   },
 ) {
   const prev = toolScriptRegistry.current
+  const ceiling = process.env.GIT_CEILING_DIRECTORIES
   toolScriptRegistry.current = () => Effect.succeed(defs)
+  process.env.GIT_CEILING_DIRECTORIES = tmpRoot
   try {
     return await Instance.provide({
       directory: tmp,
       fn: async () => {
+        expect(Instance.worktree).toBe("/")
         const info = await runtime.runPromise(ToolScriptTool)
         const def = await Effect.runPromise(Tool.init(info))
         return runtime.runPromise(
@@ -154,6 +159,8 @@ async function runToolScript(
     })
   } finally {
     toolScriptRegistry.current = prev
+    if (ceiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES
+    else process.env.GIT_CEILING_DIRECTORIES = ceiling
   }
 }
 
@@ -790,12 +797,18 @@ return r.output;`,
   })
 
   test("files.readText rejects paths outside jail (catchable)", async () => {
-    const result = await runToolScript(
-      `try { await files.readText("/etc/passwd") } catch (e) { return e.message }`,
-      [],
-    )
-    expect(result.metadata.status).toBe("completed")
-    expect(result.output).toContain("outside allowed roots")
+    const outside = path.resolve(import.meta.dir, "../../package.json")
+    const link = path.join(tmp, "outside-link.json")
+    await fs.symlink(outside, link, "file")
+    for (const file of ["/etc/passwd", outside, link]) {
+      const result = await runToolScript(
+        `try { await files.readText(${JSON.stringify(file)}) } catch (e) { return e.message }`,
+        [],
+      )
+      expect(result.metadata.status).toBe("completed")
+      expect(result.output).toContain("outside allowed roots")
+    }
+    await fs.unlink(link)
   })
 
   test("files.writeText rejects paths outside the OS tmp dir (write is tmp-only)", async () => {
@@ -891,18 +904,21 @@ return r.output;`,
     expect(result.output).toContain("import/export are NOT supported")
   })
 
-  test("files: literal /tmp paths work (macOS symlink jail)", async () => {
-    const marker = path.join("/tmp", `ts-jail-${Date.now()}.json`)
+  test("files: symlinked tmp paths resolve within the canonical jail", async () => {
+    const link = path.join(tmpRoot, "temp-link")
+    await fs.symlink(await fs.realpath(os.tmpdir()), link, process.platform === "win32" ? "junction" : "dir")
+    const marker = path.join(link, `ts-jail-${Date.now()}.json`)
     const result = await runToolScript(
       `
-      await files.writeText("${marker}", "via-tmp")
-      return await files.readText("${marker}")
+      await files.writeText(${JSON.stringify(marker)}, "via-tmp")
+      return await files.readText(${JSON.stringify(marker)})
       `,
       [],
     )
     expect(result.metadata.status).toBe("completed")
     expect(result.output).toContain("via-tmp")
     await fs.rm(marker, { force: true })
+    await fs.unlink(link)
   })
 
   test("files.readText rejects binary (non-UTF-8) files instead of returning empty", async () => {

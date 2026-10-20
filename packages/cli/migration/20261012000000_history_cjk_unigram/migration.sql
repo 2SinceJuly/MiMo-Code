@@ -29,7 +29,7 @@ CREATE TRIGGER `history_fts_au` AFTER UPDATE ON `history_fts` BEGIN
 END;--> statement-breakpoint
 
 -- v8: background re-extract fills body_idx + kind (no sync rebuild).
-INSERT INTO history_index_migration
+INSERT OR IGNORE INTO history_index_migration
 SELECT 8, 'clean', 0,
   COALESCE((SELECT MAX(rowid) FROM history_fts), 0),
   COALESCE((SELECT MAX(rowid) FROM part), 0);

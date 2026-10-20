@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { createHash } from "crypto"
 import path from "path"
 import fs from "fs"
+import { Hono } from "hono"
+import { basicAuth } from "hono/basic-auth"
 import { tmpdir } from "../fixture/fixture"
 
 import {
@@ -145,10 +147,10 @@ describe("ensureBinary", () => {
         expect(again).toBe(binary)
         expect(calls).toBe(0)
       } finally {
-        counting.stop()
+        await counting.stop(true)
       }
     } finally {
-      server.stop()
+      await server.stop(true)
     }
   })
 
@@ -193,8 +195,53 @@ describe("ensureBinary", () => {
           expect(fs.existsSync(dest)).toBe(false)
         }
       } finally {
-        server.stop()
+        await server.stop(true)
       }
+    }
+  })
+
+  test("checks the archive after an authenticated server releases the same endpoint", async () => {
+    await using tmp = await tmpdir()
+    const target = "mimocode-linux-x64"
+    const work = path.join(tmp.path, "build")
+    fs.mkdirSync(work)
+    fs.writeFileSync(path.join(work, "mimo"), "binary-bytes")
+    const archivePath = path.join(tmp.path, "a.tar.gz")
+    expect(Bun.spawnSync(["tar", "-czf", archivePath, "-C", work, "mimo"]).exitCode).toBe(0)
+
+    const app = new Hono()
+    app.use("*", basicAuth({ username: "test", password: "test-password" }))
+    app.get("*", (c) => c.text("authenticated"))
+    const previous = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: app.fetch })
+    const port = previous.port
+    const url = `http://127.0.0.1:${port}/releases/v9.9.9/${target}.tar.gz`
+    try {
+      const response = await fetch(url)
+      expect(response.status).toBe(401)
+      expect(await response.text()).toBe("Unauthorized")
+    } finally {
+      await previous.stop(true)
+    }
+
+    const requests: string[] = []
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      fetch(req) {
+        const pathname = new URL(req.url).pathname
+        requests.push(pathname)
+        if (pathname.endsWith(".sha256")) return new Response("0".repeat(64))
+        return new Response(Bun.file(archivePath))
+      },
+    })
+    try {
+      const dest = vendorBinaryPath(tmp.path, target)
+      await expect(ensureBinary({ root: tmp.path, target, version: "9.9.9", url })).rejects.toThrow(/Checksum mismatch/)
+      expect(requests).toEqual([new URL(url).pathname, `${new URL(url).pathname}.sha256`])
+      expect(fs.existsSync(dest)).toBe(false)
+      expect(fs.readdirSync(tmp.path).sort()).toEqual(["a.tar.gz", "build"])
+    } finally {
+      await server.stop(true)
     }
   })
 
@@ -228,7 +275,7 @@ describe("ensureBinary", () => {
         })
         expect(fs.existsSync(dest)).toBe(true)
       } finally {
-        server.stop()
+        await server.stop(true)
       }
     }
   })

@@ -78,7 +78,7 @@ import { createPress } from "../../ui/press"
 import { WorkflowTree } from "@tui/component/workflow-tree"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { DialogSubagent } from "./dialog-subagent.tsx"
-import { isActorToolRunning } from "./actor-tool-state"
+import { actorToolBody, actorToolCompleteKey, actorToolPendingLabel, isActorToolRunning } from "./actor-tool-state"
 import { Flag } from "@/flag/flag"
 import { parseActorNotification, parseAgentInboxPart } from "@/inbox/render"
 import { ActorNotificationWarnings } from "./actor-notification-warnings"
@@ -110,6 +110,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import * as Collapse from "../../util/collapse"
 import { shouldHideTool } from "../../util/tool-visibility"
+import { isFinalAssistantFinish, shouldShowAssistantFooter } from "../../util/assistant-footer"
 import { planSwitchTarget } from "./plan-switch"
 
 addDefaultParsers(parsers.parsers)
@@ -1219,7 +1220,7 @@ export function Session() {
         }
         // Agent opened FROM a workflow page → back returns to that workflow.
         if (fullRoute.data.type === "session" && currentAgentID() !== "main" && fromWorkflowRunID()) {
-          navigate({ ...fullRoute.data, agentID: undefined, fromWorkflowRunID: undefined, workflowRunID: fromWorkflowRunID() })
+          navigate({ ...fullRoute.data, sessionID: sync.data.workflow[fromWorkflowRunID()!]?.sessionID ?? route.sessionID, agentID: undefined, fromWorkflowRunID: undefined, workflowRunID: fromWorkflowRunID() })
           dialog.clear()
           return
         }
@@ -1357,8 +1358,8 @@ export function Session() {
               <WorkflowPage
                 runID={workflowRunID()!}
                 onBack={() => navigate({ ...route, workflowRunID: undefined })}
-                onOpenAgent={(actorID) =>
-                  navigate({ ...route, workflowRunID: undefined, agentID: actorID, fromWorkflowRunID: workflowRunID() })
+                onOpenAgent={(actorID, sessionID) =>
+                  navigate({ ...route, sessionID: sessionID ?? route.sessionID, workflowRunID: undefined, agentID: actorID, fromWorkflowRunID: workflowRunID() })
                 }
                 onOpenChild={(childRunID) => navigate({ ...route, workflowRunID: childRunID })}
               />
@@ -1790,26 +1791,21 @@ function AssistantMessage(props: {
     Model.name(ctx.providers(), props.message.providerID, props.message.modelID),
   )
 
-  const final = createMemo(() => {
-    return props.message.finish && props.message.finish !== "tool-calls"
-  })
+  const final = createMemo(() => isFinalAssistantFinish(props.message.finish))
 
-  // The completion footer (▣ Agent · model · duration) must render exactly once
-  // per turn. A turn can produce several assistant messages: mid-loop ones finish
-  // with "tool-calls", the closing one finishes with "stop". In Orchestrator mode
-  // the turn characteristically ends on a "tool-calls" message (spawning
-  // subagents / handing off) that trails the final "stop" message — so `props.last`
-  // and `final()` land on two different messages and BOTH draw a footer (the stop
-  // one with a duration, the trailing tool-calls one without). Suppress the footer
-  // for a trailing message that already finished with "tool-calls"; still show it
-  // while a last message is streaming (finish undefined) or for the final/aborted
-  // message, which preserves non-orchestrator behavior.
-  const showFooter = createMemo(() => {
-    if (props.recovering) return true
-    if (props.message.error?.name === "MessageAbortedError") return true
-    if (final()) return true
-    return props.last && props.message.finish !== "tool-calls"
-  })
+  // The completion footer (▣ Agent · model · duration) is the last row of the
+  // scrollable transcript and must stay mounted — including when the last
+  // message's finish is "tool-calls". The old gate unmounted that row on every
+  // mid-loop tool-calls step, so the last line vanished until the next assistant
+  // message appeared. Orchestrator (the only reason for that gate) is gone.
+  const showFooter = createMemo(() =>
+    shouldShowAssistantFooter({
+      recovering: props.recovering,
+      aborted: props.message.error?.name === "MessageAbortedError",
+      finish: props.message.finish,
+      isLast: props.last,
+    }),
+  )
 
   const duration = createMemo(() => {
     if (!final()) return 0
@@ -2244,12 +2240,20 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
     }),
   )
 
+  // A dispatched MCP call shows as the MCP tool it ran, with that tool's arguments.
+  const dispatched = () => {
+    if (props.part.tool !== "mcp_tool_use") return
+    const input = props.part.state.input as { name?: unknown; arguments?: unknown } | undefined
+    if (typeof input?.name !== "string") return
+    const args = input.arguments
+    return { tool: input.name, input: args && typeof args === "object" && !Array.isArray(args) ? args : {} }
+  }
   const toolprops = {
     get metadata() {
       return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
     },
     get input() {
-      return props.part.state.input ?? {}
+      return dispatched()?.input ?? props.part.state.input ?? {}
     },
     get output() {
       return props.part.state.status === "completed" ? props.part.state.output : undefined
@@ -2260,7 +2264,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
       return permissions[permissionIndex]
     },
     get tool() {
-      return props.part.tool
+      return dispatched()?.tool ?? props.part.tool
     },
     get part() {
       return props.part
@@ -2818,7 +2822,7 @@ function WorkflowPanel(props: {
 function WorkflowPage(props: {
   runID: string
   onBack: () => void
-  onOpenAgent: (actorID: string) => void
+  onOpenAgent: (actorID: string, sessionID?: string) => void
   onOpenChild: (childRunID: string) => void
 }) {
   const sync = useSync()
@@ -2835,8 +2839,8 @@ function WorkflowPage(props: {
   // Describe what a running subagent is currently doing, from its live message
   // stream (last message's last meaningful part): a tool call → "⚙ <tool>", else
   // the latest text snippet. Returns undefined when nothing's streamed yet.
-  const liveActivity = (actorID: string): string | undefined => {
-    const sid = run()?.sessionID
+  const liveActivity = (actorID: string, sessionID?: string): string | undefined => {
+    const sid = sessionID ?? run()?.sessionID
     if (!sid) return undefined
     const msgs = sync.data.message[sid]?.[actorID]
     const last = msgs?.[msgs.length - 1]
@@ -3396,41 +3400,81 @@ function Task(props: ToolProps<typeof ActorTool>) {
   const sync = useSync()
 
   const input = createMemo(() => {
-    const raw = props.input as Partial<{ operation: { description: string; subagent_type: string } } & {
+    const raw = props.input as Partial<{
+      operation: {
+        description: string
+        subagent_type: string
+        action: string
+        actor_id: string
+        to_actor_id: string
+        to_session_id: string
+        content: string
+      }
+    }> & {
       description: string
       subagent_type: string
+      action: string
+      actor_id: string
+      to_actor_id: string
+      to_session_id: string
+      content: string
+    }
+    return (raw?.operation ?? raw) as Partial<{
+      description: string
+      subagent_type: string
+      action: string
+      actor_id: string
+      to_actor_id: string
+      to_session_id: string
+      content: string
     }>
-    return (raw?.operation ?? raw) as Partial<{ description: string; subagent_type: string }>
   })
 
   const inputActorId = createMemo(() => {
-    const raw = props.input as Partial<{ operation: { actor_id: string }; actor_id: string }>
-    return raw?.operation?.actor_id ?? raw?.actor_id
+    // spawn/run leave actorId in metadata; wait/status/cancel use actor_id;
+    // send addresses a peer via to_actor_id (never actor_id).
+    return input().actor_id ?? input().to_actor_id
   })
 
-  const inputAction = createMemo(() => {
-    const raw = props.input as Partial<{ operation: { action: string }; action: string }>
-    return raw?.operation?.action ?? raw?.action
-  })
+  const inputAction = createMemo(() => input().action)
+
+  const metaActorId = createMemo(
+    () =>
+      (props.metadata.actorId as string | undefined) ??
+      (props.metadata.receiver_actor_id as string | undefined),
+  )
+
+  const metaSessionId = createMemo(
+    () =>
+      (props.metadata.sessionId as string | undefined) ??
+      (props.metadata.receiver_session_id as string | undefined),
+  )
 
   const actorEntry = createMemo(() => {
-    const actorId = (props.metadata.actorId as string | undefined) ?? inputActorId()
+    // Prefer the spawn/run target (metadata.actorId) over a send receiver so a
+    // `send` row does not inherit the receiver's live tool stream.
+    const actorId = (props.metadata.actorId as string | undefined) ?? input().actor_id
     if (!actorId) return undefined
     const actors = sync.data.actor[props.part.sessionID]
     if (!actors) return undefined
     return actors.find((a) => a.actor_id === actorId)
   })
 
-  const targetSession = createMemo(() => {
-    const fromMeta = props.metadata.sessionId as string | undefined
-    if (fromMeta) return fromMeta
-    return actorEntry()?.session_id
+  // Send addresses a peer via to_actor_id — look that actor up only for its
+  // human description (`Sent message to — <desc>`), same shape as wait.
+  const sendTargetEntry = createMemo(() => {
+    const to = input().to_actor_id ?? (props.metadata.receiver_actor_id as string | undefined)
+    if (!to) return undefined
+    const actors = sync.data.actor[props.part.sessionID]
+    return actors?.find((a) => a.actor_id === to)
   })
 
-  const targetBucket = createMemo(() => {
-    const fromMeta = props.metadata.actorId as string | undefined
-    if (fromMeta) return fromMeta
-    return inputActorId() ?? "main"
+  const targetSession = createMemo(() => {
+    return metaSessionId() ?? actorEntry()?.session_id
+  })
+
+  const targetBucket = createMemo((): string => {
+    return metaActorId() ?? inputActorId() ?? "main"
   })
 
   const actorStatus = createMemo(() => {
@@ -3439,10 +3483,26 @@ function Task(props: ToolProps<typeof ActorTool>) {
 
   const resolvedDescription = createMemo(() => {
     if (input().description) return input().description
-    return actorEntry()?.description
+    return actorEntry()?.description ?? sendTargetEntry()?.description
   })
 
+  const completeKey = createMemo(() =>
+    actorToolCompleteKey({
+      action: inputAction(),
+      description: input().description,
+      actorDescription: actorEntry()?.description ?? sendTargetEntry()?.description,
+      toActorId: input().to_actor_id,
+      actorId: input().actor_id,
+      title: props.part.state.status === "running" || props.part.state.status === "completed" ? props.part.state.title : undefined,
+    }),
+  )
+
   createEffect(() => {
+    // Only pull the target transcript for actions that actually observe another
+    // agent's run. `send` is fire-and-forget; syncing the receiver here would
+    // paint its tools under the send row.
+    const action = inputAction()
+    if (action === "send" || action === "models") return
     const session = targetSession()
     const bucket = targetBucket()
     if (session && !sync.data.message[session]?.[bucket]?.length)
@@ -3479,25 +3539,24 @@ function Task(props: ToolProps<typeof ActorTool>) {
   })
 
   const content = createMemo(() => {
-    const desc = resolvedDescription()
-    if (!desc) return ""
-
     const action = inputAction()
     const status = actorStatus()
     const agent = Locale.titlecase(input().subagent_type ?? actorEntry()?.agent ?? "General")
+    const desc = resolvedDescription()
 
-    let header: string
-    if (action === "cancel") {
-      const label = props.part.state.status === "running" ? "Cancelling" : "Cancelled"
-      header = `${label} — ${desc}`
-    } else if (action === "wait") {
-      const label = props.part.state.status === "completed" ? "Waited for" : "Waiting for"
-      header = `${label} — ${desc}`
-    } else if (action === "spawn") {
-      header = `Background ${agent} Task — ${desc}`
-    } else {
-      header = `${agent} Task — ${desc}`
-    }
+    let header = actorToolBody({
+      action,
+      partStatus: props.part.state.status,
+      title:
+        props.part.state.status === "running" || props.part.state.status === "completed"
+          ? props.part.state.title
+          : undefined,
+      description: input().description,
+      actorDescription: actorEntry()?.description ?? sendTargetEntry()?.description,
+      subagentType: agent,
+      toActorId: input().to_actor_id ?? (props.metadata.receiver_actor_id as string | undefined),
+      actorId: input().actor_id ?? input().to_actor_id,
+    })
 
     if ((status === "cancelled" && action !== "cancel") || status === "stopped") {
       header += ` (${status})`
@@ -3505,16 +3564,21 @@ function Task(props: ToolProps<typeof ActorTool>) {
 
     let content = [header]
 
-    if (isRunning() && tools().length > 0) {
-      if (current()) {
-        const state = current()!.state
-        const title = state.status === "running" || state.status === "completed" ? state.title : undefined
-        content.push(`↳ ${Locale.titlecase(current()!.tool)} ${title}`)
-      } else content.push(`↳ ${tools().length} toolcalls`)
-    }
+    // Live tool stream only makes sense for spawn/run/wait — the actions that
+    // actually watch another agent execute.
+    const tracksTools = action === undefined || action === "spawn" || action === "run" || action === "wait"
+    if (tracksTools) {
+      if (isRunning() && tools().length > 0) {
+        if (current()) {
+          const state = current()!.state
+          const title = state.status === "running" || state.status === "completed" ? state.title : undefined
+          content.push(`↳ ${Locale.titlecase(current()!.tool)} ${title}`)
+        } else content.push(`↳ ${tools().length} toolcalls`)
+      }
 
-    if (props.part.state.status === "completed" && !isRunning()) {
-      content.push(`└ ${tools().length} toolcalls · ${Locale.duration(duration())}`)
+      if (props.part.state.status === "completed" && !isRunning() && desc) {
+        content.push(`└ ${tools().length} toolcalls · ${Locale.duration(duration())}`)
+      }
     }
 
     return content.join("\n")
@@ -3524,8 +3588,8 @@ function Task(props: ToolProps<typeof ActorTool>) {
     <InlineTool
       icon="│"
       spinner={isRunning()}
-      complete={resolvedDescription()}
-      pending="Delegating..."
+      complete={completeKey()}
+      pending={actorToolPendingLabel(inputAction())}
       part={props.part}
       onClick={() => {
         const session = targetSession()

@@ -1,5 +1,4 @@
 import { type SQLiteBunDatabase } from "drizzle-orm/bun-sqlite"
-import { migrate } from "drizzle-orm/bun-sqlite/migrator"
 import { type SQLiteTransaction } from "drizzle-orm/sqlite-core"
 export * from "drizzle-orm"
 import { LocalContext } from "../util"
@@ -16,6 +15,7 @@ import { InstanceState } from "@/effect"
 import { iife } from "@/util/iife"
 import { init } from "#db"
 import { startIndexMigration, stopIndexMigration } from "../history/migration"
+import { migrateReplaySafe } from "./migrate-replay-safe"
 
 declare const MIMOCODE_MIGRATIONS: { sql: string; timestamp: number; name: string }[] | undefined
 
@@ -96,7 +96,8 @@ export const Client = lazy(() => {
   db.run("PRAGMA foreign_keys = ON")
   db.run("PRAGMA wal_checkpoint(PASSIVE)")
 
-  // Apply schema migrations
+  // Schema = sum of migration/*.sql. The runner only treats ALTER ADD/DROP
+  // and CREATE INDEX replay-safe no-ops as already-applied on a desynced journal.
   const entries =
     typeof MIMOCODE_MIGRATIONS !== "undefined"
       ? MIMOCODE_MIGRATIONS
@@ -111,9 +112,8 @@ export const Client = lazy(() => {
         item.sql = "select 1;"
       }
     }
-    migrate(db, entries)
+    migrateReplaySafe(db, entries)
   }
-
   if (!Flag.MIMOCODE_SKIP_MIGRATIONS) startIndexMigration(db)
   return db
 })

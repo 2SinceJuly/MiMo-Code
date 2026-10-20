@@ -93,9 +93,11 @@ describe("session prefix failure ownership", () => {
                   const assistants = (yield* sessions.messages({ sessionID: session.id })).filter(
                     (message) => message.info.role === "assistant",
                   )
-                  expect(assistants).toHaveLength(2)
-                  expect(assistants[0].info.role === "assistant" && assistants[0].info.finish).toBe(
-                    outcome === "tool" ? "tool-calls" : outcome === "length" ? "length" : "stop",
+                  // The existing empty-residue sweep removes empty shells;
+                  // cache recovery still must retain the real final answer.
+                  expect(assistants).toHaveLength(outcome === "empty" ? 1 : 2)
+                  if (outcome !== "empty") expect(assistants[0].info.role === "assistant" && assistants[0].info.finish).toBe(
+                    outcome === "tool" ? "tool-calls" : "length",
                   )
                   expect(assistants.some((message) => message.info.role === "assistant" && !!message.info.error)).toBe(
                     false,
@@ -183,7 +185,7 @@ describe("session prefix failure ownership", () => {
                       }),
                     )
                   const response = yield* Effect.promise(() => send(route, "answer this normally"))
-                  expect(response.status).toBe(route === "message" ? 200 : 204)
+                  expect(response.status).toBe(route === "message" ? 200 : 202)
                   const body = route === "message" ? yield* Effect.promise(() => response.json()) : undefined
                   for (let i = 0; i < 150; i++) {
                     if (

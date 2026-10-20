@@ -3,7 +3,7 @@ import * as fs from "fs/promises"
 import { setTimeout as sleep } from "node:timers/promises"
 import os from "os"
 import path from "path"
-import { Effect, Context } from "effect"
+import { Effect, Context, Fiber } from "effect"
 import type * as PlatformError from "effect/PlatformError"
 import type * as Scope from "effect/Scope"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -173,12 +173,25 @@ export const provideInstance =
   (directory: string) =>
   <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
     Effect.contextWith((services: Context.Context<R>) =>
-      Effect.promise<A>(async () =>
-        Instance.provide({
-          directory,
-          fn: () => Effect.runPromiseWith(services)(self.pipe(Effect.provideService(InstanceRef, Instance.current))),
-        }),
-      ),
+      Effect.callback<A, E>((resume) => {
+        const controller = new AbortController()
+        const provided = Promise.resolve(
+          Instance.provide({
+            directory,
+            fn: () => {
+              const fiber = Effect.runForkWith(services)(self.pipe(Effect.provideService(InstanceRef, Instance.current)), {
+                signal: controller.signal,
+              })
+              return Effect.runPromise(Fiber.await(fiber))
+            },
+          }),
+        )
+        void provided.then((exit) => resume(exit), (error) => resume(Effect.die(error)))
+        return Effect.promise(async () => {
+          controller.abort()
+          await provided
+        })
+      }),
     )
 
 export function provideTmpdirInstance<A, E, R>(
