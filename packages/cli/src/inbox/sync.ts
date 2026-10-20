@@ -74,6 +74,16 @@ export const SnapshotSchema = z.object({
 })
 export type Snapshot = z.infer<typeof SnapshotSchema>
 
+/** Canonical SQL snapshot shape for comparisons across version-1 producers. */
+export function normalizeSnapshot(snapshot: Snapshot): Snapshot {
+  return {
+    ...snapshot,
+    receipts: snapshot.receipts.map((row) => ({ ...row, outcome_message_id: row.outcome_message_id ?? null }))
+      .toSorted((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    lanes: snapshot.lanes.toSorted((a, b) => a.agent_id < b.agent_id ? -1 : a.agent_id > b.agent_id ? 1 : 0),
+  }
+}
+
 export const Event = {
   Delta: SyncEvent.define({ type: "session.inbox.delta", version: 1, aggregate: "sessionID", schema: DeltaSchema }),
   Snapshot: SyncEvent.define({ type: "session.inbox.snapshot", version: 1, aggregate: "sessionID", schema: SnapshotSchema }),

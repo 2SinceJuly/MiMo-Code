@@ -86,7 +86,7 @@ updated: 2026-10-20
 
 旧行转成消息不在 SQL 里做：生成 `MessageID` 与确定 synthetic 消息的 agent/model 都依赖运行时，见「已发布数据」。
 
-`20261020000000_inbox_outcome_anchor` 在既有 Inbox 上增加可空的 `outcome_message_id`，不重建队列、不改已发布迁移。已有回执保持原值，该引用初始为 NULL；它没有消息外键，删除或恢复裁剪历史不会删除回执。旧版本的完整同步行未携带该字段时按 NULL 投影，后续完整行保留新的精确结果引用。
+`20261020000000_inbox_outcome_anchor` 在既有 Inbox 上增加可空的 `outcome_message_id`，不重建队列、不改已发布迁移。已有回执保持原值，该引用初始为 NULL；它没有消息外键，删除或恢复裁剪历史不会删除回执。旧版本的完整同步行未携带该字段时按 NULL 投影，后续完整行保留新的精确结果引用。`QueueSync.normalizeSnapshot` 在队列模块统一规范化旧v1快照缺字段与SQL排序；CLI/OpenCode导入和恢复使用该形状做幂等比较，避免旧载荷首次落库补NULL后误判为冲突。规范化不改源载荷，真实队列差异继续拒绝。
 
 ## 状态机
 
@@ -109,6 +109,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 - 纯中断、停止 epoch 已改变、instance/workspace ownership 已失效、目标 session/user 已删除时，不补业务错误或复活历史。持久错误写入与 ownership、epoch、parent 校验在同一事务内；停止和 runId 条件继续保护回执结算。
 - `runLoop` 仅结算业务 body 的失败；body 成功后的生命周期/清理失败不能覆盖成功输出。Resume 不写 inbox，其准入后的 beforeWork/裁剪失败由 Resume owner 结算；进入 loop 后由 loop 结算，避免重复错误。
 - 每条结算回执内部保存 `outcome_message_id`，引用本 lane 执行 owner 最终交付的消息；一轮认领 A/B/C 时三条回执可引用同一最终结果。`delivery_message_id` 仍只表示首次模型读入位置，不能替代最终结果。准备失败的错误消息与回执取消/outcome 引用在同一事务保存。终态等待者回放该精确 ID，核对 session/actor；后续同 parent Resume、同毫秒新输出都不改变旧回执定位的结果 ID。回放使用该原消息 ID 的当前持久事实；恢复对该消息的合法原地裁剪由历史真相承载，不复制冻结快照。原消息被删除时明确 NotFound，不借后次新 ID。迁移前无 outcome 引用的记录仅在原 delivery ID 当前持久事实为错误或可确认终态时回放，并核对创建时间未越过原 ACK 边界；这不还原冻结的旧错误/正文。无法证明归属的历史拒绝回放，不借后续消息 ID。
+- 本地结果登记由 `attachReceiptResult` 统一获取并核验：get/create 与SQL回执读取在同一不可中断同步段，读取失败只回滚本次新登记。终态回放完成Deferred后在登记作用域await，明确暴露失败；准备失败/退出仅清理已完成且引用仍相等的登记，保留并发同ID的活跃等待交给owner，不误删后继新Deferred。原结果删除后的失败请求不留下待扫旧登记，之后回执GC不会污染新输入。
 - session 删除、ownership 移交或回执 ACK 写入失败时，执行者仍必须完成本地等待者的 Deferred（明确失败）并释放 lease；回执持久化失败不能使客户端无限等待。
 - HTTP 保持 202/receipt 与 message stream 契约。同步 message 已开始 200 后发生无法持久保存的失败，明确使响应正文读取失败；异步执行外层记录异常，不再次发布无 parent 的错误事件。
 - 同步 `message` 的 Hono 流显式声明 `Transfer-Encoding: chunked`。Node HTTP/1.1 adapter 对原生 Response 不再探测预读并把首读错误当作空正文完成；由持续 reader 读取，错误销毁响应传输。该头只声明本段流传输，不是业务回执字段：Bun 可按实际输出归一传输编码；代理可在自身连接上重建 framing，客户端应以请求/正文读取明确失败识别未交付结果，不依赖响应保留该头或固定 Content-Length。当前 Node adapter 使用 HTTP/1.1，直接 HTTP/2 adapter 不属于此实现边界。
@@ -288,3 +289,4 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | (q) | 未处理异常早于模型 delivery | 实际 claim owner 保存错误 assistant，回执 never_ran、consumed=false、无 delivery；所有 prompt 等待方收到该持久结果 |
 | (r) | 已 delivery 后执行失败 | 消费记录结算 assistant_error；错误消息与回执可观测，lane 释放且后续输入可执行 |
 | (s) | Resume 与 ownership 边界 | 准入后失败归原 parent；中断、epoch/ownership 失效、目标删除不补业务错误；成功后清理失败不重写成功回答 |
+| (t) | 精确结果、旧v1兼容与登记清理（TP-RUN-R1C-08） | 同parent后续Resume/同毫秒/多模型步骤不能改变旧回执原结果；删除原结果明确失败，回执GC后新输入继续。新增迁移保留旧记录；旧快照重复导入/恢复幂等、不改载荷、不调度，真实差异拒绝。自动化：`packages/cli/test/server/session-inbox-outcome.test.ts`、`packages/cli/test/inbox/queue-outcome-migration.test.ts`、`packages/cli/test/inbox/queue-sync.test.ts`、`packages/cli/test/cli/export-import.test.ts`、`packages/cli/test/history/import.test.ts`、`packages/cli/test/sync/restore-order.test.ts`；Desktop真实Electron回归挂既有 `turn-execution` TP08 |

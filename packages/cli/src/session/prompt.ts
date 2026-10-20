@@ -3746,87 +3746,109 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const receiptPrompts = new Map<string, PromptInput>()
     const receiptLeases = new Map<string, Deferred.Deferred<void>>()
     const laneRuns = new Map<SessionID, Map<string, Deferred.Deferred<void>>>()
+    const releaseDoneReceiptResult = (receiptId: string, result: Deferred.Deferred<MessageV2.WithParts>) =>
+      Effect.sync(() => {
+        if (receiptResults.get(receiptId) !== result || !Deferred.isDoneUnsafe(result)) return
+        receiptResults.delete(receiptId)
+        receiptLeases.delete(receiptId)
+        receiptPrompts.delete(receiptId)
+      })
     // Registration and terminal replay are one operation. An owner may ACK
     // before accept returns, or finish while the receipt read yields.
     const attachReceiptResult = Effect.fn("SessionPrompt.attachReceiptResult")(function* (
       input: PromptInput,
       receiptId: string,
     ) {
-      const result = yield* Effect.sync(() => {
-        const existing = receiptResults.get(receiptId)
-        if (existing) return existing
-        const created = Deferred.makeUnsafe<MessageV2.WithParts>()
-        receiptResults.set(receiptId, created)
-        return created
-      })
-      receiptPrompts.set(receiptId, input)
-      const receipt = yield* Effect.sync(() => {
-        const row = Database.use((db) =>
-          db
-            .select()
-            .from(InboxTable)
-            .where(
-              and(
-                eq(InboxTable.id, receiptId),
-                eq(InboxTable.receiver_session_id, input.sessionID),
-                eq(InboxTable.receiver_actor_id, input.agentID ?? "main"),
-              ),
+      return yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+        const { receipt, result } = yield* Effect.sync(() => {
+          const existing = receiptResults.get(receiptId)
+          const result = existing ?? Deferred.makeUnsafe<MessageV2.WithParts>()
+          if (!existing) receiptResults.set(receiptId, result)
+          // Acquire and verify without yielding: a failed read can roll back only
+          // this new registration, before another caller or owner can reuse it.
+          try {
+            const row = Database.use((db) =>
+              db
+                .select()
+                .from(InboxTable)
+                .where(
+                  and(
+                    eq(InboxTable.id, receiptId),
+                    eq(InboxTable.receiver_session_id, input.sessionID),
+                    eq(InboxTable.receiver_actor_id, input.agentID ?? "main"),
+                  ),
+                )
+                .get(),
             )
-            .get(),
-        )
-        if (!row) throw new NotFoundError({ message: `Receipt no longer exists: ${receiptId}` })
-        return {
-          id: row.id,
-          lane: { sessionID: row.receiver_session_id, agentID: row.receiver_actor_id },
-          state: row.state,
-          epoch: row.epoch,
-          inputMessageID: row.input_message_id!,
-          deliveryMessageID: row.delivery_message_id ?? undefined,
-          error: row.error ?? undefined,
-          outcomeMessageID: row.outcome_message_id ?? undefined,
-          updated: row.time_updated,
-        }
-      })
-      if (receipt.state === "settled" || receipt.state === "cancelled" || receipt.state === "rejected") {
-        yield* Deferred.complete(
-          result,
-          Effect.gen(function* () {
-            if (receipt.state === "cancelled" && !receipt.error && (input.agentID ?? "main") !== "main") {
-              return yield* Effect.interrupt
+            if (!row) throw new NotFoundError({ message: `Receipt no longer exists: ${receiptId}` })
+            receiptPrompts.set(receiptId, input)
+            return { result, receipt: {
+              id: row.id,
+              lane: { sessionID: row.receiver_session_id, agentID: row.receiver_actor_id },
+              state: row.state,
+              epoch: row.epoch,
+              inputMessageID: row.input_message_id!,
+              deliveryMessageID: row.delivery_message_id ?? undefined,
+              error: row.error ?? undefined,
+              outcomeMessageID: row.outcome_message_id ?? undefined,
+              updated: row.time_updated,
+            } }
+          } catch (error) {
+            if (!existing && receiptResults.get(receiptId) === result) {
+              receiptResults.delete(receiptId)
+              receiptLeases.delete(receiptId)
+              receiptPrompts.delete(receiptId)
             }
-            const exact = receipt.outcomeMessageID
-            if (exact) {
-              const message = MessageV2.get({ sessionID: input.sessionID, messageID: exact })
-              if (message.info.role !== "assistant" || (message.info.agentID ?? "main") !== (input.agentID ?? "main")) {
-                throw new NotFoundError({ message: `Receipt outcome belongs to another actor: ${receiptId}` })
-              }
-              return message
-            }
-            if (receipt.state === "cancelled" && !receipt.error) {
-              return MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID ?? receipt.inputMessageID })
-            }
-            // Existing records predate the final-outcome anchor. Their exact
-            // delivery can be returned only if it was already terminal at ACK.
-            // Never infer a final response from later same-parent messages.
-            if (!receipt.deliveryMessageID) throw new NotFoundError({ message: `Receipt has no durable outcome anchor: ${receiptId}` })
-            const message = MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID })
-            const saved = Database.use(db => db.select({ created: MessageTable.time_created }).from(MessageTable)
-              .where(and(eq(MessageTable.id, message.info.id), eq(MessageTable.session_id, input.sessionID),
-                eq(MessageTable.agent_id, input.agentID ?? "main"))).get())
-            if (!saved || saved.created > receipt.updated || message.info.role !== "assistant") {
-              throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
-            }
-            if (message.info.error !== undefined) return message
-            const parent = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" }))
-              .find(user => user.info.role === "user" && user.info.id === (message.info as MessageV2.Assistant).parentID)?.info
-            if (parent?.role === "user" && message.info.time.completed !== undefined && message.info.time.completed <= receipt.updated &&
-              message.info.finish !== "length" && classifyAssistantStep({ lastUser: parent, assistant: message.info,
-                parts: message.parts, phase: "existing-assistant" }).type === "final") return message
-            throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
-          }),
-        )
-      }
-      return { receipt, result }
+            throw error
+          }
+        })
+        return yield* restore(Effect.gen(function* () {
+          if (receipt.state === "settled" || receipt.state === "cancelled" || receipt.state === "rejected") {
+            yield* Deferred.complete(
+              result,
+              Effect.gen(function* () {
+                if (receipt.state === "cancelled" && !receipt.error && (input.agentID ?? "main") !== "main") {
+                  return yield* Effect.interrupt
+                }
+                const exact = receipt.outcomeMessageID
+                if (exact) {
+                  const message = MessageV2.get({ sessionID: input.sessionID, messageID: exact })
+                  if (message.info.role !== "assistant" || (message.info.agentID ?? "main") !== (input.agentID ?? "main")) {
+                    throw new NotFoundError({ message: `Receipt outcome belongs to another actor: ${receiptId}` })
+                  }
+                  return message
+                }
+                if (receipt.state === "cancelled" && !receipt.error) {
+                  return MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID ?? receipt.inputMessageID })
+                }
+                // Existing records predate the final-outcome anchor. Their exact
+                // delivery can be returned only if it was already terminal at ACK.
+                // Never infer a final response from later same-parent messages.
+                if (!receipt.deliveryMessageID) throw new NotFoundError({ message: `Receipt has no durable outcome anchor: ${receiptId}` })
+                const message = MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID })
+                const saved = Database.use(db => db.select({ created: MessageTable.time_created }).from(MessageTable)
+                  .where(and(eq(MessageTable.id, message.info.id), eq(MessageTable.session_id, input.sessionID),
+                    eq(MessageTable.agent_id, input.agentID ?? "main"))).get())
+                if (!saved || saved.created > receipt.updated || message.info.role !== "assistant") {
+                  throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
+                }
+                if (message.info.error !== undefined) return message
+                const parent = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" }))
+                  .find(user => user.info.role === "user" && user.info.id === (message.info as MessageV2.Assistant).parentID)?.info
+                if (parent?.role === "user" && message.info.time.completed !== undefined && message.info.time.completed <= receipt.updated &&
+                  message.info.finish !== "length" && classifyAssistantStep({ lastUser: parent, assistant: message.info,
+                    parts: message.parts, phase: "existing-assistant" }).type === "final") return message
+                throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
+              }),
+            )
+            // complete stores a failed Exit in the Deferred; await surfaces it in
+            // this acquisition scope so terminal replay cannot leak its maps.
+            yield* Deferred.await(result)
+          }
+          return { receipt, result }
+        })).pipe(Effect.onExit((exit) => Exit.isFailure(exit)
+          ? releaseDoneReceiptResult(receiptId, result) : Effect.void))
+      }))
     })
     const settleCancelledReceipts = (sessionID: SessionID) => Effect.gen(function* () {
       const controller = inboxControllerRef.current
@@ -4065,6 +4087,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
           }),
         ),
+        Effect.onExit((exit) => Exit.isFailure(exit) && promptReceiptId && promptResult
+          ? releaseDoneReceiptResult(promptReceiptId, promptResult) : Effect.void),
       )
     },
     )

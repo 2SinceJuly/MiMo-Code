@@ -451,10 +451,11 @@ describe("Inbox execution outcome ownership", () => {
 
   // [TP-RUN-R1C-08] Missing outcome history is explicit failure. A newer
   // same-parent answer cannot satisfy a reference to deleted original work.
-  test("old receipt whose outcome was deleted rejects replay after Resume", async () => {
+  test("deleted outcome rejects replay after Resume and receipt GC leaves new prompts usable", async () => {
     await using tmp = await tmpdir({ git: true })
     const denied = () => ({ status: 403, lines: [JSON.stringify({ error: { message: "quota before deleted result", type: "usage_not_included" } })] })
-    const stub = startScriptedLLMServer([denied(), { lines: textStopResponse("new answer after resume") }])
+    const stub = startScriptedLLMServer([denied(), { lines: textStopResponse("new answer after resume") },
+      { lines: textStopResponse("fresh prompt after receipt GC") }])
     try {
       await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
       await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
@@ -472,6 +473,15 @@ describe("Inbox execution outcome ownership", () => {
         expect(yield* Effect.promise(() => response.json())).toMatchObject({ name: "NotFoundError" })
         expect(stub.captures).toHaveLength(2)
         expect(receipts(session.id)[0].outcome_message_id).toBe(original.info.id)
+        // Terminal receipt GC is a durable lifecycle boundary. Failed replay
+        // must release its local registration before a later request scans it.
+        Database.use(db => db.delete(InboxTable).where(eq(InboxTable.receiver_session_id, session.id)).run())
+        const next = yield* prompt.prompt({ sessionID: session.id, messageID: MessageID.ascending(), agent: "build", model,
+          parts: [{ type: "text" as const, text: "independent new input" }] }).pipe(Effect.timeout("5 seconds"))
+        expect(next.info.role === "assistant" && next.info.error).toBeUndefined()
+        expect(next.parts.some(part => part.type === "text" && part.text === "fresh prompt after receipt GC")).toBe(true)
+        expect(stub.captures).toHaveLength(3)
+        expect(yield* SessionStatus.Service.use(s => s.get(session.id))).toEqual({ type: "idle" })
       })) })
     } finally { await stub.stop() }
   }, 30_000)
