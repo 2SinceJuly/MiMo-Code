@@ -82,7 +82,6 @@ function config(origin: string): Partial<Config.Info> {
     },
     agent: { build: { model: "test/model" } },
     permission: { edit: "allow", bash: "allow", read: "allow" },
-    compaction: { prune: true },
     checkpoint: { thresholds: ["50%"] },
     lsp: false,
     formatter: false,

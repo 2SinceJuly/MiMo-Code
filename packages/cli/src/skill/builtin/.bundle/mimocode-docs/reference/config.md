@@ -117,7 +117,6 @@ The trigger is the model's prompt capacity (`limit.input` when the provider publ
 | Key | Purpose |
 |-----|---------|
 | `compaction.auto` | Auto-compact when context full (default true) |
-| `compaction.prune` | Prune old tool outputs (default true) |
 | `compaction.tail_turns` | Recent user turns kept verbatim (default 2) |
 | `compaction.preserve_recent_tokens` | Max recent tokens kept verbatim |
 | `compaction.reserved` | Token buffer to avoid overflow |

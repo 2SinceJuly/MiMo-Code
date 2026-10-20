@@ -1172,6 +1172,7 @@ export type UserMessage = {
   system?: string
   systemMode?: "append" | "replace-agent"
   harness?: "auto" | "codex" | "default"
+  task_id?: string
   tools?: {
     [key: string]: boolean
   }
@@ -2840,10 +2841,6 @@ export type Config = {
      * Enable automatic compaction when context is full (default: true)
      */
     auto?: boolean
-    /**
-     * Enable pruning of old tool outputs (default: true)
-     */
-    prune?: boolean
     /**
      * Deprecated compatibility setting. Projected compaction now keeps only whole API rounds that arrive while compaction is running.
      */

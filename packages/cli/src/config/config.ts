@@ -62,6 +62,11 @@ function normalizeLoadedConfig(data: unknown, source: string) {
   delete copy.history
   // Ignore the removed worktree policy in existing files and host-injected config.
   delete copy.auto_worktree
+  if (isRecord(copy.compaction) && "prune" in copy.compaction) {
+    const { prune: _, ...compaction } = copy.compaction
+    copy.compaction = compaction
+    log.warn("compaction.prune was removed and is ignored; tool outputs are no longer pruned", { path: source })
+  }
   const hadLegacy = "theme" in copy || "keybinds" in copy || "tui" in copy
   if (!hadLegacy) return copy
   delete copy.theme
@@ -233,9 +238,6 @@ const InfoSchema = Schema.Struct({
     Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
-      }),
-      prune: Schema.optional(Schema.Boolean).annotate({
-        description: "Enable pruning of old tool outputs (default: true)",
       }),
       tail_turns: Schema.optional(NonNegativeInt).annotate({
         description:
@@ -975,9 +977,6 @@ export const layer = Layer.effect(
 
         if (Flag.MIMOCODE_DISABLE_AUTOCOMPACT) {
           result.compaction = { ...result.compaction, auto: false }
-        }
-        if (Flag.MIMOCODE_DISABLE_PRUNE) {
-          result.compaction = { ...result.compaction, prune: false }
         }
 
         // Preserve explicit lite (even unresolvable refs); small_model is a
