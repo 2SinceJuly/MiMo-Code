@@ -44,7 +44,7 @@ function toolLine(part: ToolPart): string {
   return `- ${call}`
 }
 
-function isBoundaryUser(msg: WithParts): boolean {
+export function isBoundaryUser(msg: WithParts): boolean {
   return msg.info.role === "user" && msg.parts.some((p) => p.type === "checkpoint" || p.type === "compaction")
 }
 
@@ -97,6 +97,15 @@ function checkpointPart(msg: WithParts): CheckpointPart | undefined {
 }
 
 /**
+ * Legacy rebuild boundaries were stamped at watermark + 1 ms, so they sort
+ * before the tail they digest. A boundary appended after its tail is created
+ * no earlier than the newest tail message.
+ */
+export function isLegacyBoundary(boundary: WithParts, newest: WithParts): boolean {
+  return boundary.info.time.created < newest.info.time.created
+}
+
+/**
  * Drop assistant messages in (coveredUpTo, digestUpTo] after a legacy
  * rebuild boundary. A boundary appended after the newest message leaves its
  * tail outside the window, so there is nothing to drop. Older boundaries were
@@ -126,7 +135,7 @@ export function collapseCheckpointTail(msgs: readonly WithParts[]): WithParts[] 
 
   const digestUpTo = part.digestUpTo
   const newest = msgs.find((m) => m.info.id === digestUpTo)
-  if (!newest || boundary.info.time.created >= newest.info.time.created) return msgs as WithParts[]
+  if (!newest || !isLegacyBoundary(boundary, newest)) return msgs as WithParts[]
 
   const coveredUpTo = part.coveredUpTo
   const live = msgs.filter(

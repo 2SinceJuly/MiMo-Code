@@ -4,6 +4,7 @@ import { Instance } from "../../src/project/instance"
 import type { Provider } from "../../src/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session as SessionNs } from "../../src/session"
+import { withRebuildTail } from "../../src/session/checkpoint"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
@@ -215,6 +216,9 @@ describe("legacy rebuild boundary golden request", () => {
             ],
           },
         ])
+        // The legacy tail is already inside the window, so the checkpoint writer reads it unchanged.
+        expect(withRebuildTail(sessionID, window)).toBe(window)
+        expect(window.map((message) => message.info.id)).toContain(newest.id)
       }),
     ),
   )

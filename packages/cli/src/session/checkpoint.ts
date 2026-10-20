@@ -43,7 +43,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
-import { renderTailDigest } from "./tail-digest"
+import { isBoundaryUser, isLegacyBoundary, renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -306,6 +306,33 @@ export function computeBoundary(
     if (hasTextBlocks(msgs[startIdx])) textBlockCount += 1
   }
   return msgs[startIdx].info.id
+}
+
+/**
+ * The checkpoint writer reads full-fidelity history. A rebuild boundary
+ * appended after its tail leaves (coveredUpTo, digestUpTo] outside the
+ * window, so read that tail back from the main slice in stream order and
+ * place it between the boundary and the messages after it: the list the
+ * writer receives is boundary, tail, live messages. A legacy boundary's tail
+ * is already inside the window. Earlier boundaries inside the id range stay
+ * out, as they were outside the window that preceded the rebuild.
+ */
+export function withRebuildTail(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
+  if (index < 0) return window
+  const boundary = window[index]
+  const part = boundary.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
+  if (!part?.digestUpTo) return window
+  const tail: MessageV2.WithParts[] = []
+  for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
+    if (message.info.id === part.coveredUpTo) break
+    if (message.info.id <= part.coveredUpTo || message.info.id > part.digestUpTo || isBoundaryUser(message)) continue
+    tail.push(message)
+  }
+  tail.reverse()
+  const newest = tail.at(-1)
+  if (!newest || isLegacyBoundary(boundary, newest)) return window
+  return [...window.slice(0, index + 1), ...tail, ...window.slice(index + 1)]
 }
 
 function renderSectionBudgets(budgets: Record<string, number>): string {
@@ -660,12 +687,14 @@ export const layer: Layer.Layer<
       // ForkContext is byte-equal at the watermark moment. Reading the
       // unfiltered session stream would let computeBoundary land on a
       // subagent/prior-writer assistant turn and misalign the prefix cache.
+      // The newest rebuild boundary's tail is added back from the database.
       const sessionInfo = yield* session.get(input.sessionID)
-      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID, {
+      const window = yield* MessageV2.filterCompactedEffect(input.sessionID, {
         contextFrom: sessionInfo.contextFrom,
         contextWatermark: sessionInfo.contextWatermark,
         agentID: "main",
       })
+      const msgs = withRebuildTail(input.sessionID, window)
       if (msgs.length === 0) {
         log.info("no messages, skipping checkpoint", { sessionID: input.sessionID })
         return "skipped" as const
