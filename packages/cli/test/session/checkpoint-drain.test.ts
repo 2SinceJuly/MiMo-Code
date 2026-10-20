@@ -7,6 +7,7 @@ import { Memory } from "../../src/memory"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Actor, type AgentOutcome } from "../../src/actor/spawn"
 import { spawnRef } from "../../src/actor/spawn-ref"
+import { prefixCaptureRef } from "../../src/session/prefix-capture-ref"
 import { TaskRegistry } from "../../src/task/registry"
 import { SessionCheckpoint } from "../../src/session/checkpoint"
 import { Log } from "../../src/util"
@@ -31,10 +32,17 @@ const ref = {
 // Also populates spawnRef so tryStartCheckpointWriter resolves the actor at
 // runtime — see src/actor/spawn-ref.ts for the late-bind mechanism that
 // prod uses to break the Actor → SessionPrompt → SessionCheckpoint cycle.
+//
+// prefixCaptureRef is a sibling late-bind global. Other test files in the same
+// bun process (SessionPrompt.layer, fork-mode stubs) leave closures there that
+// resolve Provider.getModel against a different instance and abort
+// tryStartCheckpointWriter mid-flight. Clear it here so these tests never
+// depend on cross-file leftovers.
 const hangingActor = Layer.effect(
   Actor.Service,
   Effect.gen(function* () {
     const prevSpawnRef = spawnRef.current
+    const prevPrefixCaptureRef = prefixCaptureRef.current
     let counter = 0
     const impl = Actor.Service.of({
       spawn: (input) =>
@@ -51,9 +59,11 @@ const hangingActor = Layer.effect(
       getForkContext: () => Effect.succeed(undefined),
     })
     spawnRef.current = impl
+    prefixCaptureRef.current = undefined
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
         if (spawnRef.current === impl) spawnRef.current = prevSpawnRef
+        if (prefixCaptureRef.current === undefined) prefixCaptureRef.current = prevPrefixCaptureRef
       }),
     )
     return impl
@@ -186,4 +196,5 @@ describe("SessionCheckpoint.drainWriters", () => {
       }),
     ),
   )
+
 })
