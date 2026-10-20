@@ -36,7 +36,7 @@ import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
 import * as SessionRetry from "./retry"
-import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { MCP_TOOL_SEARCH_ID, MCP_TOOL_USE_ID } from "@/tool/mcp-tool-search"
 import { TOOL_SCRIPT_EXCLUDED } from "@/tool/tool-script-ref"
 import { Flag } from "@/flag/flag"
 
@@ -1048,7 +1048,7 @@ function resolveTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent"
     (_, key) =>
       input.user.tools?.[key] !== false &&
       (!disabled.has(key) ||
-        (key === MCP_TOOL_SEARCH_ID && input.activeTools?.includes(key) === true) ||
+        ((key === MCP_TOOL_SEARCH_ID || key === MCP_TOOL_USE_ID) && input.activeTools?.includes(key) === true) ||
         (key === "exec" && allowExecGateway)),
   )
 }

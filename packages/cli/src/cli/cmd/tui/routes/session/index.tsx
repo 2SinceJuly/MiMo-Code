@@ -2240,12 +2240,20 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
     }),
   )
 
+  // A dispatched MCP call shows as the MCP tool it ran, with that tool's arguments.
+  const dispatched = () => {
+    if (props.part.tool !== "mcp_tool_use") return
+    const input = props.part.state.input as { name?: unknown; arguments?: unknown } | undefined
+    if (typeof input?.name !== "string") return
+    const args = input.arguments
+    return { tool: input.name, input: args && typeof args === "object" && !Array.isArray(args) ? args : {} }
+  }
   const toolprops = {
     get metadata() {
       return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
     },
     get input() {
-      return props.part.state.input ?? {}
+      return dispatched()?.input ?? props.part.state.input ?? {}
     },
     get output() {
       return props.part.state.status === "completed" ? props.part.state.output : undefined
@@ -2256,7 +2264,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
       return permissions[permissionIndex]
     },
     get tool() {
-      return props.part.tool
+      return dispatched()?.tool ?? props.part.tool
     },
     get part() {
       return props.part

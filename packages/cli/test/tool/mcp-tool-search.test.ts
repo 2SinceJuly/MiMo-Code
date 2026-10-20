@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import {
   announcedDeferredMcpTools,
+  checkMcpToolArguments,
+  MCP_TOOL_USE_ID,
   createMcpToolSearchCatalog,
   deferredMcpToolsDelta,
   mcpToolCatalogBudget,
@@ -252,6 +254,57 @@ describe("MCP tool deferral mode", () => {
   test("always and never ignore schema size, and nothing defers without tools", () => {
     expect(shouldDeferMcpTools({ type: "always" }, entries, 1_000_000)).toBe(true)
     expect(shouldDeferMcpTools({ type: "never" }, entries, 1)).toBe(false)
-    expect(shouldDeferMcpTools({ type: "always" }, [], 1)).toBe(false)
+    expect(shouldDeferMcpTools({ type: "always" }, [], 1)).toBe(true)
+    expect(shouldDeferMcpTools({ type: "never" }, [], 1)).toBe(false)
   })
+
+  test("stays deferred once a conversation deferred, unless search is turned off", () => {
+    expect(shouldDeferMcpTools({ type: "always" }, [], 1, true)).toBe(true)
+    const auto = { type: "auto" as const, percent: MCP_TOOL_SEARCH_DEFAULT_PERCENT }
+    expect(shouldDeferMcpTools(auto, entries, 1_000_000_000, true)).toBe(true)
+    expect(shouldDeferMcpTools(auto, [], 1_000_000_000, true)).toBe(true)
+    expect(shouldDeferMcpTools({ type: "never" }, entries, 1, true)).toBe(false)
+  })
+})
+
+describe("checkMcpToolArguments", () => {
+  const entry: McpToolSearchEntry = {
+    name: "slack_send_message",
+    description: "Send a message to a Slack channel.",
+    parameters: {
+      type: "object",
+      properties: { channel: { type: "string" }, message: { type: "string" } },
+      required: ["channel", "message"],
+    },
+  }
+
+  test("accepts an object carrying every required property", () => {
+    expect(checkMcpToolArguments(entry, { channel: "general", message: "hi" })).toBeUndefined()
+  })
+
+  test("rejects non-object arguments", () => {
+    expect(checkMcpToolArguments(entry, undefined)).toContain("must be an object")
+    expect(checkMcpToolArguments(entry, ["general"])).toContain("must be an object")
+    expect(checkMcpToolArguments(entry, "general")).toContain("must be an object")
+  })
+
+  test("names the missing required properties", () => {
+    expect(checkMcpToolArguments(entry, { channel: "general" })).toBe(
+      'arguments for "slack_send_message" are missing required properties: message',
+    )
+  })
+
+  test("does not treat inherited properties as present", () => {
+    const inherited = { ...entry, parameters: { type: "object", required: ["toString"] } }
+    expect(checkMcpToolArguments(inherited, {})).toContain("missing required properties: toString")
+  })
+
+  test("accepts an empty object when the schema requires nothing", () => {
+    expect(checkMcpToolArguments({ ...entry, parameters: { type: "object" } }, {})).toBeUndefined()
+  })
+})
+
+test("deferred-tools reminder points the model at mcp_tool_use", () => {
+  const text = renderDeferredMcpToolsReminder({ added: ["slack_send_message"], removed: [] }, entries, 1_000)
+  expect(text).toContain(MCP_TOOL_USE_ID)
 })
