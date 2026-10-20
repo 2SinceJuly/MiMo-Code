@@ -16,7 +16,7 @@ References cite symbols in `packages/cli/src`.
 
 The session database (`PartTable`) is the only copy of a conversation, but three code paths rewrite tool output in place:
 
-- Turn-end `prune` in `session/prune.ts`: when the prompt cache is cold and context pressure is high, it soft-trims main-agent tool outputs over 4096 chars to head and tail, or sets `state.time.compacted`, and blanks reasoning and media through `stripNonEssential`.
+- Turn-end `prune` in `session/prune.ts`: when `compaction.prune` is explicitly `true` (unset means off, although the docs called it "default true"), the prompt cache is cold and context pressure is high, it soft-trims main-agent tool outputs over 4096 chars to head and tail, or sets `state.time.compacted`, and blanks reasoning and media through `stripNonEssential`.
 - `SessionCompaction.prune` in `session/compaction.ts` sets `time.compacted`. It has no caller.
 - Rebuild-time microcompact in `insertRebuildBoundary` (`session/checkpoint.ts`) sets `time.compacted` on read/bash/grep/edit outputs after the boundary.
 
@@ -43,12 +43,12 @@ After this change no code path mutates the content of a persisted part to reduce
 
 ### S2.4 Behavioral consequence
 
-Without prune, a main session resumed after its prompt cache expired keeps its old tool outputs verbatim inside the current window until the next boundary. Usage therefore crosses the checkpoint thresholds and `Overflow.usable` sooner, and the existing checkpoint writer and rebuild run earlier. Subagents are unaffected (turn-end prune only read main-agent messages). No trigger, threshold or ratio changes.
+Turn-end prune only ran for users who set `compaction.prune: true`. For them, a main session resumed after its prompt cache expired now keeps its old tool outputs and reasoning verbatim inside the current window until the next boundary, so usage crosses the checkpoint thresholds and `Overflow.usable` sooner and the existing checkpoint writer and rebuild run earlier. With the default configuration nothing changes at turn end. Subagents are unaffected (turn-end prune only read main-agent messages). Removing the rebuild-time microcompact does not enlarge requests: the outputs it cleared belong to non-user tail messages that `collapseCheckpointTail` already leaves out. No trigger, threshold or ratio changes.
 
 ### S2.5 Testing boundary
 
 - Real sessions on the scripted test provider; no mocked services.
-- A main session driven past the old prune conditions (cache cold, usage above the former level-1 band, large tool outputs older than two turns) keeps every `PartTable.data` identical to what the tool returned, and reasoning parts unchanged.
+- A main session with the legacy `compaction.prune: true` opt-in, driven past the old prune conditions (cache cold, usage in the former level-2 band, large tool outputs older than two turns), keeps every `PartTable.data` identical to what the tool returned, and reasoning parts unchanged.
 - A checkpoint rebuild leaves outputs after the boundary identical in the database.
 - `history get` on any tool part returns the full stored output through paging.
 - A legacy row with `time.compacted` still renders the cleared marker.
@@ -63,7 +63,7 @@ Without prune, a main session resumed after its prompt cache expired keeps its o
 
 ## Tasks
 
-- [ ] T1: Remove turn-end prune, `stripNonEssential`, their interface members and the `prompt.ts` call site — acceptance: a regression test drives a main session past the former prune conditions and asserts every tool part's stored output and every reasoning part equals what was originally stored, and that the session still reaches the existing checkpoint threshold when usage crosses it (covers: S2.1, S2.2, S2.4, S2.5)
+- [ ] T1: Remove turn-end prune, `stripNonEssential`, their interface members and the `prompt.ts` call site — acceptance: a regression test drives a main session whose config carries the legacy `compaction.prune: true` past the former prune conditions, fails on the base commit, and after the change asserts every tool part's stored output and every reasoning part equals what was originally stored and that the session still reaches the existing checkpoint threshold when usage crosses it (covers: S2.1, S2.2, S2.4, S2.5)
 - [ ] T2: Remove `SessionCompaction.prune`, its wrapper and interface member, and unreferenced prune constants — acceptance: `bun typecheck` passes in `packages/cli` with no remaining reference (covers: S2.2)
 - [ ] T3: Remove rebuild-time microcompact from `insertRebuildBoundary` — acceptance: a test inserts a rebuild boundary over a session with read/bash outputs after the watermark and asserts those parts are unchanged in the database (covers: S2.1, S2.2, S2.5)
 - [ ] T4: Remove `pressureLevel`, `contextPressureLevel`, `compaction.prune`, `MIMOCODE_DISABLE_PRUNE` and the flag-to-config code with docs — acceptance: a config containing `compaction.prune` loads with exactly one warning and no error; no reference to the flag or the key remains outside the warning; typecheck passes (covers: S2.2)

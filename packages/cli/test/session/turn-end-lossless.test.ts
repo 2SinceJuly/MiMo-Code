@@ -95,7 +95,7 @@ function storedParts(sessionID: SessionID) {
 }
 
 it.live(
-  "a resumed main session past the former prune conditions keeps every stored tool output and reasoning part",
+  "a resumed main session with the legacy compaction.prune opt-in keeps every stored tool output and reasoning part",
   () =>
     Effect.gen(function* () {
       const server = startScriptedLLMServer([
@@ -111,6 +111,12 @@ it.live(
       yield* provideTmpdirInstance(
         (dir) =>
           Effect.gen(function* () {
+            // A user config written before this change opts in to the removed turn-end prune.
+            const configFile = path.join(dir, "mimocode.json")
+            const written = yield* Effect.promise(() => Bun.file(configFile).json())
+            yield* Effect.promise(() =>
+              Bun.write(configFile, JSON.stringify({ ...written, compaction: { prune: true } })),
+            )
             for (let index = 0; index < FILES; index++) {
               const body = Array.from({ length: 45 }, (_, line) => `file ${index} line ${line} `.padEnd(1000, "x")).join(
                 "\n",
@@ -153,7 +159,7 @@ it.live(
             expect(yield* Effect.promise(() => Bun.file(checkpointPath(session.id)).exists())).toBe(false)
 
             yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "turn six" }] })
-            // Turn-end work runs in a fiber forked after the reply; give it time to touch the database.
+            // The removed prune ran in a fiber forked after the reply; the wait lets a reintroduced one touch the database.
             yield* Effect.sleep("1 second")
 
             const after = new Map(storedParts(session.id).map((row) => [row.id, row.data]))
