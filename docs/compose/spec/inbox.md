@@ -41,6 +41,7 @@ updated: 2026-10-20
 | `consumed` | integer NOT NULL default 0 | 是否已被模型读入 |
 | `outcome` | text | `success` \| `assistant_error` \| `interrupted` \| `never_ran` |
 | `delivery_message_id` | text | 首次读入该输入的 assistant 消息 |
+| `outcome_message_id` | text | 内部最终交付消息引用；与首次读入位置独立，可空用于迁移前记录 |
 | `error` | text | 结算错误 |
 | `idempotency_key` | text NOT NULL default `''` | 会话内幂等；空串表示无键 |
 | `created_at` | integer NOT NULL | |
@@ -85,6 +86,8 @@ updated: 2026-10-20
 
 旧行转成消息不在 SQL 里做：生成 `MessageID` 与确定 synthetic 消息的 agent/model 都依赖运行时，见「已发布数据」。
 
+`20261020000000_inbox_outcome_anchor` 在既有 Inbox 上增加可空的 `outcome_message_id`，不重建队列、不改已发布迁移。已有回执保持原值，该引用初始为 NULL；它没有消息外键，删除或恢复裁剪历史不会删除回执。旧版本的完整同步行未携带该字段时按 NULL 投影，后续完整行保留新的精确结果引用。
+
 ## 状态机
 
 ```text
@@ -105,6 +108,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 - 错误消息不等于输入已经读入模型。`consumed` 与 `deliveryMessageID` 只由 `recordDelivery` 写入；执行在 delivery 前失败，claimed 输入结算为 `cancelled/never_ran`，错误文本保留在回执且 prompt 等待方仍得到持久错误消息。已 delivery 的输入失败结算为 `settled/assistant_error`。结算不得从成功的 Effect Exit 推导未读输入为 consumed。
 - 纯中断、停止 epoch 已改变、instance/workspace ownership 已失效、目标 session/user 已删除时，不补业务错误或复活历史。持久错误写入与 ownership、epoch、parent 校验在同一事务内；停止和 runId 条件继续保护回执结算。
 - `runLoop` 仅结算业务 body 的失败；body 成功后的生命周期/清理失败不能覆盖成功输出。Resume 不写 inbox，其准入后的 beforeWork/裁剪失败由 Resume owner 结算；进入 loop 后由 loop 结算，避免重复错误。
+- 每条结算回执内部保存 `outcome_message_id`，引用本 lane 执行 owner 最终交付的消息；一轮认领 A/B/C 时三条回执可引用同一最终结果。`delivery_message_id` 仍只表示首次模型读入位置，不能替代最终结果。准备失败的错误消息与回执取消/outcome 引用在同一事务保存。终态等待者回放该精确 ID，核对 session/actor；后续同 parent Resume、同毫秒新输出都不改变旧回执定位的结果 ID。回放使用该原消息 ID 的当前持久事实；恢复对该消息的合法原地裁剪由历史真相承载，不复制冻结快照。原消息被删除时明确 NotFound，不借后次新 ID。迁移前无 outcome 引用的记录仅在原 delivery ID 当前持久事实为错误或可确认终态时回放，并核对创建时间未越过原 ACK 边界；这不还原冻结的旧错误/正文。无法证明归属的历史拒绝回放，不借后续消息 ID。
 - session 删除、ownership 移交或回执 ACK 写入失败时，执行者仍必须完成本地等待者的 Deferred（明确失败）并释放 lease；回执持久化失败不能使客户端无限等待。
 - HTTP 保持 202/receipt 与 message stream 契约。同步 message 已开始 200 后发生无法持久保存的失败，明确使响应正文读取失败；异步执行外层记录异常，不再次发布无 parent 的错误事件。
 - 同步 `message` 的 Hono 流显式声明 `Transfer-Encoding: chunked`。Node HTTP/1.1 adapter 对原生 Response 不再探测预读并把首读错误当作空正文完成；由持续 reader 读取，错误销毁响应传输。该头只声明本段流传输，不是业务回执字段：Bun 可按实际输出归一传输编码；代理可在自身连接上重建 framing，客户端应以请求/正文读取明确失败识别未交付结果，不依赖响应保留该头或固定 Content-Length。当前 Node adapter 使用 HTTP/1.1，直接 HTTP/2 adapter 不属于此实现边界。
@@ -164,12 +168,12 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 同步 `message` 流成功时返回 JSON 结果；已开始 200 后、无法持久化的失败使正文读取拒绝，不能以空正文结束成功响应。busy 路径未产生回执时为 204；空闲 `noReply` 路径返回所保存的 user 消息，不启动模型。响应断连只 detach 此请求，已受理输入的执行归 Controller/Runner。
 
-记录只引用两条消息：
+客户端公开回执引用两条消息：
 
 - `inputMessageID`：受理时写入的 user 消息。客户端用它把回执关联到消息。
 - `deliveryMessageID`：首次读入该输入的 model-step assistant 消息，只写一次；引擎渲染上下文时用它确定输入的位置，客户端用它判断输入已被消费。写入时发布 `session.receipt.updated`。
 
-结算（ack）只写 `state` / `outcome` / `error`，不记录任何消息 ID。OpenAPI 响应 schema 与 HTTP body 共用 `PublicReceipt` zod 单源。
+结算（ack）写 `state` / `outcome` / `error` 与内部 `outcome_message_id`，不改首次读入的 `delivery_message_id`。OpenAPI 响应 schema 与 HTTP body 共用 `PublicReceipt` zod 单源。
 
 ## fork
 
@@ -218,7 +222,7 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 - 删掉 `inbox.drain` 全部调用（约 862、4610、4735、6228 行）及 `deferInbox` 分叉；步骤边界改为 `claimNext` / `extendClaim`。
 - 认领可见性过滤（约 4766–4785 行）改为按 inbox 记录状态判断：accepted 未认领或其他运行 claimed 的消息隐藏；其余可见。
 - `recordDelivery` 写 `delivery_message_id`，事件在事务提交后发布。
-- 运行结束结算（ack）不再传 `messageId`。
+- 运行结束结算（ack）传内部 `outcomeMessageID` 指向本 owner 最终结果；不传递或修改首次 delivery ID。
 - `abortSession` 去掉 `queuedPolicy`；`cancel` 不再收 `AbortPolicy`。
 - `waitForSubagents` 与显式 `actor.wait` 都用 `observeInput` 解除；任一输入唤醒。
 - 删掉 `requireClaim` / `inboxWake` / `LoopInput` 相关字段与分叉（约 3536、6155、6227、7372、7546、7548 行）。
@@ -254,7 +258,7 @@ fork 不复制 inbox 记录，也不改写任何记录里的消息 ID。新会�
 | `packages/cli/src/inbox/inbox.ts` | `send` 里的 `promptRef.loop` / `inboxWake` / `requireClaim` 分叉、`wake` 意图、`inboxWatermark` 合并、`MAX_DRAIN_PER_TURN`、`drain` 及其手工回滚、`InboxArrived` 发布（`actor/events.ts` 中的定义一并删，无订阅方） |
 | `packages/cli/src/turn-queue/schema.ts` | `WakeIntent`、`ResumeIntent`、`ShellIntent`（后两者从未被受理）、`isCoalescable`、`intentRank`、`AbortPolicy`、`suspended` 字段 |
 | `packages/cli/src/session/session.ts` | `persistQueuedUser`（并入 `inbox.accept`）；`fork` 中复制 inbox 记录与 `idMap` 改写记录字段的整段 |
-| `packages/cli/src/inbox/controller.ts` | ack 的 `messageId` 参数及其写入 `delivery_message_id` 的 `coalesce` |
+| `packages/cli/src/inbox/controller.ts` | ack 只写状态、错误与内部最终 `outcome_message_id`；首次 `delivery_message_id` 由步骤的 `recordDelivery` 单独写入 |
 | 回执投影与事件 | `intent` 包装、`messageId` 字段 |
 | `packages/cli/src/session/message-v2.ts` | user 消息的 `queueAdmission` 字段 |
 | `packages/cli/src/server/routes/instance/session.ts` | abort 的 `queuedPolicy` |

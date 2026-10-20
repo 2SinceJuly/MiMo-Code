@@ -21,7 +21,8 @@ export class RestorePayloadError extends Error {}
 function normalizeSnapshot(snapshot: QueueSync.Snapshot): QueueSync.Snapshot {
   return {
     ...snapshot,
-    receipts: snapshot.receipts.toSorted((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    receipts: snapshot.receipts.map((row) => ({ ...row, outcome_message_id: row.outcome_message_id ?? null }))
+      .toSorted((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     lanes: snapshot.lanes.toSorted((a, b) => a.agent_id < b.agent_id ? -1 : a.agent_id > b.agent_id ? 1 : 0),
   }
 }

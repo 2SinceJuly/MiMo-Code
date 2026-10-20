@@ -350,6 +350,8 @@ describe("Inbox execution outcome ownership", () => {
         const owned = receipts(session.id)
         const aReceipt = owned.find(row => row.input_message_id === aID)!, bReceipt = owned.find(row => row.input_message_id === bID)!
         expect(aReceipt.run_id).toBe(bReceipt.run_id)
+        expect(aReceipt.outcome_message_id).toBe(live.info.id)
+        expect(bReceipt.outcome_message_id).toBe(live.info.id)
         expect(aReceipt.delivery_message_id).not.toBe(bReceipt.delivery_message_id)
         expect(owned.every(row => row.state === "settled" && row.consumed)).toBe(true)
         const next = yield* prompt.prompt({ sessionID: session.id, ...input(cID, "C independent request") })
@@ -405,6 +407,71 @@ describe("Inbox execution outcome ownership", () => {
         expect(stub.captures).toHaveLength(1)
         expect((yield* sessions.messages({ sessionID: session.id })).filter(message => message.info.role === "assistant")).toHaveLength(1)
         expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
+      })) })
+    } finally { await stub.stop() }
+  }, 30_000)
+
+  // [TP-RUN-R1C-08] A receipt fixes its original owner result. Explicit Resume
+  // creates another run on the same parent and must not replace old replay.
+  for (const result of ["quota", "success"] as const) for (const sameMillis of [false, true]) test(`old receipt keeps its original result after same-parent Resume (result=${result}, sameMillis=${sameMillis})`, async () => {
+    await using tmp = await tmpdir({ git: true })
+    const denied = () => ({ status: 403, lines: [JSON.stringify({ error: { message: "same quota rejection", type: "usage_not_included" } })] })
+    const stub = startScriptedLLMServer([denied(), result === "quota" ? denied() : { lines: textStopResponse("new resume success") }])
+    try {
+      await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
+      await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const prompt = yield* SessionPrompt.Service
+        const session = yield* sessions.create({ title: "Receipt across same parent resume" })
+        const id = MessageID.ascending()
+        const input = { sessionID: session.id, messageID: id, agent: "build", model, parts: [{ type: "text" as const, text: "original A" }] }
+        const clock = sameMillis ? spyOn(Date, "now").mockReturnValue(Date.now()) : undefined
+        try {
+          const original = yield* prompt.prompt(input)
+          expect(original.info).toMatchObject({ role: "assistant", parentID: id, error: { name: "APIError" } })
+          const fixedReceipt = receipts(session.id)
+          expect(fixedReceipt).toMatchObject([{ state: "settled", consumed: true, outcome: "assistant_error",
+            delivery_message_id: original.info.id, outcome_message_id: original.info.id }])
+          const resumed = yield* prompt.resume({ sessionID: session.id, assistantMessageID: original.info.id })
+          expect(resumed.info).toMatchObject({ role: "assistant", parentID: id })
+          if (result === "quota") expect(resumed.info).toMatchObject({ error: { name: "APIError" } })
+          else expect(resumed.parts.some(part => part.type === "text" && part.text === "new resume success")).toBe(true)
+          expect(resumed.info.id).not.toBe(original.info.id)
+          if (sameMillis) expect(Database.use(db => db.select({ created: MessageTable.time_created }).from(MessageTable).where(eq(MessageTable.id, resumed.info.id)).get())!.created).toBe(fixedReceipt[0].time_updated)
+          expect(receipts(session.id)).toEqual(fixedReceipt)
+          const late = yield* prompt.prompt(input).pipe(Effect.timeout("5 seconds"))
+          expect(stub.captures).toHaveLength(2)
+          expect(receipts(session.id)).toEqual(fixedReceipt)
+          expect(late.info.id).toBe(original.info.id)
+          expect(late.parts).toEqual(original.parts)
+        } finally { clock?.mockRestore() }
+      })) })
+    } finally { await stub.stop() }
+  }, 30_000)
+
+  // [TP-RUN-R1C-08] Missing outcome history is explicit failure. A newer
+  // same-parent answer cannot satisfy a reference to deleted original work.
+  test("old receipt whose outcome was deleted rejects replay after Resume", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const denied = () => ({ status: 403, lines: [JSON.stringify({ error: { message: "quota before deleted result", type: "usage_not_included" } })] })
+    const stub = startScriptedLLMServer([denied(), { lines: textStopResponse("new answer after resume") }])
+    try {
+      await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
+      await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const prompt = yield* SessionPrompt.Service
+        const session = yield* sessions.create({ title: "Deleted original receipt outcome" })
+        const id = MessageID.ascending()
+        const input = { sessionID: session.id, messageID: id, agent: "build", model, parts: [{ type: "text" as const, text: "original input" }] }
+        const original = yield* prompt.prompt(input)
+        const resumed = yield* prompt.resume({ sessionID: session.id, assistantMessageID: original.info.id })
+        expect(resumed.info.id).not.toBe(original.info.id)
+        yield* sessions.removeMessage({ sessionID: session.id, messageID: original.info.id })
+        const response = yield* Effect.promise(() => request(tmp.path, session.id, "prompt_async", input))
+        expect(response.status).toBe(404)
+        expect(yield* Effect.promise(() => response.json())).toMatchObject({ name: "NotFoundError" })
+        expect(stub.captures).toHaveLength(2)
+        expect(receipts(session.id)[0].outcome_message_id).toBe(original.info.id)
       })) })
     } finally { await stub.stop() }
   }, 30_000)

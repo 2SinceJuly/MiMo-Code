@@ -3712,6 +3712,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       state: "cancelled",
                       outcome: "never_ran",
                       error: sessionErrorText(info.error),
+                      outcome_message_id: info.id,
                       time_updated: now,
                     })
                     .where(eq(InboxTable.id, acceptedReceipt.id))
@@ -3779,55 +3780,49 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           lane: { sessionID: row.receiver_session_id, agentID: row.receiver_actor_id },
           state: row.state,
           epoch: row.epoch,
-          runId: row.run_id ?? undefined,
           inputMessageID: row.input_message_id!,
           deliveryMessageID: row.delivery_message_id ?? undefined,
           error: row.error ?? undefined,
+          outcomeMessageID: row.outcome_message_id ?? undefined,
+          updated: row.time_updated,
         }
       })
       if (receipt.state === "settled" || receipt.state === "cancelled" || receipt.state === "rejected") {
         yield* Deferred.complete(
           result,
           Effect.gen(function* () {
+            if (receipt.state === "cancelled" && !receipt.error && (input.agentID ?? "main") !== "main") {
+              return yield* Effect.interrupt
+            }
+            const exact = receipt.outcomeMessageID
+            if (exact) {
+              const message = MessageV2.get({ sessionID: input.sessionID, messageID: exact })
+              if (message.info.role !== "assistant" || (message.info.agentID ?? "main") !== (input.agentID ?? "main")) {
+                throw new NotFoundError({ message: `Receipt outcome belongs to another actor: ${receiptId}` })
+              }
+              return message
+            }
             if (receipt.state === "cancelled" && !receipt.error) {
-              if ((input.agentID ?? "main") !== "main") return yield* Effect.interrupt
               return MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID ?? receipt.inputMessageID })
             }
-            // A run can first consume A, then consume B and return B's final
-            // answer to both callers. Replay the same run's latest delivery,
-            // without borrowing a later independent C run's output.
-            const deliveries = yield* Effect.sync(() => Database.use(db => db.select({ id: InboxTable.delivery_message_id })
-              .from(InboxTable).where(and(
-                eq(InboxTable.receiver_session_id, input.sessionID), eq(InboxTable.receiver_actor_id, input.agentID ?? "main"),
-                eq(InboxTable.epoch, receipt.epoch),
-                receipt.runId === undefined ? eq(InboxTable.id, receipt.id) : eq(InboxTable.run_id, receipt.runId),
-              )).all()).flatMap(row => row.id ? [row.id] : []))
-            const order = deliveries.length > 0 ? yield* Effect.sync(() => Database.use(db => db.select({ id: MessageTable.id, created: MessageTable.time_created })
-              .from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), inArray(MessageTable.id, deliveries))).all())) : []
-            order.sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-            const deliveryID = order.at(-1)?.id ?? receipt.deliveryMessageID
-            const delivery = deliveryID ? MessageV2.get({ sessionID: input.sessionID, messageID: deliveryID }) : undefined
-            const claimedInputs = receipt.runId !== undefined
-              ? yield* Effect.sync(() => Database.use(db => db.select({ id: InboxTable.input_message_id }).from(InboxTable).where(and(
-                  eq(InboxTable.receiver_session_id, input.sessionID), eq(InboxTable.receiver_actor_id, input.agentID ?? "main"),
-                  eq(InboxTable.epoch, receipt.epoch), eq(InboxTable.run_id, receipt.runId!),
-                )).all()).flatMap(row => row.id ? [row.id] : [])) : []
-            const inputOrder = claimedInputs.length > 0 ? yield* Effect.sync(() => Database.use(db => db.select({ id: MessageTable.id, created: MessageTable.time_created })
-              .from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), inArray(MessageTable.id, claimedInputs))).all())) : []
-            inputOrder.sort((a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-            const history = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
-            // A preparation error can create an assistant before recordDelivery.
-            // Prefer this run's actual durable error over a prior step's delivery
-            // or a different input selected by the initialization fallback.
-            const failure = receipt.error && receipt.runId !== undefined ? history.findLast(message =>
-              message.info.role === "assistant" && claimedInputs.includes(message.info.parentID) &&
-              message.info.time.created >= receipt.runId! && sessionErrorText(message.info.error) === receipt.error,
-            ) : undefined
-            if (failure) return failure
-            const parentID = delivery?.info.role === "assistant" ? delivery.info.parentID : inputOrder.at(-1)?.id ?? receipt.inputMessageID
-            const own = history.findLast((message) => message.info.role === "assistant" && message.info.parentID === parentID)
-            if (!own) throw new NotFoundError({ message: `Receipt outcome message no longer exists: ${receiptId}` })
-            return own
+            // Existing records predate the final-outcome anchor. Their exact
+            // delivery can be returned only if it was already terminal at ACK.
+            // Never infer a final response from later same-parent messages.
+            if (!receipt.deliveryMessageID) throw new NotFoundError({ message: `Receipt has no durable outcome anchor: ${receiptId}` })
+            const message = MessageV2.get({ sessionID: input.sessionID, messageID: receipt.deliveryMessageID })
+            const saved = Database.use(db => db.select({ created: MessageTable.time_created }).from(MessageTable)
+              .where(and(eq(MessageTable.id, message.info.id), eq(MessageTable.session_id, input.sessionID),
+                eq(MessageTable.agent_id, input.agentID ?? "main"))).get())
+            if (!saved || saved.created > receipt.updated || message.info.role !== "assistant") {
+              throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
+            }
+            if (message.info.error !== undefined) return message
+            const parent = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" }))
+              .find(user => user.info.role === "user" && user.info.id === (message.info as MessageV2.Assistant).parentID)?.info
+            if (parent?.role === "user" && message.info.time.completed !== undefined && message.info.time.completed <= receipt.updated &&
+              message.info.finish !== "length" && classifyAssistantStep({ lastUser: parent, assistant: message.info,
+                parts: message.parts, phase: "existing-assistant" }).type === "final") return message
+            throw new NotFoundError({ message: `Receipt delivery is not its terminal outcome: ${receiptId}` })
           }),
         )
       }
@@ -3959,7 +3954,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             )
           promptReceiptId = receipt.id
           promptReceiptEpoch = receipt.epoch
-          promptResult = (yield* attachReceiptResult(input, receipt.id)).result
+          const attached = yield* attachReceiptResult(input, receipt.id)
+          promptResult = attached.result
+          if (attached.receipt.state === "settled" || attached.receipt.state === "cancelled" || attached.receipt.state === "rejected") {
+            const completed = yield* Deferred.await(attached.result)
+            return { message: completed, receiptId: receipt.id, receiptEpoch: receipt.epoch, executionGuard, result: promptResult, failed: true }
+          }
           yield* executionGuard.pipe(Effect.onExit((exit) => Exit.isFailure(exit)
             ? cancelAcceptedPrompt(input.sessionID, receipt.id).pipe(Effect.andThen(settleCancelledReceipts(input.sessionID)))
             : Effect.void))
@@ -4287,6 +4287,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const error = Exit.isFailure(exit) ? Cause.pretty(exit.cause) : finalError ? sessionErrorText(finalError) : undefined
         const acknowledged = yield* controller.ack(lane, owner.frontier, rows.map((row) => ({
           receiptId: row.id,
+          outcomeMessageID: Exit.isSuccess(exit) && exit.value.info.role === "assistant" ? exit.value.info.id : undefined,
           outcome: !row.consumed
                 ? ("never_ran" as const)
                 : Exit.isFailure(exit)
