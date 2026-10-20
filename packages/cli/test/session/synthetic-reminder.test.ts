@@ -95,18 +95,36 @@ describe("session memory directory reminder", () => {
     expect(sessionMemoryDirReminderTarget({ msgs: [first], sessionID, dir })).toBe(first)
   })
 
-  test("never rewrites a user message the model already answered", () => {
-    // Sessions predating the reminder: the first message was sent without it.
+  test("an answered first message moves the reminder to the newest unanswered user message", () => {
+    // Sessions predating the reminder and fork copies: the first message was sent without it.
     const legacy = [
       message("msg_1", sessionID, "user", [textPart("hello")]),
       message("msg_2", sessionID, "assistant", [], { parentID: "msg_1" }),
       message("msg_3", sessionID, "user", [textPart("next")]),
     ]
-    expect(sessionMemoryDirReminderTarget({ msgs: legacy, sessionID, dir })).toBeUndefined()
+    expect(sessionMemoryDirReminderTarget({ msgs: legacy, sessionID, dir })).toBe(legacy[2])
+    const answered = [...legacy, message("msg_4", sessionID, "assistant", [], { parentID: "msg_3" })]
+    expect(sessionMemoryDirReminderTarget({ msgs: answered, sessionID, dir })).toBeUndefined()
   })
 
-  test("after a compaction the boundary is targeted despite its summary reply", () => {
-    const boundary = message("msg_5", sessionID, "user", [])
+  test("a checkpoint rebuild boundary is targeted even though its text names the directory", () => {
+    const boundary = message("msg_5", sessionID, "user", [
+      {
+        ...textPart(""),
+        type: "checkpoint",
+        checkpointDir: "",
+        checkpointNumber: 0,
+        coveredUpTo: MessageID.make("msg_4"),
+      } as MessageV2.Part,
+      textPart(`# Session checkpoint\n\nFile: ${dir}/checkpoint.md`, true),
+    ])
+    expect(sessionMemoryDirReminderTarget({ msgs: [boundary], sessionID, dir })).toBe(boundary)
+  })
+
+  test("a compaction boundary is targeted despite its summary reply", () => {
+    const boundary = message("msg_5", sessionID, "user", [
+      { ...textPart(""), type: "compaction", auto: true } as MessageV2.Part,
+    ])
     const msgs = [
       boundary,
       message("msg_6", sessionID, "assistant", [textPart("summary")], { parentID: "msg_5", summary: true }),
@@ -115,48 +133,24 @@ describe("session memory directory reminder", () => {
     expect(sessionMemoryDirReminderTarget({ msgs, sessionID, dir })).toBe(boundary)
   })
 
-  test("skips when the window already shows the real directory", () => {
+  test("skips only when this session's reminder is already in the window", () => {
     const withReminder = [
       message("msg_1", sessionID, "user", [textPart("hi"), textPart(buildSessionMemoryDirReminderText(dir), true)]),
       message("msg_2", sessionID, "user", [textPart("again")]),
     ]
     expect(sessionMemoryDirReminderTarget({ msgs: withReminder, sessionID, dir })).toBeUndefined()
 
-    // Recall reminders persisted by older versions already name the directory.
-    const legacy = [
-      message("msg_1", sessionID, "user", [
-        textPart(`<system-reminder>\nThis session has memory at ${dir}/. Recall content\n</system-reminder>`, true),
-      ]),
-    ]
-    expect(sessionMemoryDirReminderTarget({ msgs: legacy, sessionID, dir })).toBeUndefined()
-
-    // A user typing the path is not a reminder.
-    const typed = message("msg_1", sessionID, "user", [textPart(`look at ${dir}/notes.md`)])
+    const typed = message("msg_1", sessionID, "user", [textPart(buildSessionMemoryDirReminderText(dir))])
     expect(sessionMemoryDirReminderTarget({ msgs: [typed], sessionID, dir })).toBe(typed)
   })
 
-  test("inherited history showing another session's directory targets the newest user message", () => {
-    // Fork copy: messages carry the child's sessionID but the parent's reminder.
+  test("a fork copy showing the parent's directory gets the child's reminder on the newest message", () => {
     const forked = [
       message("msg_1", sessionID, "user", [textPart("hi"), textPart(buildSessionMemoryDirReminderText(parentDir), true)]),
       message("msg_2", sessionID, "assistant", [], { parentID: "msg_1" }),
       message("msg_3", sessionID, "user", [textPart("fork question")]),
     ]
     expect(sessionMemoryDirReminderTarget({ msgs: forked, sessionID, dir })).toBe(forked[2])
-    expect(
-      sessionMemoryDirReminderTarget({
-        msgs: [...forked, message("msg_4", sessionID, "assistant", [], { parentID: "msg_3" })],
-        sessionID,
-        dir,
-      }),
-    ).toBeUndefined()
-
-    // contextFrom: the parent's messages lead the window under the parent's sessionID.
-    const inherited = [
-      message("msg_1", parentID, "user", [textPart("hi"), textPart(buildSessionMemoryDirReminderText(parentDir), true)]),
-      message("msg_9", sessionID, "user", [textPart("child task")]),
-    ]
-    expect(sessionMemoryDirReminderTarget({ msgs: inherited, sessionID, dir })).toBe(inherited[1])
   })
 
   test("contextFrom history without any reminder skips the parent's messages", () => {

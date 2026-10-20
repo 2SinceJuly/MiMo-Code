@@ -26,7 +26,7 @@ The system prompt deliberately carries no session id (PR #2258): it stays byte-i
 
 ### System prompt stays session-agnostic
 
-`buildMemoryInstructions(projectID, memoryRoot)` writes the session directory as `<memoryRoot>/sessions/<session_id>` (notes.md, checkpoint.md, tasks/<id>/progress.md) and adds one sentence: `<session_id>` stands for the current session, its real directory is given in a system reminder near the start of the conversation history, and tool calls use that real path. The block contains no real session id, so it remains byte-identical across sessions.
+`buildMemoryInstructions(projectID, memoryRoot)` writes the session directory as `<memoryRoot>/sessions/<session_id>` (notes.md, checkpoint.md, tasks/<id>/progress.md) and adds one sentence: `<session_id>` stands for the current session, its real directory is given in a system reminder in the conversation history, and tool calls use that real path. The block contains no real session id, so it remains byte-identical across sessions.
 
 ### Session memory directory reminder: once per context window
 
@@ -36,11 +36,11 @@ Exported from `session/prompt.ts`:
 - `buildSessionMemoryDirReminderText(dir)` →
   `<system-reminder>\nCurrent session memory directory: <dir>/ — the real path of \`<session_id>\` in the Memory system instructions.\n</system-reminder>`
 - `sessionMemoryDirReminderTarget({ msgs, sessionID, dir })` → the user message to receive the reminder, or `undefined`:
-  1. If any visible user message has a non-ignored synthetic text part containing `<dir>/`, return `undefined` (the window already shows the real directory; this also covers recall reminders persisted by older versions).
-  2. Else pick a candidate: if any visible user message has a synthetic part containing `SESSION_MEMORY_DIR_MARKER` (a forked or `contextFrom` history showing another session's directory), the last visible user message, so the inherited prefix is not rewritten; otherwise the first visible user message whose `info.sessionID === sessionID`.
-  3. Return `undefined` when the candidate already has an assistant reply (`parentID === candidate.id`, compaction summaries with `summary: true` excluded): it was sent without the reminder, and rewriting sent history would invalidate the cached prefix. Sessions that predate this reminder therefore receive it at their next boundary.
+  1. If any visible user message has a non-ignored synthetic text part containing `` `${SESSION_MEMORY_DIR_MARKER} ${dir}/` ``, return `undefined`. Only this session's own reminder counts; the rebuild boundary's `File: <dir>/checkpoint.md` line, legacy recall parts and a parent's reminder in copied fork history do not.
+  2. A user message is *answered* when an assistant message has `parentID === message.id` and is not a compaction summary (`summary: true`). An answered message was sent without the reminder, and rewriting sent history would invalidate the cached prefix.
+  3. Return the first visible user message whose `info.sessionID === sessionID` if it is unanswered; otherwise the last visible user message if it is unanswered; otherwise `undefined`.
 
-`msgs` is the runLoop history from `MessageV2.filterCompactedEffect`, which starts at the latest checkpoint/compaction boundary. The candidate is the session's first user message before any rebuild and the boundary user message after each rebuild — one copy per context window, attached before the first request that contains the target message.
+`msgs` is the runLoop history from `MessageV2.filterCompactedEffect`, which starts at the latest checkpoint/compaction boundary. The first own user message is the session's first message before any rebuild and the boundary user message after each rebuild (unanswered until the first request after the boundary), so normally the reminder sits at the head of each context window. Fork copies and sessions that predate the reminder have an answered first message; they receive it on the next new user message. `contextFrom` parent messages carry the parent's sessionID and are skipped. One copy per context window, attached before the first request that contains the target message.
 
 runLoop calls it each step where the recall block used to be, only when `actorRegistry.servesCheckpoint(sessionID, lastUser.agentID)` is true (the same actors that receive the `# Memory system` block), with `dir = metaDir(sessionID)`, and persists via `ensurePersistedUserSynthetic` using marker `` `${SESSION_MEMORY_DIR_MARKER} ${dir}/` ``.
 
@@ -58,5 +58,5 @@ runLoop calls it each step where the recall block used to be, only when `actorRe
 
 - [ ] T1: Delete the recall reminder code, `hasMemoryOrTasks`, and the recall-only tests; move retained marker/helper tests to `test/session/synthetic-reminder.test.ts` — acceptance: no references to the removed symbols remain under `packages/cli`; retained helper tests pass (covers: S2)
 - [ ] T2: `buildMemoryInstructions` uses `<session_id>` and the explanatory sentence — acceptance: llm-system-prompt test asserts `<session_id>` paths are present and neither `current_session_id` nor the real session id appears in the system prompt (covers: S2)
-- [ ] T3: Add the session memory directory reminder helpers and runLoop injection — acceptance: unit tests cover rules 1–3 (compaction boundary with summary reply, fork/contextFrom history, legacy recall text, already-answered candidate); integration test shows a multi-step turn persists exactly one reminder with the real path on the first user message, a second user turn adds none, and every request carries it; existing tests that pin exact user parts tolerate the reminder (covers: S2; depends: T1)
+- [ ] T3: Add the session memory directory reminder helpers and runLoop injection — acceptance: unit tests cover rules 1–3 (checkpoint rebuild boundary naming the directory, compaction boundary with summary reply, fork copy with the parent's reminder, answered first message, contextFrom history); integration test shows a multi-step turn persists exactly one reminder with the real path on the first user message, a second user turn adds none, and every request carries it; existing tests that pin exact user parts tolerate the reminder (covers: S2; depends: T1)
 - [ ] T4: Update `synthetic-parts-persistence-cache.md` to the current state — acceptance: no claim that a recall reminder is injected (covers: S2)

@@ -32,7 +32,7 @@ import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
 import { SessionProcessor } from "../../src/session/processor"
 import { SessionCompaction } from "../../src/session/compaction"
-import { SessionPrompt } from "../../src/session/prompt"
+import { SessionPrompt, SESSION_MEMORY_DIR_MARKER } from "../../src/session/prompt"
 import { defaultLayer as CronBridgeDefaultLayer } from "../../src/session/cron-bridge"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
@@ -63,6 +63,17 @@ import { Format } from "../../src/format"
 import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
+
+// A resumed trailing user is still unanswered, so the session memory directory
+// reminder may be persisted on it; every other user part must stay untouched.
+function usersWithoutDirReminder(messages: MessageV2.WithParts[]) {
+  return messages
+    .filter((m) => m.info.role === "user")
+    .map((m) => ({
+      ...m,
+      parts: m.parts.filter((p) => !(p.type === "text" && p.text.includes(SESSION_MEMORY_DIR_MARKER))),
+    }))
+}
 import { Inbox } from "../../src/inbox"
 import { Metrics } from "../../src/metrics"
 import { Database, eq, NotFoundError } from "../../src/storage"
@@ -5536,7 +5547,7 @@ describe("trailing-user resume integration", () => {
           expect(JSON.stringify(messages.at(-1)?.content)).toContain(opts.text)
           const after = yield* sessions.messages({ sessionID: chat.id, agentID: "main" })
           expect(after.filter((m) => m.info.role === "user").map((m) => m.info.id)).toEqual([user1.id, user2.id])
-          expect(after.filter((m) => m.info.role === "user")).toEqual(before.filter((m) => m.info.role === "user"))
+          expect(usersWithoutDirReminder(after)).toEqual(usersWithoutDirReminder(before))
           expect(after.flatMap((m) => m.parts).filter((p) => p.type === "tool")).toEqual(
             before.flatMap((m) => m.parts).filter((p) => p.type === "tool"),
           )
@@ -6451,7 +6462,7 @@ describe("trailing-user resume integration", () => {
         const resumed = after.filter((m) => m.info.role === "assistant" && m.info.parentID === user2.id)
         expect(resumed).toHaveLength(1)
         expect(resumed[0]!.parts.some((p) => p.type === "text" && p.text === "RESUMED_ONCE")).toBe(true)
-        expect(after.filter((m) => m.info.role === "user")).toEqual(before.filter((m) => m.info.role === "user"))
+        expect(usersWithoutDirReminder(after)).toEqual(usersWithoutDirReminder(before))
         expect(after.flatMap((m) => m.parts).filter((p) => p.type === "tool")).toEqual(
           before.flatMap((m) => m.parts).filter((p) => p.type === "tool"),
         )

@@ -87,9 +87,8 @@ describe("ToolRegistry.tools: actor tool subagent gating", () => {
     ),
   )
 
-  // Prompt surfaces name `actor` based on hasActorTool rather than resolving the
-  // schema, so the predicate must agree with the mask for every registered agent
-  // — otherwise a reminder points at a tool the model has no schema for.
+  // hasActorTool is the predicate ToolRegistry.available masks with, so it must
+  // agree with the resulting schema for every registered agent.
   it.live("hasActorTool agrees with the mask for every agent", () =>
     provideTmpdirInstance(
       () =>
