@@ -1172,7 +1172,6 @@ export type UserMessage = {
   system?: string
   systemMode?: "append" | "replace-agent"
   harness?: "auto" | "codex" | "default"
-  task_id?: string
   tools?: {
     [key: string]: boolean
   }
