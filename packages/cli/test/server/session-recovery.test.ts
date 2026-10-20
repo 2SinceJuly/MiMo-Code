@@ -24,7 +24,7 @@ import { startScriptedLLMServer, textStopResponse } from "../lib/scripted-llm-se
 void Log.init({ print: false })
 
 // A resumed user message has not been sent yet, so the runLoop may persist the
-// session memory directory reminder on it; every other part must stay untouched.
+// memory paths reminder on it; every other part must stay untouched.
 function withoutDirReminder(parts: MessageV2.Part[] | undefined) {
   return parts?.filter((part) => !(part.type === "text" && part.text.includes(SESSION_MEMORY_DIR_MARKER)))
 }

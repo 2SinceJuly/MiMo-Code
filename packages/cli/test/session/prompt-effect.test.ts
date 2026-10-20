@@ -64,7 +64,7 @@ import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 
-// The runLoop may persist the session memory directory reminder on a user
+// The runLoop may persist the memory paths reminder on a user
 // message; tests pinning user parts compare everything else.
 function usersWithoutDirReminder(messages: MessageV2.WithParts[]) {
   return messages

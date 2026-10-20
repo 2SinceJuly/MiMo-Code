@@ -66,14 +66,14 @@ write* subsections inside that block, not the block itself.
 **Implementation choke points:**
 
 1. `session/llm.ts` `buildSystemArray` — injection `if` is `servesCheckpoint`
-   only; `buildMemoryInstructions(projectID, memoryRoot)` internal
+   only; `buildMemoryInstructions(memoryRoot)` internal
    `checkpointEnabled` splits ckpt extras.
 2. `buildMemoryInstructions` / injection-site comments state always-on for
    main/peer; flag only narrows content.
 3. `tool/checkpoint-description.ts` — unchanged. Base `memory.txt` stays;
    only `memory.checkpoint.txt` extra stays gated.
-4. Session memory directory reminder (`session/prompt.ts`
-   `sessionMemoryDirReminderTarget`, see `session-memory-dir-reminder.md`) —
+4. Memory paths reminder (`session/prompt.ts`
+   `memoryPathsReminderTarget`, see `session-memory-dir-reminder.md`) —
    gated on `servesCheckpoint`, independent of the checkpoint flag.
 5. `memory.disable_write` remains the write switch (separate axis); this
    feature does not couple prompts to it.

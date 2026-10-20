@@ -14,10 +14,10 @@ User selected **Option A** (persist + marker dedupe). Mid-turn `p.text` wrap sta
 
 **What was built** — Unpersisted user-side synthetic injections in `session/prompt.ts` now follow the harness persist-once contract.
 
-1. **Session memory directory reminder** — `ensurePersistedUserSynthetic` + `SESSION_MEMORY_DIR_MARKER`, once per context window on the target chosen by `sessionMemoryDirReminderTarget` (see `session-memory-dir-reminder.md`).
+1. **Memory paths reminder** — `ensurePersistedUserSynthetic` + `SESSION_MEMORY_DIR_MARKER`, once per context window on the target chosen by `memoryPathsReminderTarget` (see `session-memory-dir-reminder.md`).
 2. **Loop-streak nudge** — same helper + `LOOP_STREAK_REMINDER_MARKER`.
 3. **Compose prompt** — persist + `COMPOSE_REMINDER_MARKER`; durable order via `MessageV2.promoteComposeProtocolFirst` on hydrate/parts load (shared by runLoop, fork capture, trajectory). In-memory `position: "head"` only aligns the same request before the first reload.
-4. Exported pure helpers: markers, `hasSyntheticReminder`, `buildSessionMemoryDirReminderText`, `sessionMemoryDirReminderTarget`, `buildLoopStreakReminderText`; `COMPOSE_REMINDER_MARKER` owned by `message-v2.ts`, re-exported from `prompt.ts` for tests.
+4. Exported pure helpers: markers, `hasSyntheticReminder`, `buildMemoryPathsReminderText`, `memoryPathsReminderTarget`, `buildLoopStreakReminderText`; `COMPOSE_REMINDER_MARKER` owned by `message-v2.ts`, re-exported from `prompt.ts` for tests.
 
 Multi-step runLoop reloads `msgs` from DB; marker hit skips re-push → last-user tail order stays stable. Compose head is a **load-time invariant** (not a per-request compensating projection), so checkpoint-writer `ForkContext` matches the parent request prefix.
 
@@ -91,7 +91,7 @@ Mid-turn `p.text` wrap (`step > 1`) remains request-only: intentional steering t
 
 | Site | Before | After |
 |------|--------|-------|
-| Session memory directory | — | persist once per context window + `SESSION_MEMORY_DIR_MARKER` |
+| Memory paths | — | persist once per context window + `SESSION_MEMORY_DIR_MARKER` |
 | Loop-streak | bare push; in-memory dedupe | persist + `LOOP_STREAK_REMINDER_MARKER` |
 | Compose | unpersisted unshift | persist + marker + hydrate promote to head |
 | Crop / insertReminders / recovery users | already persisted | unchanged |
@@ -102,14 +102,14 @@ Mid-turn `p.text` wrap (`step > 1`) remains request-only: intentional steering t
 | Question | Judgement |
 |----------|-----------|
 | Inserted into user utterance middle? | No — user-side tail (compose head) synthetic part. |
-| Belongs in system? | Policy stays in system; the **real session directory** stays user-side so the system prompt is byte-identical across sessions. Dynamic system content is a known prefix hazard. |
+| Belongs in system? | Policy stays in system; the **real project memory file and session directory** stay user-side so the system prompt is byte-identical across projects and sessions. Dynamic system content is a known prefix hazard. |
 | Bare push a position bug? | Design chose user-side channel; implementation skipped persistence half. Fixed under Option A. |
 | Trajectory side effects | Fixed for every site: DB and request now carry the same parts. |
 
 ## Tasks
 
 - [x] T1: Decide strategy — **Option A** (user: 方案A)
-- [x] T2: Align user-side synthetics (session memory directory / loop-streak / compose) to persist + marker — acceptance: no bare push; compose head stable after reload **on the runLoop request path** (covers: S2, S4)
+- [x] T2: Align user-side synthetics (memory paths / loop-streak / compose) to persist + marker — acceptance: no bare push; compose head stable after reload **on the runLoop request path** (covers: S2, S4)
 - [x] T3: Regression tests — `synthetic-reminder.test.ts` (markers/helpers) + `session-memory-dir-reminder-persist.test.ts` (exactly one reminder part across a multi-step turn and a later turn) (covers: S2; depends: T2)
 - [x] T4: Fork prefix parity — presence via persist; compose position via `promoteComposeProtocolFirst` on hydrate/parts load (covers: S2; depends: T2)
 - [x] T5: CR r1 — promoteComposeProtocolFirst + unit tests; no UI e2e (engine-only invariant); spec commits base `b4cc11cd` (covers: S2, S4)
@@ -121,7 +121,7 @@ Mid-turn `p.text` wrap (`step > 1`) remains request-only: intentional steering t
 | Markers + helpers | `packages/cli/src/session/prompt.ts` (`SESSION_MEMORY_DIR_…`, `LOOP_STREAK_…`, re-export `COMPOSE_…`) |
 | `COMPOSE_REMINDER_MARKER` + `promoteComposeProtocolFirst` | `packages/cli/src/session/message-v2.ts` |
 | `ensurePersistedUserSynthetic` | `packages/cli/src/session/prompt.ts` |
-| Compose / session memory directory / loop-streak inject | `prompt.ts` `insertReminders` + runLoop |
+| Compose / memory paths / loop-streak inject | `prompt.ts` `insertReminders` + runLoop |
 | Mid-turn wrap (unchanged, S3) | `prompt.ts` `step > 1` wrap |
 | Tests | `test/session/synthetic-reminder.test.ts`, `test/session/session-memory-dir-reminder-persist.test.ts` |
 | History non-promote boundary | `packages/cli/src/history/service.ts` comment near part assembly |

@@ -4,7 +4,7 @@ import { Effect, Layer } from "effect"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
 import { SessionPrompt, SESSION_MEMORY_DIR_MARKER } from "../../src/session/prompt"
-import { metaDir } from "../../src/session/checkpoint-paths"
+import { memoryPath, metaDir } from "../../src/session/checkpoint-paths"
 import { Log } from "../../src/util"
 import { tmpdir } from "../fixture/fixture"
 
@@ -57,7 +57,7 @@ function chatToolCall(name: string, args: object) {
 
 // runLoop reloads msgs every step; the reminder must be persisted once on the
 // window's first user message, so later steps and turns leave history alone.
-describe("session.prompt session memory directory reminder", () => {
+describe("session.prompt memory paths reminder", () => {
   test(
     "multi-step turn plus a second turn persist exactly one reminder on the first user message",
     async () => {
@@ -112,8 +112,13 @@ describe("session.prompt session memory directory reminder", () => {
                   (m) => m.parts.filter((p) => p.type === "text" && p.synthetic === true && p.text.includes(marker)).length,
                 )
                 expect(reminders).toEqual([1, 0])
+                const projectLine = `- Project memory: ${memoryPath(Instance.current.project.id)}`
+                expect(users[0].parts.some((p) => p.type === "text" && p.text.includes(projectLine))).toBe(true)
                 expect(bodies).toHaveLength(3)
-                for (const body of bodies) expect(body).toContain(JSON.stringify(marker).slice(1, -1))
+                for (const body of bodies) {
+                  expect(body).toContain(JSON.stringify(marker).slice(1, -1))
+                  expect(body).toContain(JSON.stringify(projectLine).slice(1, -1))
+                }
               }),
             ),
         })

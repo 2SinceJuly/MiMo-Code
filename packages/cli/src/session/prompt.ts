@@ -5,7 +5,7 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2, COMPOSE_REMINDER_MARKER } from "./message-v2"
-import { metaDir } from "./checkpoint-paths"
+import { memoryPath, metaDir } from "./checkpoint-paths"
 export { COMPOSE_REMINDER_MARKER }
 import {
   base64ByteSize,
@@ -216,24 +216,27 @@ export function hasSyntheticReminder(parts: readonly MessageV2.Part[], marker: s
   return parts.some((p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(marker))
 }
 
-export function buildSessionMemoryDirReminderText(dir: string): string {
+export function buildMemoryPathsReminderText(input: { projectMemoryFile: string; sessionDir: string }): string {
   return [
     "<system-reminder>",
-    `${SESSION_MEMORY_DIR_MARKER} ${dir}/ — the real path of \`<session_id>\` in the Memory system instructions.`,
+    "Memory paths for this conversation — the real values of `<project_id>` and `<session_id>` in the Memory system instructions:",
+    `- Project memory: ${input.projectMemoryFile}`,
+    `- ${SESSION_MEMORY_DIR_MARKER} ${input.sessionDir}/`,
     "</system-reminder>",
   ].join("\n")
 }
 
-// The system prompt keeps `<session_id>` literal so it stays byte-identical
-// across sessions; the real directory rides on one user message per context
-// window. `msgs` starts at the latest checkpoint/compaction boundary, so the
+// The system prompt keeps `<project_id>` / `<session_id>` literal so it stays
+// byte-identical across projects and sessions; the real paths ride on one user
+// message per context window, deduped by the session directory line.
+// `msgs` starts at the latest checkpoint/compaction boundary, so the
 // first own user message is the session's first message or the boundary.
 // A user message followed by any model reply (compaction summaries excluded)
 // was already sent without the reminder — batched or mid-turn inputs never
 // become a reply's parentID, so position is the test. Rewriting sent history
 // would invalidate the cached prefix, so copied fork history and sessions
 // predating the reminder get it on the newest own user message instead.
-export function sessionMemoryDirReminderTarget(input: {
+export function memoryPathsReminderTarget(input: {
   msgs: readonly MessageV2.WithParts[]
   sessionID: SessionID
   dir: string
@@ -5094,12 +5097,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (yield* actorRegistry.servesCheckpoint(sessionID, lastUser.agentID)) {
             const sessionMemoryDir = metaDir(sessionID)
-            const target = sessionMemoryDirReminderTarget({ msgs, sessionID, dir: sessionMemoryDir })
+            const target = memoryPathsReminderTarget({ msgs, sessionID, dir: sessionMemoryDir })
             if (target) {
               yield* ensurePersistedUserSynthetic({
                 message: target,
                 marker: `${SESSION_MEMORY_DIR_MARKER} ${sessionMemoryDir}/`,
-                text: buildSessionMemoryDirReminderText(sessionMemoryDir),
+                text: buildMemoryPathsReminderText({
+                  projectMemoryFile: memoryPath((yield* InstanceState.context).project.id),
+                  sessionDir: sessionMemoryDir,
+                }),
               })
             }
           }
