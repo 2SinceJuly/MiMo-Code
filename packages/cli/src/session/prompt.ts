@@ -3774,8 +3774,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const assistant = entranceMessages.at(-1)
           if (user?.info.role === "user" && user.info.id === preparedUserID && assistant?.info.role === "assistant"
             && assistant.info.parentID === preparedUserID && !preparedSeenAssistantIDs.has(assistant.info.id)
-            && assistant.info.time.completed !== undefined
-            && (assistant.info.error !== undefined || (assistant.info.finish !== "length"
+            && (assistant.info.error !== undefined || (assistant.info.time.completed !== undefined && assistant.info.finish !== "length"
               && classifyAssistantStep({ lastUser: user.info, assistant: assistant.info, parts: assistant.parts,
                 phase: "existing-assistant" }).type === "final"))) {
             const pendingInbox = Database.use(db => db.select({ id: InboxTable.id }).from(InboxTable)

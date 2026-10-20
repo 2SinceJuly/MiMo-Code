@@ -25,12 +25,28 @@ afterEach(async () => {
 const model = { providerID: ProviderID.make("alibaba"), modelID: ModelID.make("qwen-plus") }
 
 // [TP-RUN-R1C-08] An active owner may consume pending input before the pending wake starts.
-for (const outcome of ["success", "error", "length", "tool", "empty", "newer", "inbox", "goal", "reuse"] as const)
+for (const outcome of [
+  "success",
+  "error",
+  "provider-error",
+  "length",
+  "tool",
+  "empty",
+  "newer",
+  "inbox",
+  "goal",
+  "reuse",
+] as const)
   test(`consumed pending wake checks ${outcome} eligibility before starting another prelude`, async () => {
     await using tmp = await tmpdir({ git: true })
     const stub = startScriptedLLMServer([
       { lines: toolCallResponse({ id: "call-pending", name: "todowrite", args: JSON.stringify({ todos: [] }) }) },
-      { lines: textStopResponse("the current owner answered the pending question") },
+      outcome === "provider-error"
+        ? {
+            status: 403,
+            lines: [JSON.stringify({ error: { message: "provider denied the consumed input", type: "forbidden" } })],
+          }
+        : { lines: textStopResponse("the current owner answered the pending question") },
     ])
     try {
       await Bun.write(
@@ -171,13 +187,22 @@ for (const outcome of ["success", "error", "length", "tool", "empty", "newer", "
               release()
               const activeResult = yield* Fiber.join(a)
               const pendingResult = yield* Fiber.join(b)
-              expect(activeResult.info).toMatchObject({ parentID: bID, time: { completed: expect.any(Number) } })
+              expect(activeResult.info).toMatchObject({ parentID: bID })
+              if (activeResult.info.role !== "assistant") throw new Error("Expected the active owner's assistant")
+              if (outcome === "provider-error") expect(activeResult.info.time.completed).toBeUndefined()
+              else expect(activeResult.info.time.completed).toEqual(expect.any(Number))
               if (outcome === "error")
                 expect(activeResult.info.role === "assistant" && activeResult.info.error).toMatchObject({
                   data: { message: "the actual owner failed" },
                 })
+              else if (outcome === "provider-error")
+                expect(activeResult.info.role === "assistant" && activeResult.info.error).toMatchObject({
+                  name: "APIError",
+                  data: { statusCode: 403 },
+                })
               else expect(activeResult.info.role === "assistant" && activeResult.info.error).toBeUndefined()
-              if (outcome === "success" || outcome === "error") expect(pendingResult).toEqual(activeResult)
+              if (outcome === "success" || outcome === "error" || outcome === "provider-error")
+                expect(pendingResult).toEqual(activeResult)
               else
                 expect(pendingResult.info).toMatchObject({
                   parentID: bID,
