@@ -1268,10 +1268,26 @@ export const SessionRoutes = lazy(() =>
           SessionRunState.Service.use((svc) => svc.assertNotBusy(sessionID)),
         )
 
+        const body = c.req.valid("json")
+        const signal = c.req.raw.signal
+        const releaseInstance = Instance.claim(Instance.directory)
+        let started: { readonly result: Effect.Effect<MessageV2.WithParts>; readonly cancel: Effect.Effect<void> }
+        try {
+          const disconnected = Effect.callback<never>((resume) => {
+            const abort = () => resume(Effect.interrupt)
+            if (signal.aborted) { abort(); return }
+            signal.addEventListener("abort", abort, { once: true })
+            return Effect.sync(() => signal.removeEventListener("abort", abort))
+          })
+          started = await runRequest("SessionRoutes.prompt.admit", c,
+            SessionPrompt.Service.use(svc => svc.startPrompt({ ...body, sessionID })).pipe(Effect.raceFirst(disconnected)))
+        } catch (error) {
+          releaseInstance()
+          throw error
+        }
         c.status(200)
         c.header("Content-Type", "application/json")
         return stream(c, async (stream) => {
-          const body = c.req.valid("json")
           // If the HTTP client gives up (TUI exits, driver kills its `mimo run`
           // client on its own per-turn timeout, network drop), we have to drive
           // the server-side runner to Idle ourselves. Otherwise the prompt
@@ -1281,16 +1297,16 @@ export const SessionRoutes = lazy(() =>
           // result that will never arrive. SessionPrompt.cancel interrupts
           // the fiber, which lets the runner transition Running -> Idle
           // through Runner.cancel, freeing the next POST to start a fresh run.
-          const signal = c.req.raw.signal
           const onClientDisconnect = () => {
             void runRequest(
               "SessionRoutes.prompt.disconnect",
               c,
-              SessionPrompt.Service.use((svc) => svc.cancel(sessionID)),
+              SessionPrompt.Service.use((svc) => svc.cancel(sessionID)).pipe(Effect.andThen(started.cancel)),
             ).catch(() => {})
           }
           if (signal.aborted) {
             onClientDisconnect()
+            releaseInstance()
             return
           }
           signal.addEventListener("abort", onClientDisconnect, { once: true })
@@ -1312,7 +1328,7 @@ export const SessionRoutes = lazy(() =>
             const msg = await runRequest(
               "SessionRoutes.prompt",
               c,
-              SessionPrompt.Service.use((svc) => svc.prompt({ ...body, sessionID })),
+              started.result,
             )
             // Safety invariant: no await/yield between this write and the
             // clearInterval below (reached synchronously via finally) — else the
@@ -1320,9 +1336,14 @@ export const SessionRoutes = lazy(() =>
             // breaking the "JSON is the whole body" contract. Leading spaces are
             // JSON-insignificant; a trailing one would not be.
             void stream.write(JSON.stringify(msg))
+          } catch (error) {
+            log.error("prompt response failed", { sessionID, error })
+            // An unpersistable outcome (e.g. deleted parent) is a failed transport, not empty success JSON.
+            await stream.pipe(new ReadableStream<Uint8Array>({ start(controller) { controller.error(error) } }))
           } finally {
             clearInterval(heartbeat)
             signal.removeEventListener("abort", onClientDisconnect)
+            releaseInstance()
           }
         })
       },
@@ -1333,7 +1354,7 @@ export const SessionRoutes = lazy(() =>
       describeRoute({
         summary: "Send async message",
         description:
-          "Create and send a new message to a session asynchronously, starting the session if needed and returning immediately.",
+          "Prepare a new session message, then accept asynchronous execution after the input is saved.",
         operationId: "session.prompt_async",
         responses: {
           204: {
@@ -1353,19 +1374,18 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const body = c.req.valid("json")
         const releaseInstance = Instance.claim(Instance.directory)
-        void runRequest(
-          "SessionRoutes.prompt_async",
-          c,
-          SessionPrompt.Service.use((svc) => svc.prompt({ ...body, sessionID })),
-        ).catch((err) => {
-          log.error("prompt_async failed", { sessionID, error: err })
-          void Bus.publish(Session.Event.Error, {
-            sessionID,
-            error: new NamedError.Unknown({ message: err instanceof Error ? err.message : String(err) }).toObject(),
-          })
-        }).finally(releaseInstance)
-
-        return c.body(null, 204)
+        try {
+          const started = await runRequest("SessionRoutes.prompt_async.admit", c,
+            SessionPrompt.Service.use(svc => svc.startPrompt({ ...body, sessionID })))
+          void runRequest("SessionRoutes.prompt_async", c, started.result).catch((error) => {
+            // Durable execution failures are already owned by SessionPrompt; cancellation/deletion must not be re-labelled.
+            log.error("prompt_async failed", { sessionID, error })
+          }).finally(releaseInstance)
+          return c.body(null, 204)
+        } catch (error) {
+          releaseInstance()
+          throw error
+        }
       },
     )
     .post(

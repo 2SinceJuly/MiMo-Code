@@ -37,6 +37,7 @@ const makeCaptureLayer = (captured: { value: CapturedPrompt[] }) =>
     SessionPrompt.Service,
     SessionPrompt.Service.of({
       cancel: () => Effect.void,
+    startPrompt: () => Effect.die("HTTP prompt admission is not used by this fixture"),
       prompt: (input: PromptInput) =>
         Effect.sync(() => {
           captured.value.push(input)

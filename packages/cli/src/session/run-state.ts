@@ -26,6 +26,7 @@ export interface Interface {
     agentID: string,
     onInterrupt: Effect.Effect<MessageV2.WithParts>,
     work: Effect.Effect<MessageV2.WithParts>,
+    onRegistered?: () => void,
   ) => Effect.Effect<MessageV2.WithParts>
   /** [R003] Exclusive: run work only if idle; busy → BusyError. Never join. */
   readonly ensureExclusive: (
@@ -222,8 +223,9 @@ export const layer = Layer.effect(
       agentID: string,
       onInterrupt: Effect.Effect<MessageV2.WithParts>,
       work: Effect.Effect<MessageV2.WithParts>,
+      onRegistered?: () => void,
     ) {
-      return yield* (yield* runner(sessionID, agentID, onInterrupt)).ensureRunning(withOrphanSweep(sessionID, agentID, work))
+      return yield* (yield* runner(sessionID, agentID, onInterrupt)).ensureRunning(withOrphanSweep(sessionID, agentID, work), onRegistered)
     })
 
     const ensureExclusive = Effect.fn("SessionRunState.ensureExclusive")(function* (

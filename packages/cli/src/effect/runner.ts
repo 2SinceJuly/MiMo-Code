@@ -3,7 +3,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Schema, Scope, SynchronizedRef } 
 export interface Runner<A, E = never, B = never> {
   readonly state: State<A, E>
   readonly busy: boolean
-  readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
+  readonly ensureRunning: (work: Effect.Effect<A, E>, onRegistered?: () => void) => Effect.Effect<A, E>
   /** [R003] Start work only if idle; busy → fail B. Never join an existing run. */
   readonly ensureExclusive: (work: Effect.Effect<A, E>) => Effect.Effect<A, E | B>
   readonly start: (work: Effect.Effect<A, E>) => Effect.Effect<void, B>
@@ -170,7 +170,8 @@ export const make = <A, E = never, B = never>(
 
   const stopShell = (shell: ShellHandle<A, E>) => Fiber.interrupt(shell.fiber)
 
-  const ensureRunning = (work: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+  // The nonthrowing callback records ownership only after work is registered under the state lock.
+  const ensureRunning = (work: Effect.Effect<A, E>, onRegistered?: () => void): Effect.Effect<A, E> =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -191,6 +192,7 @@ export const make = <A, E = never, B = never>(
               )
               const done = yield* Deferred.make<A, E | Cancelled>()
               const run = yield* startRun(work, done)
+              onRegistered?.()
               return [Deferred.await(done), { _tag: "Running", run }] as const
             }
             if (opts?.onReentryWarn)
@@ -199,9 +201,13 @@ export const make = <A, E = never, B = never>(
             // it instead of Idle, closing the lost-wake window between the loop's
             // last message check and completion. One pending slot — prompt work
             // reloads the full table, so later attaches share the same done.
-            if (st.run.pending) return [Deferred.await(st.run.pending.done), st] as const
+            if (st.run.pending) {
+              onRegistered?.()
+              return [Deferred.await(st.run.pending.done), st] as const
+            }
             const pendingDone = yield* Deferred.make<A, E | Cancelled>()
             const run: RunHandle<A, E> = { ...st.run, pending: { work, done: pendingDone } }
+            onRegistered?.()
             return [Deferred.await(pendingDone), { _tag: "Running", run }] as const
           }
           case "ShellThenRun": {
@@ -210,12 +216,14 @@ export const make = <A, E = never, B = never>(
               yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.ignore)
               const done = yield* Deferred.make<A, E | Cancelled>()
               const run = yield* startRun(work, done)
+              onRegistered?.()
               return [Deferred.await(done), { _tag: "Running", run }] as const
             }
             if (opts?.onReentryWarn)
               yield* opts.onReentryWarn({ label: opts.label ?? "(unlabeled)", existingRunId: st.run.id })
             // Live shell: replace pending work so finishShell starts the latest
             // (work reloads all messages; later attach subsumes earlier).
+            onRegistered?.()
             return [
               Deferred.await(st.run.done),
               { _tag: "ShellThenRun", shell: st.shell, run: { ...st.run, work } },
@@ -227,11 +235,13 @@ export const make = <A, E = never, B = never>(
               done: yield* Deferred.make<A, E | Cancelled>(),
               work,
             } satisfies PendingHandle<A, E>
+            onRegistered?.()
             return [Deferred.await(run.done), { _tag: "ShellThenRun", shell: st.shell, run }] as const
           }
           case "Idle": {
             const done = yield* Deferred.make<A, E | Cancelled>()
             const run = yield* startRun(work, done)
+            onRegistered?.()
             return [Deferred.await(done), { _tag: "Running", run }] as const
           }
           case "Cancelling": {
@@ -241,7 +251,7 @@ export const make = <A, E = never, B = never>(
             return [
               Fiber.await(fiber).pipe(
                 Effect.ignore,
-                Effect.andThen(Effect.suspend(() => ensureRunning(work))),
+                Effect.andThen(Effect.suspend(() => ensureRunning(work, onRegistered))),
               ),
               st,
             ] as const
