@@ -1301,6 +1301,9 @@ export const SessionRoutes = lazy(() =>
 
         c.status(200)
         c.header("Content-Type", "application/json")
+        // This is a streaming response. Node's adapter otherwise pre-reads a
+        // native Response and can convert an early read error into empty 200.
+        c.header("Transfer-Encoding", "chunked")
         return stream(c, async (stream) => {
           const body = c.req.valid("json")
           // Disconnect only detaches this stream. Admitted work lives in the

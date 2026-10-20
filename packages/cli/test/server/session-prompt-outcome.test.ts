@@ -377,3 +377,29 @@ for (const remove of ["parent", "session"] as const) {
     } finally { stub.stop() }
   })
 }
+
+// [TP-RUN-R1C-07] Native Node Response pre-reading must not turn an errored
+// message stream into HTTP 200 with Content-Length:0. Test the real HTTP adapter,
+// Hono stream and native fetch in Node; app.request() alone cannot catch this.
+test("Node transports early and late message stream errors without empty success", async () => {
+  const source = await Bun.file(new URL("../../src/server/routes/instance/session.ts", import.meta.url)).text()
+  const declaredChunked = /c\.header\("Transfer-Encoding", "chunked"\)/.test(source)
+  const child = Bun.spawn(["node", new URL("./node-stream-transport.fixture.mjs", import.meta.url).pathname,
+    declaredChunked ? "chunked" : "unspecified"], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" })
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  expect(code, stderr).toBe(0)
+  const outcomes = JSON.parse(stdout) as Array<{ phase: string; status?: number; body?: string;
+    readError?: string; fetchError?: string; headers?: Record<string, string> }>
+  expect(outcomes.map(outcome => outcome.phase)).toEqual(["early", "late"])
+  for (const outcome of outcomes) {
+    expect(outcome.body).toBeUndefined()
+    expect(outcome.readError ?? outcome.fetchError).toBe("TypeError")
+    if (outcome.status !== undefined) {
+      expect(outcome.status).toBe(200)
+      expect(outcome.headers?.["transfer-encoding"]).toBe("chunked")
+      expect(outcome.headers?.["content-length"]).toBeUndefined()
+    }
+  }
+}, 10_000)

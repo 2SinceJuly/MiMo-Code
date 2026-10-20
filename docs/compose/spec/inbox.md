@@ -107,6 +107,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 - `runLoop` 仅结算业务 body 的失败；body 成功后的生命周期/清理失败不能覆盖成功输出。Resume 不写 inbox，其准入后的 beforeWork/裁剪失败由 Resume owner 结算；进入 loop 后由 loop 结算，避免重复错误。
 - session 删除、ownership 移交或回执 ACK 写入失败时，执行者仍必须完成本地等待者的 Deferred（明确失败）并释放 lease；回执持久化失败不能使客户端无限等待。
 - HTTP 保持 202/receipt 与 message stream 契约。同步 message 已开始 200 后发生无法持久保存的失败，明确使响应正文读取失败；异步执行外层记录异常，不再次发布无 parent 的错误事件。
+- 同步 `message` 的 Hono 流显式声明 `Transfer-Encoding: chunked`。Node HTTP/1.1 adapter 对原生 Response 不再探测预读并把首读错误当作空正文完成；由持续 reader 读取，错误销毁响应传输。该头只声明本段流传输，不是业务回执字段：Bun 可按实际输出归一传输编码；代理可在自身连接上重建 framing，客户端应以请求/正文读取明确失败识别未交付结果，不依赖响应保留该头或固定 Content-Length。当前 Node adapter 使用 HTTP/1.1，直接 HTTP/2 adapter 不属于此实现边界。
 
 ## 受理（accept）
 
@@ -151,7 +152,7 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 
 | 端点 | 契约 |
 |---|---|
-| `POST /session/:id/prompt_async` | **202** + `{ receiptId }` |
+| `POST /session/:id/prompt_async` | **202** + `{ receiptId }`；无执行输入（`noReply` 或无有效内容）为 **204**，不写 Inbox 回执 |
 | `POST /session/:id/message` | 受理。busy 不 409。认领开始且客户端仍连接 → **200 stream**；否则 **202** + `{ receiptId }` 并结束响应 |
 | `GET /session/:id/receipt/:receiptId` | 返回 `PublicReceipt` 投影 |
 | `POST /session/:id/abort` | 响应 `{ epoch }` |
@@ -160,6 +161,8 @@ claimed  → cancelled           (停止 / epoch；consumed 区分 interrupted �
 `PublicReceipt` 字段：`id`、`lane`、`state`、`type`、`senderSessionID?`、`senderActorID?`、`epoch`、`consumed`、`outcome?`、`inputMessageID`、`deliveryMessageID?`、`error?`。内部记账（`runId`、`claimFrontier`、`idempotencyKey`、`time`）不进外部契约。
 
 每条记录只承载一条输入，字段直接平铺在回执上，没有 `intent` 包装。resume 与 shell 是独占入口（C-03），不写 inbox 记录，因此不存在 resume、shell、wake 类型。
+
+同步 `message` 流成功时返回 JSON 结果；已开始 200 后、无法持久化的失败使正文读取拒绝，不能以空正文结束成功响应。busy 路径未产生回执时为 204；空闲 `noReply` 路径返回所保存的 user 消息，不启动模型。响应断连只 detach 此请求，已受理输入的执行归 Controller/Runner。
 
 记录只引用两条消息：
 
