@@ -182,13 +182,16 @@ import {
   mcpToolCatalogBudget,
   MCP_DEFERRED_TOOLS_METADATA_KEY,
   MCP_TOOL_SEARCH_ID,
-  MCP_TOOL_SEARCH_MAX_LOADED,
+  MCP_TOOL_USE_DESCRIPTION,
+  MCP_TOOL_USE_ID,
+  McpToolUseParameters,
+  checkMcpToolArguments,
   neutralizeHarnessTags,
   parseMcpToolSearchMode,
   renderDeferredMcpToolsReminder,
+  renderMcpToolFunctions,
   shouldDeferMcpTools,
   type McpToolSearchEntry,
-  type McpToolSearchMetadata,
 } from "@/tool/mcp-tool-search"
 import { mcpToolSearchMode, usesGPTToolset } from "@/tool/gpt"
 import { GPT_TOP_LEVEL_TOOLS } from "@/tool/tool-script-ref"
@@ -1754,7 +1757,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const gate = input.processor.toolGate
       const tools: Record<string, AITool> = {}
       const activeTools = new Set<string>()
-      const loadedMcpTools = new Set<string>()
+      // Model-facing executors for deferred MCP tools, keyed by catalog name;
+      // `mcp_tool_use` dispatches through these.
+      const mcpDispatch = new Map<string, (args: unknown, opts: ToolExecutionOptions) => Promise<unknown>>()
       const execMcpTools: Record<string, AITool> = {}
       const mcpSearchEntries: McpToolSearchEntry[] = []
       const mcpCatalog = { current: createMcpToolSearchCatalog([]) }
@@ -1776,6 +1781,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // compares their size to the context window); read lazily by the MCP
       // execute wrappers below, which only run after this pass finishes.
       let deferMcpTools = false
+      let searchExposed = false
       const run = yield* runner()
       const promptOps = yield* ops()
 
@@ -2044,17 +2050,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           !disabledMcpTools.has(key) &&
           (!agentToolAllowlist || agentToolAllowlist.has(key))
         const searchable = available && (!whitelist || whitelist.has(key))
-        if (searchable) {
-          mcpSearchEntries.push({
-            name: key,
-            description: item.description ?? "",
-            parameters: transformed as unknown as JSONObject,
-          })
-        }
+        const entry: McpToolSearchEntry | undefined = searchable
+          ? { name: key, description: item.description ?? "", parameters: transformed as unknown as JSONObject }
+          : undefined
+        if (entry) mcpSearchEntries.push(entry)
+        // `batch` is the model-facing tool part this call executes under: the MCP
+        // tool itself for a direct call, `mcp_tool_use` for a dispatched one, and
+        // undefined for exec guest calls (script-controlled concurrency).
         const executeMcp = (
           args: Parameters<typeof execute>[0],
           opts: Parameters<typeof execute>[1],
-          modelFacing: boolean,
+          batch: string | undefined,
         ) => {
           return run.promise(
             Effect.gen(function* () {
@@ -2071,16 +2077,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   new RecoverableError(`The MCP tool "${key}" is unavailable for this request.`),
                 )
               }
-              if (modelFacing && deferMcpTools && !loadedMcpTools.has(key)) {
-                return yield* Effect.fail(
-                  new RecoverableError(
-                    `The MCP tool "${key}" is not loaded for this request. Call ${MCP_TOOL_SEARCH_ID} first, then retry on the next step.`,
-                  ),
-                )
-              }
               if (whitelist && !whitelist.has(key)) {
                 const rejection = rejectionFor(key)
-                if (modelFacing) gate.fail(key)
+                if (batch) gate.fail(batch)
                 const output = {
                   title: rejection.title,
                   metadata: rejection.metadata,
@@ -2096,6 +2095,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 yield* input.processor.completeToolCall(opts.toolCallId, output)
                 return output
               }
+              if (batch === key && deferMcpTools) {
+                return yield* Effect.fail(
+                  new RecoverableError(
+                    `The MCP tool "${key}" is deferred and cannot be called directly.` +
+                      (searchExposed
+                        ? ` Call it through ${MCP_TOOL_USE_ID} with {"name": "${key}", "arguments": {...}}.`
+                        : useGPTTools
+                          ? ` Call it from exec as tools["${key}"](...).`
+                          : ""),
+                  ),
+                )
+              }
               const mcpBeforeOutput: { args: any; cancel?: boolean; cancelReason?: string } = { args }
               yield* plugin.trigger(
                 "tool.execute.before",
@@ -2103,7 +2114,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 mcpBeforeOutput,
               )
               if (mcpBeforeOutput.cancel) {
-                if (modelFacing) gate.fail(key)
+                if (batch) gate.fail(batch)
                 const cancelResult = {
                   content: [{ type: "text" as const, text: mcpBeforeOutput.cancelReason || "Tool call cancelled by hook" }],
                 }
@@ -2118,6 +2129,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   })
                   .pipe(Effect.ignore)
                 return cancelResult
+              }
+              if (batch === MCP_TOOL_USE_ID && entry) {
+                const problem = checkMcpToolArguments(entry, mcpBeforeOutput.args)
+                if (problem) {
+                  return yield* Effect.fail(
+                    new RecoverableError(`${problem}. The tool's schema:\n${renderMcpToolFunctions([entry])}`),
+                  )
+                }
               }
               yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
               const normalizeResult = (result: Awaited<ReturnType<NonNullable<typeof execute>>>) => Effect.gen(function* () {
@@ -2215,50 +2234,78 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }).pipe((body) =>
               // Only model-facing calls join this batch. Exec guest calls keep
               // the same execution pipeline with script-controlled concurrency.
-              modelFacing ? input.processor.executeTool(key, opts.toolCallId, body, { signal: opts.abortSignal }) : body,
+              batch ? input.processor.executeTool(batch, opts.toolCallId, body, { signal: opts.abortSignal }) : body,
             ),
           )
         }
         input.processor.registerTool(key)
-        item.execute = (args, opts) => executeMcp(args, opts, true)
+        item.execute = (args, opts) => executeMcp(args, opts, key)
         tools[key] = item
+        if (entry) {
+          mcpDispatch.set(key, (args, opts) => executeMcp(args as Parameters<typeof execute>[0], opts, MCP_TOOL_USE_ID))
+        }
         if (searchable && input.model.capabilities.toolcall) {
           execMcpTools[key] = {
             ...item,
-            execute: (args, opts) => executeMcp(args, opts, false),
+            execute: (args, opts) => executeMcp(args, opts, undefined),
           }
         }
       }
       mcpCatalog.current = createMcpToolSearchCatalog(
         mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
       )
-      deferMcpTools = shouldDeferMcpTools(searchMode, mcpCatalog.current.entries, input.model.limit.context)
-      const searchExposed =
+      // Evidence the conversation already ran in deferred mode: a deferred-tools
+      // announcement or a search/use call. Compaction drops it, which is fine —
+      // compaction rewrites the prefix anyway.
+      const deferredEarlier = input.messages.some((message) =>
+        message.parts.some(
+          (part) =>
+            (part.type === "tool" && (part.tool === MCP_TOOL_SEARCH_ID || part.tool === MCP_TOOL_USE_ID)) ||
+            (part.type === "text" && !!part.synthetic && !!part.metadata?.[MCP_DEFERRED_TOOLS_METADATA_KEY]),
+        ),
+      )
+      deferMcpTools = shouldDeferMcpTools(
+        searchMode,
+        mcpCatalog.current.entries,
+        input.model.limit.context,
+        deferredEarlier,
+      )
+      searchExposed =
         deferMcpTools && !useGPTTools && input.model.capabilities.toolcall && !!tools[MCP_TOOL_SEARCH_ID]
-      // A tool fetched by mcp_tool_search stays loaded for the rest of the
-      // conversation (newest searches win the cap) as long as it is still
-      // request-authorized; compaction drops older searches with their messages.
-      const searchable = new Set(mcpCatalog.current.entries.map((entry) => entry.name))
-      if (deferMcpTools) {
-        search: for (const message of input.messages.toReversed()) {
-          if (message.info.role !== "assistant") continue
-          for (const part of message.parts.toReversed()) {
-            if (part.type !== "tool" || part.tool !== MCP_TOOL_SEARCH_ID || part.state.status !== "completed") continue
-            const metadata = part.state.metadata as Partial<McpToolSearchMetadata>
-            if (!Array.isArray(metadata.matchedTools)) continue
-            for (const name of metadata.matchedTools) {
-              if (typeof name !== "string" || !searchable.has(name)) continue
-              loadedMcpTools.add(name)
-              if (loadedMcpTools.size >= MCP_TOOL_SEARCH_MAX_LOADED) break search
-            }
-          }
-        }
+      // Deferred MCP tools never join the provider-facing tool list: the model
+      // fetches a schema with mcp_tool_search and calls the tool through the fixed
+      // mcp_tool_use dispatcher, so tool definitions (the head of the prompt-cache
+      // prefix) stay byte-stable however many tools get searched.
+      if (searchExposed) {
+        input.processor.registerTool(MCP_TOOL_USE_ID)
+        tools[MCP_TOOL_USE_ID] = tool({
+          description: MCP_TOOL_USE_DESCRIPTION,
+          inputSchema: jsonSchema(ProviderTransform.schema(input.model, z.toJSONSchema(McpToolUseParameters))),
+          execute(args: z.infer<typeof McpToolUseParameters>, options) {
+            const dispatch = mcpDispatch.get(args.name)
+            if (dispatch) return dispatch(args.arguments ?? {}, options)
+            return run.promise(
+              input.processor.executeTool(
+                MCP_TOOL_USE_ID,
+                options.toolCallId,
+                Effect.fail(
+                  new RecoverableError(
+                    `"${args.name}" is not an available deferred MCP tool for this request. Use ${MCP_TOOL_SEARCH_ID} to find the exact tool name.`,
+                  ),
+                ),
+                { signal: options.abortSignal },
+              ),
+            )
+          },
+        })
       }
 
       if (!useGPTTools && input.model.capabilities.toolcall) {
-        if (searchExposed) activeTools.add(MCP_TOOL_SEARCH_ID)
-        const direct = deferMcpTools ? loadedMcpTools : searchable
-        direct.forEach((name) => activeTools.add(name))
+        if (searchExposed) {
+          activeTools.add(MCP_TOOL_SEARCH_ID)
+          activeTools.add(MCP_TOOL_USE_ID)
+        }
+        if (!deferMcpTools) mcpCatalog.current.entries.forEach((entry) => activeTools.add(entry.name))
       }
 
       // MCP Tool Search keeps full schemas out of the outer model tool list;
@@ -2275,6 +2322,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // What the model must be told is reachable through mcp_tool_search;
         // empty when search is not exposed, so earlier announcements get retracted.
         deferredMcpTools: searchExposed ? mcpCatalog.current.entries : [],
+        // auto mode only: an empty first announcement records that the conversation
+        // runs deferred, which keeps it deferred once tools arrive under the threshold.
+        recordDeferredMode: searchExposed && searchMode.type === "auto",
       }
     })
 
@@ -2286,22 +2336,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const announceDeferredMcpTools = Effect.fn("SessionPrompt.announceDeferredMcpTools")(function* (input: {
       messages: MessageV2.WithParts[]
       entries: McpToolSearchEntry[]
+      recordDeferredMode: boolean
       model: Provider.Model
     }) {
-      const userMessage = input.messages.findLast((message) => message.info.role === "user")
-      if (!userMessage) return
-      const announced = announcedDeferredMcpTools(
-        input.messages.flatMap((message) =>
-          message.info.role !== "user"
-            ? []
-            : message.parts.flatMap((part) =>
-                part.type === "text" && part.synthetic && part.metadata
-                  ? [part.metadata[MCP_DEFERRED_TOOLS_METADATA_KEY]]
-                  : [],
-              ),
-        ),
+      const userIndex = input.messages.findLastIndex((message) => message.info.role === "user")
+      if (userIndex < 0) return
+      // Only while the user message is still the tail of the conversation. Mid-turn
+      // it precedes this turn's assistant steps, and appending would rewrite the
+      // cached history; such changes wait for the next turn (mcp_tool_search
+      // always searches the live catalog meanwhile).
+      if (input.messages.slice(userIndex + 1).some((message) => message.info.role === "assistant")) return
+      const userMessage = input.messages[userIndex]
+      const deltas = input.messages.flatMap((message) =>
+        message.info.role !== "user"
+          ? []
+          : message.parts.flatMap((part) =>
+              part.type === "text" && part.synthetic && part.metadata?.[MCP_DEFERRED_TOOLS_METADATA_KEY]
+                ? [part.metadata[MCP_DEFERRED_TOOLS_METADATA_KEY]]
+                : [],
+            ),
       )
-      const delta = deferredMcpToolsDelta(announced, input.entries)
+      const delta =
+        deferredMcpToolsDelta(announcedDeferredMcpTools(deltas), input.entries) ??
+        (input.recordDeferredMode && deltas.length === 0 ? { added: [], removed: [] } : undefined)
       if (!delta) return
       const cfg = yield* config.get()
       const budget = mcpToolCatalogBudget({ usable: usable({ cfg, model: input.model }), context: input.model.limit.context })
@@ -5436,7 +5493,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 })
                 const tools = resolvedTools.tools
                 const activeTools = resolvedTools.activeTools
-                yield* announceDeferredMcpTools({ messages: msgs, entries: resolvedTools.deferredMcpTools, model })
+                yield* announceDeferredMcpTools({
+                  messages: msgs,
+                  entries: resolvedTools.deferredMcpTools,
+                  recordDeferredMode: resolvedTools.recordDeferredMode,
+                  model,
+                })
 
                 if (lastUser.format?.type === "json_schema") {
                   const outputTool = createStructuredOutputTool({

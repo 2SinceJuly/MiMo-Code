@@ -2707,18 +2707,18 @@ for (const isError of [false, true]) {
         yield* prompt.prompt({
           sessionID: session.id,
           agent: "build",
-          model: mcpRef,
+          model: ref,
           noReply: true,
           parts: [{ type: "text", text: "Capture screenshots" }],
         })
         yield* llm.tool("mcp_tool_search", { query: "screenshots" })
-        yield* llm.tool("mcp_screenshots", {})
+        yield* llm.tool("mcp_tool_use", { name: "mcp_screenshots" })
         yield* llm.text("Screenshots received")
         yield* prompt.loop({ sessionID: session.id })
 
         const part = (yield* MessageV2.filterCompactedEffect(session.id))
           .flatMap((message) => message.parts)
-          .find((part) => part.type === "tool" && part.tool === "mcp_screenshots")
+          .find((part) => part.type === "tool" && part.tool === "mcp_tool_use")
         if (part?.type !== "tool") throw new Error("Expected screenshot tool result")
         expect(part.state.status).toBe(isError ? "error" : "completed")
         const assertImages = (request: Record<string, unknown>) => {
@@ -2839,12 +2839,12 @@ mcpIt.live("MCP isError becomes a tool error without losing standard result fiel
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
-        model: mcpRef,
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "send the message" }],
       })
       yield* llm.tool("mcp_tool_search", { query: "execution error" })
-      yield* llm.tool("mcp_result", {})
+      yield* llm.tool("mcp_tool_use", { name: "mcp_result", arguments: {} })
       yield* llm.text("I saw that sending failed")
 
       const result = yield* prompt.loop({ sessionID: session.id })
@@ -2855,7 +2855,7 @@ mcpIt.live("MCP isError becomes a tool error without losing standard result fiel
         .flatMap((message) => message.parts)
         .find(
           (part): part is ErrorToolPart =>
-            part.type === "tool" && part.tool === "mcp_result" && part.state.status === "error",
+            part.type === "tool" && part.tool === "mcp_tool_use" && part.state.status === "error",
         )
       expect(tool).toBeDefined()
       if (!tool) return
@@ -2900,7 +2900,7 @@ mcpIt.live("MCP isError becomes a tool error without losing standard result fiel
       expect(followup).toContain("Message was not sent")
       expect(followup).toContain("Resource diagnostic")
       expect(followup).toContain("composer rejected the request")
-      expect(followup).toContain('Tool \\"mcp_result\\" call')
+      expect(followup).toContain('Tool \\"mcp_tool_use\\" call')
       expect(followup).toContain("failed:")
       expect(followup).toContain("diagnostic.bin")
       expect(followup).not.toContain("mcp://diagnostic.bin")
@@ -2946,12 +2946,12 @@ mcpIt.live("MCP structuredContent is persisted and reaches the model alongside t
       yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
-        model: mcpRef,
+        model: ref,
         noReply: true,
         parts: [{ type: "text", text: "inspect the window" }],
       })
       yield* llm.tool("mcp_tool_search", { query: "structured success" })
-      yield* llm.tool("mcp_success", {})
+      yield* llm.tool("mcp_tool_use", { name: "mcp_success", arguments: {} })
       yield* llm.text("The window changed")
 
       yield* prompt.loop({ sessionID: session.id })
@@ -2962,7 +2962,7 @@ mcpIt.live("MCP structuredContent is persisted and reaches the model alongside t
         .flatMap((message) => message.parts)
         .find(
           (part): part is CompletedToolPart =>
-            part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
+            part.type === "tool" && part.tool === "mcp_tool_use" && part.state.status === "completed",
         )
       expect(tool).toBeDefined()
       if (!tool) return
@@ -2980,8 +2980,8 @@ mcpIt.live("MCP structuredContent is persisted and reaches the model alongside t
       const requests = yield* llm.inputs
       const initialTools = requests[0].tools as Array<Record<string, unknown>>
       const loadedTools = requests[1].tools as Array<Record<string, unknown>>
-      expect(initialTools.map(wireToolName)).toEqual(["exec"])
-      expect(loadedTools.map(wireToolName)).toEqual(["exec"])
+      expect(initialTools.map(wireToolName)).toContain("mcp_tool_use")
+      expect(JSON.stringify(loadedTools)).toBe(JSON.stringify(initialTools))
       expect(JSON.stringify(initialTools)).not.toContain("private_error_code")
       expect(JSON.stringify(initialTools)).not.toContain("Secret nested MCP window selector")
 
@@ -3035,7 +3035,7 @@ mcpIt.live("exec can call a catalogued MCP tool without loading its outer schema
   ),
 )
 
-mcpIt.live("rejects an MCP call that was not loaded by search", () =>
+mcpIt.live("rejects a direct call to a deferred MCP tool", () =>
   provideTmpdirServer(
     Effect.fnUntraced(function* ({ llm }) {
       const prompt = yield* SessionPrompt.Service
@@ -3062,10 +3062,57 @@ mcpIt.live("rejects an MCP call that was not loaded by search", () =>
           (item): item is ErrorToolPart =>
             item.type === "tool" && item.tool === "mcp_success" && item.state.status === "error",
         )
-      expect(part?.state.error).toContain("mcp_tool_search")
+      expect(part?.state.error).toContain("deferred and cannot be called directly")
+      expect(part?.state.error).toContain('tools["mcp_success"]')
       expect(part?.state.metadata?.recoverable).toBe(true)
       const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
       expect(tools.map(wireToolName)).not.toContain("mcp_success")
+    }),
+    { git: true, config: providerCfg },
+  ),
+)
+
+mcpIt.live("rejects direct deferred calls and returns recoverable mcp_tool_use errors for unknown tools and invalid arguments", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "mcp_tool_use errors",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "call deferred tools" }],
+      })
+      yield* llm.tool("mcp_success", {})
+      yield* llm.tool("mcp_tool_use", { name: "mcp_missing", arguments: {} })
+      yield* llm.tool("mcp_tool_use", { name: "mcp_success", arguments: [] })
+      yield* llm.text("done")
+      yield* prompt.loop({ sessionID: session.id })
+
+      const parts = (yield* MessageV2.filterCompactedEffect(session.id)).flatMap((message) => message.parts)
+      const direct = parts.find(
+        (item): item is ErrorToolPart =>
+          item.type === "tool" && item.tool === "mcp_success" && item.state.status === "error",
+      )
+      expect(direct?.state.error).toContain(`"name": "mcp_success"`)
+      expect(direct?.state.metadata?.recoverable).toBe(true)
+      const errors = parts
+        .filter(
+          (item): item is ErrorToolPart =>
+            item.type === "tool" && item.tool === "mcp_tool_use" && item.state.status === "error",
+        )
+      expect(errors).toHaveLength(2)
+      expect(errors[0].state.error).toContain("mcp_tool_search")
+      expect(errors[0].state.metadata?.recoverable).toBe(true)
+      expect(errors[1].state.error).toContain("must be an object")
+      expect(errors[1].state.error).toContain("<functions>")
+      expect(errors[1].state.metadata?.recoverable).toBe(true)
     }),
     { git: true, config: providerCfg },
   ),
@@ -3246,7 +3293,7 @@ mcpIt.live(
 )
 
 mcpIt.live(
-  "defers MCP tools behind search for non-GPT models by default and keeps searched tools loaded across turns",
+  "defers MCP tools behind search for non-GPT models by default and calls them through mcp_tool_use with a stable tool list",
   () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -3265,11 +3312,11 @@ mcpIt.live(
           parts: [{ type: "text", text: "inspect the window" }],
         })
         yield* llm.tool("mcp_tool_search", { query: "select:mcp_success" })
-        yield* llm.tool("mcp_success", {})
+        yield* llm.tool("mcp_tool_use", { name: "mcp_success", arguments: {} })
         yield* llm.text("done")
         yield* prompt.loop({ sessionID: session.id })
 
-        yield* llm.text("still loaded")
+        yield* llm.text("still stable")
         yield* prompt.prompt({
           sessionID: session.id,
           agent: "build",
@@ -3280,6 +3327,7 @@ mcpIt.live(
         const requests = yield* llm.inputs
         const names = (index: number) => (requests[index].tools as Array<Record<string, unknown>>).map(wireToolName)
         expect(names(0)).toContain("mcp_tool_search")
+        expect(names(0)).toContain("mcp_tool_use")
         expect(names(0)).not.toContain("mcp_success")
         expect(names(0)).not.toContain("mcp_result")
         expect(JSON.stringify(requests[0].tools)).not.toContain("mcp_success")
@@ -3305,9 +3353,9 @@ mcpIt.live(
         )
         expect(JSON.stringify(secondUser?.content)).toContain("inspect it again")
         expect(JSON.stringify(secondUser?.content)).not.toContain("deferred MCP tools")
-        expect(names(1)).toContain("mcp_success")
-        expect(names(1)).not.toContain("mcp_result")
-        expect(names(3)).toContain("mcp_success")
+        // Searching never changes the provider-facing tool definitions.
+        for (const index of [1, 2, 3]) expect(JSON.stringify(requests[index].tools)).toBe(JSON.stringify(requests[0].tools))
+        expect(names(1)).not.toContain("mcp_success")
 
         const parts = (yield* MessageV2.filterCompactedEffect(session.id)).flatMap((message) => message.parts)
         const search = parts.find(
@@ -3316,16 +3364,206 @@ mcpIt.live(
         )
         expect(search?.state.output).toContain("<functions>")
         expect(search?.state.output).toContain("private_window_id")
-        expect(
-          parts.some(
-            (part) => part.type === "tool" && part.tool === "mcp_success" && part.state.status === "completed",
-          ),
-        ).toBe(true)
+        expect(search?.state.output).toContain("mcp_tool_use")
+        const use = parts.find(
+          (part): part is CompletedToolPart =>
+            part.type === "tool" && part.tool === "mcp_tool_use" && part.state.status === "completed",
+        )
+        expect(use?.state.input).toEqual({ name: "mcp_success", arguments: {} })
+        expect(use?.state.output.length).toBeGreaterThan(0)
       }),
       { git: true, config: providerCfg },
     ),
   30_000,
 )
+
+// `flappingConnected(call)` decides, per resolveTools pass (one per loop step),
+// whether the configured server is connected.
+let flappingCalls = 0
+let flappingConnected: (call: number) => boolean = () => true
+const flappingMcpIt = testEffect(
+  makeHttp(
+    mcpLayer(
+      (): Record<string, AITool> =>
+        flappingConnected(flappingCalls++)
+          ? {
+              mcp_flappy: dynamicTool({
+                description: "Return a value from a server that disconnects",
+                inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
+                execute: async () => ({ content: [{ type: "text", text: "flappy" }] }),
+              }),
+            }
+          : {},
+    ),
+  ),
+)
+
+const resetFlapping = Effect.sync(() => {
+  flappingCalls = 0
+  flappingConnected = () => true
+})
+
+const flappingSession = Effect.fnUntraced(function* (
+  llm: TestLLMServer["Service"],
+  between: (turn: number) => void,
+) {
+  const prompt = yield* SessionPrompt.Service
+  const sessions = yield* Session.Service
+  const session = yield* sessions.create({
+    title: "Flapping MCP",
+    permission: [{ permission: "*", pattern: "*", action: "allow" }],
+  })
+  for (const turn of [0, 1, 2]) {
+    between(turn)
+    yield* llm.text(`turn ${turn}`)
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      model: ref,
+      parts: [{ type: "text", text: `turn ${turn}` }],
+    })
+  }
+  const requests = yield* llm.inputs
+  expect(requests).toHaveLength(3)
+  return requests
+})
+
+const lastUserText = (request: Record<string, unknown>) =>
+  JSON.stringify(
+    (request.messages as Array<{ role: string; content: unknown }>).findLast((message) => message.role === "user")
+      ?.content,
+  )
+
+flappingMcpIt.live("keeps the tool list byte-stable while every MCP server disconnects and reconnects", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const requests = yield* flappingSession(llm, (turn) => {
+        flappingConnected = () => turn !== 1
+      })
+      const tools = requests.map((request) => JSON.stringify(request.tools))
+      expect(tools[0]).toContain("mcp_tool_search")
+      expect(tools[0]).toContain("mcp_tool_use")
+      expect(tools[1]).toBe(tools[0])
+      expect(tools[2]).toBe(tools[0])
+    }),
+    { git: true, config: providerCfg },
+  ).pipe(Effect.ensuring(resetFlapping)),
+)
+
+flappingMcpIt.live("exposes search and use before any MCP server connects", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const requests = yield* flappingSession(llm, (turn) => {
+        flappingConnected = () => turn !== 0
+      })
+      const tools = requests.map((request) => JSON.stringify(request.tools))
+      expect(tools[0]).toContain("mcp_tool_search")
+      expect(tools[0]).toContain("mcp_tool_use")
+      expect(tools[1]).toBe(tools[0])
+      expect(tools[2]).toBe(tools[0])
+      expect(lastUserText(requests[0])).not.toContain("deferred MCP tools")
+      expect(lastUserText(requests[1])).toContain("- mcp_flappy")
+    }),
+    { git: true, config: providerCfg },
+  ).pipe(Effect.ensuring(resetFlapping)),
+)
+
+flappingMcpIt.live("defers a mid-turn MCP arrival to the next turn instead of rewriting the user message", () =>
+  provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      // Disconnected for the first step only; connects before the second step.
+      flappingConnected = (call) => call > 0
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "Mid-turn MCP arrival",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.tool("mcp_tool_search", { query: "flappy" })
+      yield* llm.text("first turn done")
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        parts: [{ type: "text", text: "first turn" }],
+      })
+      yield* llm.text("second turn done")
+      yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: ref,
+        parts: [{ type: "text", text: "second turn" }],
+      })
+
+      const requests = yield* llm.inputs
+      expect(requests).toHaveLength(3)
+      const firstUser = (request: Record<string, unknown>) =>
+        JSON.stringify(
+          (request.messages as Array<{ role: string; content: unknown }>).find((message) => message.role === "user")
+            ?.content,
+        )
+      // Step 2 of turn 1 and turn 2 replay the first user message byte-for-byte.
+      expect(firstUser(requests[1])).toBe(firstUser(requests[0]))
+      expect(firstUser(requests[2])).toBe(firstUser(requests[0]))
+      expect(firstUser(requests[0])).not.toContain("mcp_flappy")
+      expect(lastUserText(requests[2])).toContain("second turn")
+      expect(lastUserText(requests[2])).toContain("- mcp_flappy")
+    }),
+    { git: true, config: providerCfg },
+  ).pipe(Effect.ensuring(resetFlapping)),
+)
+
+flappingMcpIt.live("keeps auto mode deferred when MCP tools first arrive under the threshold", () => {
+  const previous = process.env.MIMOCODE_MCP_TOOL_SEARCH
+  return provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const requests = yield* flappingSession(llm, (turn) => {
+        process.env.MIMOCODE_MCP_TOOL_SEARCH = "auto:100"
+        flappingConnected = () => turn !== 0
+      })
+      const tools = requests.map((request) => JSON.stringify(request.tools))
+      expect(tools[0]).toContain("mcp_tool_search")
+      expect(lastUserText(requests[0])).toContain("No deferred MCP tools are available yet")
+      expect(tools[1]).toBe(tools[0])
+      expect(tools[2]).toBe(tools[0])
+      expect(tools[1]).not.toContain("mcp_flappy")
+    }),
+    { git: true, config: providerCfg },
+  ).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.MIMOCODE_MCP_TOOL_SEARCH
+        else process.env.MIMOCODE_MCP_TOOL_SEARCH = previous
+      }),
+    ),
+    Effect.ensuring(resetFlapping),
+  )
+})
+
+flappingMcpIt.live("keeps auto mode deferred after the MCP schemas drop back under the threshold", () => {
+  const previous = process.env.MIMOCODE_MCP_TOOL_SEARCH
+  return provideTmpdirServer(
+    Effect.fnUntraced(function* ({ llm }) {
+      const requests = yield* flappingSession(llm, (turn) => {
+        process.env.MIMOCODE_MCP_TOOL_SEARCH = turn === 0 ? "auto:0" : "auto:100"
+      })
+      const tools = requests.map((request) => JSON.stringify(request.tools))
+      expect(tools[0]).toContain("mcp_tool_search")
+      expect(tools[0]).not.toContain("mcp_flappy")
+      expect(tools[1]).toBe(tools[0])
+      expect(tools[2]).toBe(tools[0])
+    }),
+    { git: true, config: providerCfg },
+  ).pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.MIMOCODE_MCP_TOOL_SEARCH
+        else process.env.MIMOCODE_MCP_TOOL_SEARCH = previous
+      }),
+    ),
+    Effect.ensuring(resetFlapping),
+  )
+})
 
 mcpIt.live("rejects direct MCP calls disabled for the request", () =>
   provideTmpdirServer(
@@ -3425,7 +3663,7 @@ mcpIt.live("omits MCP discovery for models without tool calling", () =>
 )
 
 it.live(
-  "omits MCP Tool Search when no MCP tools are available",
+  "exposes MCP Tool Search and Use without a reminder when no MCP tools are available",
   () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -3443,8 +3681,12 @@ it.live(
         yield* llm.text("done")
         yield* prompt.loop({ sessionID: session.id })
 
-        const tools = (yield* llm.inputs)[0].tools as Array<Record<string, unknown>>
-        expect(tools.map(wireToolName)).not.toContain("mcp_tool_search")
+        const request = (yield* llm.inputs)[0]
+        const tools = request.tools as Array<Record<string, unknown>>
+        // Exposed up front so the first MCP server to connect never changes the tool list.
+        expect(tools.map(wireToolName)).toContain("mcp_tool_search")
+        expect(tools.map(wireToolName)).toContain("mcp_tool_use")
+        expect(JSON.stringify(request.messages)).not.toContain("deferred MCP tools")
       }),
       { git: true, config: providerCfg },
     ),
