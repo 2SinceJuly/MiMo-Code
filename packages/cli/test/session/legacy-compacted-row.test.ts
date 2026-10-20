@@ -123,7 +123,7 @@ describe("legacy compacted tool rows", () => {
         const stored = yield* sessions.messages({ sessionID: info.id })
         const rendered = yield* Effect.promise(() => MessageV2.toModelMessages(stored, model))
         const results = rendered
-          .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+          .flatMap((message) => (message.role === "tool" ? message.content : []))
           .flatMap((content) => (content.type === "tool-result" ? [content] : []))
         const resultText = (callID: string) => JSON.stringify(results.find((result) => result.toolCallId === callID))
         expect(resultText("call-legacy")).toContain(CLEARED)
