@@ -64,8 +64,8 @@ import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 
-// A resumed trailing user is still unanswered, so the session memory directory
-// reminder may be persisted on it; every other user part must stay untouched.
+// The runLoop may persist the session memory directory reminder on a user
+// message; tests pinning user parts compare everything else.
 function usersWithoutDirReminder(messages: MessageV2.WithParts[]) {
   return messages
     .filter((m) => m.info.role === "user")
@@ -3755,7 +3755,7 @@ reminderMcpIt.live(
       expect(tools[1]).toContain('"name":"example_lookup"')
       expect(tools[1]).not.toContain('"name":"mcp_tool_search"')
         const messages = yield* MessageV2.filterCompactedEffect(session.id)
-        expect(messages.find((message) => message.info.role === "user")?.parts).toEqual([
+        expect(usersWithoutDirReminder(messages)[0]?.parts).toEqual([
           expect.objectContaining({ type: "text", text: "turn 0" }),
         ])
       }),
