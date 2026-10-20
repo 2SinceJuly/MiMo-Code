@@ -55,6 +55,99 @@ describe("session prompt execution outcomes", () => {
     })
   }
 
+  // [TP-RUN-R1C-09][TP-RUN-R1C-05][TP-RUN-R1C-07] A reused caller ID cannot lend an earlier user to failed preparation.
+  for (const route of ["prompt_async", "message"]) {
+    for (const boundary of ["agent", "user-write"] as const) {
+      test(`${route} rejects ${boundary} failure with a reused message ID without changing prior history`, async () => {
+        await using tmp = await tmpdir({ git: true })
+        const stub = startScriptedLLMServer([])
+        try {
+          await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
+          await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({ title: "reused preparation ID" })
+            const app = Server.Default().app
+            const seed = yield* Effect.promise(() => request(app, tmp.path, session.id, "message",
+              { noReply: true, agent: "build", model, parts: [{ type: "text", text: "original saved question" }] }))
+            expect(seed.status).toBe(200)
+            const original = yield* Effect.promise(() => seed.json())
+            const before = yield* sessions.messages({ sessionID: session.id })
+            const failedWrite = boundary === "user-write"
+              ? spyOn(sessions, "updateMessage").mockImplementation(() => Effect.die(new Error("user write rejected")))
+              : undefined
+            const response = yield* Effect.promise(() => request(app, tmp.path, session.id, route,
+              { messageID: original.info.id, agent: boundary === "agent" ? "missing-agent" : "build", model,
+                parts: [{ type: "text", text: "new input rejected before save" }] }))
+            failedWrite?.mockRestore()
+            expect(response.status).toBe(500)
+            expect(yield* Effect.promise(() => response.json())).toMatchObject({ name: "UnknownError",
+              data: { message: expect.stringContaining(boundary === "agent" ? "Agent not found" : "user write rejected") } })
+            expect(yield* sessions.messages({ sessionID: session.id })).toEqual(before)
+            expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
+            expect(stub.captures).toHaveLength(0)
+          })) })
+        } finally { stub.stop() }
+      })
+    }
+  }
+
+  // [TP-RUN-R1C-09][TP-RUN-R1C-05][TP-RUN-R1C-07] The successful user write owns failure even if parts cannot be saved.
+  for (const route of ["prompt_async", "message"]) {
+    test(`${route} settles a part-write failure against the user committed by this preparation`, async () => {
+      await using tmp = await tmpdir({ git: true })
+      const stub = startScriptedLLMServer([])
+      try {
+        await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
+        await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const session = yield* sessions.create({ title: "partial user commit" })
+          const id = MessageID.ascending()
+          const failedPart = spyOn(sessions, "updatePart").mockImplementation(() => Effect.die(new Error("part write rejected")))
+          const response = yield* Effect.promise(() => request(Server.Default().app, tmp.path, session.id, route,
+            { messageID: id, agent: "build", model, parts: [{ type: "text", text: "saved user whose part fails" }] }))
+          failedPart.mockRestore()
+          expect(response.status).toBe(route === "message" ? 200 : 204)
+          if (route === "message") expect(yield* Effect.promise(() => response.json())).toMatchObject({ info: {
+            role: "assistant", parentID: id, error: { data: { message: "part write rejected" } },
+          } })
+          const messages = yield* sessions.messages({ sessionID: session.id })
+          expect(messages.filter(message => message.info.role === "user")).toMatchObject([{ info: { id }, parts: [] }])
+          expect(messages.filter(message => message.info.role === "assistant")).toMatchObject([{ info: {
+            parentID: id, time: { completed: expect.any(Number) }, error: { data: { message: "part write rejected" } },
+          } }])
+          expect(yield* SessionStatus.Service.use(status => status.get(session.id))).toEqual({ type: "idle" })
+          expect(stub.captures).toHaveLength(0)
+        })) })
+      } finally { stub.stop() }
+    })
+  }
+
+  // [TP-RUN-R1C-09] Successful explicit-ID writes retain existing noReply behavior.
+  test("message permits a successful noReply write with an explicit reused user ID", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const stub = startScriptedLLMServer([])
+    try {
+      await Bun.write(`${tmp.path}/mimocode.json`, JSON.stringify(config(stub.origin)))
+      await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({ title: "explicit ID compatibility" })
+        const app = Server.Default().app
+        const userID = MessageID.ascending()
+        const partID = PartID.ascending()
+        for (const text of ["first explicit input", "updated explicit input"]) {
+          const response = yield* Effect.promise(() => request(app, tmp.path, session.id, "message",
+            { messageID: userID, noReply: true, agent: "build", model, parts: [{ id: partID, type: "text", text }] }))
+          expect(response.status).toBe(200)
+          expect(yield* Effect.promise(() => response.json())).toMatchObject({ info: { id: userID, role: "user" }, parts: [{ id: partID, text }] })
+        }
+        const messages = yield* sessions.messages({ sessionID: session.id })
+        expect(messages).toHaveLength(1)
+        expect(messages).toMatchObject([{ info: { id: userID, role: "user" }, parts: [{ id: partID, text: "updated explicit input" }] }])
+        expect(stub.captures).toHaveLength(0)
+      })) })
+    } finally { stub.stop() }
+  })
+
   // [TP-RUN-R1C-05][TP-RUN-R1C-07] One owner error is durable before idle; the next request still succeeds.
   for (const route of ["prompt_async", "message"]) {
     test(`${route} persists a pre-model owner exception once and permits the next request`, async () => {

@@ -3,7 +3,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Schema, Scope, SynchronizedRef } 
 export interface Runner<A, E = never, B = never> {
   readonly state: State<A, E>
   readonly busy: boolean
-  readonly ensureRunning: (work: Effect.Effect<A, E>, onRegistered?: () => void) => Effect.Effect<A, E>
+  readonly ensureRunning: (work: Effect.Effect<A, E>, onRegistered?: () => void, pendingOrder?: PendingOrder) => Effect.Effect<A, E>
   /** [R003] Start work only if idle; busy → fail B. Never join an existing run. */
   readonly ensureExclusive: (work: Effect.Effect<A, E>) => Effect.Effect<A, E | B>
   readonly start: (work: Effect.Effect<A, E>) => Effect.Effect<void, B>
@@ -20,6 +20,19 @@ export interface Runner<A, E = never, B = never> {
 
 export class Cancelled extends Schema.TaggedErrorClass<Cancelled>()("RunnerCancelled", {}) {}
 
+/** Persisted input order; only coalesced prompt work supplies it. */
+export type PendingOrder = readonly [created: number, id: string]
+
+function selectPendingWork(next: PendingOrder | undefined, current: PendingOrder | undefined, replaceUnordered = false) {
+  if (next === undefined) return current === undefined && replaceUnordered
+  if (current === undefined) return true
+  return next[0] > current[0] || (next[0] === current[0] && next[1] > current[1])
+}
+
+function copyPendingOrder(order: PendingOrder | undefined): PendingOrder | undefined {
+  return order === undefined ? undefined : [order[0], order[1]]
+}
+
 interface RunHandle<A, E> {
   id: number
   done: Deferred.Deferred<A, E | Cancelled>
@@ -31,7 +44,7 @@ interface RunHandle<A, E> {
    * a newly written prompt. Pending work is started by finishRun instead of
    * going Idle — same single-loop invariant, no lost wake.
    */
-  pending?: { work: Effect.Effect<A, E>; done: Deferred.Deferred<A, E | Cancelled> }
+  pending?: { work: Effect.Effect<A, E>; done: Deferred.Deferred<A, E | Cancelled>; order?: PendingOrder }
 }
 
 interface ShellHandle<A, E> {
@@ -43,6 +56,7 @@ interface PendingHandle<A, E> {
   id: number
   done: Deferred.Deferred<A, E | Cancelled>
   work: Effect.Effect<A, E>
+  order?: PendingOrder
 }
 
 export type State<A, E> =
@@ -171,7 +185,7 @@ export const make = <A, E = never, B = never>(
   const stopShell = (shell: ShellHandle<A, E>) => Fiber.interrupt(shell.fiber)
 
   // The nonthrowing callback records ownership only after work is registered under the state lock.
-  const ensureRunning = (work: Effect.Effect<A, E>, onRegistered?: () => void): Effect.Effect<A, E> =>
+  const ensureRunning = (work: Effect.Effect<A, E>, onRegistered?: () => void, pendingOrder?: PendingOrder): Effect.Effect<A, E> =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -201,12 +215,19 @@ export const make = <A, E = never, B = never>(
             // it instead of Idle, closing the lost-wake window between the loop's
             // last message check and completion. One pending slot — prompt work
             // reloads the full table, so later attaches share the same done.
+            // Ordered prompt work also keeps the newest persisted input owner,
+            // including when preparation makes registration arrive out of order.
             if (st.run.pending) {
               onRegistered?.()
-              return [Deferred.await(st.run.pending.done), st] as const
+              const pending = selectPendingWork(pendingOrder, st.run.pending.order)
+                ? { ...st.run.pending, work, order: copyPendingOrder(pendingOrder) }
+                : st.run.pending
+              return [Deferred.await(pending.done), { ...st, run: { ...st.run, pending } }] as const
             }
             const pendingDone = yield* Deferred.make<A, E | Cancelled>()
-            const run: RunHandle<A, E> = { ...st.run, pending: { work, done: pendingDone } }
+            const run: RunHandle<A, E> = { ...st.run, pending: { work, done: pendingDone,
+              order: copyPendingOrder(pendingOrder),
+            } }
             onRegistered?.()
             return [Deferred.await(pendingDone), { _tag: "Running", run }] as const
           }
@@ -221,12 +242,15 @@ export const make = <A, E = never, B = never>(
             }
             if (opts?.onReentryWarn)
               yield* opts.onReentryWarn({ label: opts.label ?? "(unlabeled)", existingRunId: st.run.id })
-            // Live shell: replace pending work so finishShell starts the latest
-            // (work reloads all messages; later attach subsumes earlier).
+            // Generic shell work retains replacement semantics; ordered prompts
+            // select by persisted input order rather than registration time.
             onRegistered?.()
+            const replace = selectPendingWork(pendingOrder, st.run.order, true)
             return [
               Deferred.await(st.run.done),
-              { _tag: "ShellThenRun", shell: st.shell, run: { ...st.run, work } },
+              { _tag: "ShellThenRun", shell: st.shell, run: replace ? { ...st.run, work,
+                order: copyPendingOrder(pendingOrder),
+              } : st.run },
             ] as const
           }
           case "Shell": {
@@ -234,6 +258,7 @@ export const make = <A, E = never, B = never>(
               id: next(),
               done: yield* Deferred.make<A, E | Cancelled>(),
               work,
+              order: copyPendingOrder(pendingOrder),
             } satisfies PendingHandle<A, E>
             onRegistered?.()
             return [Deferred.await(run.done), { _tag: "ShellThenRun", shell: st.shell, run }] as const
@@ -251,7 +276,7 @@ export const make = <A, E = never, B = never>(
             return [
               Fiber.await(fiber).pipe(
                 Effect.ignore,
-                Effect.andThen(Effect.suspend(() => ensureRunning(work, onRegistered))),
+                Effect.andThen(Effect.suspend(() => ensureRunning(work, onRegistered, pendingOrder))),
               ),
               st,
             ] as const

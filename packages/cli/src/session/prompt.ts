@@ -48,8 +48,8 @@ import { usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { Global } from "@/global"
-import { NotFoundError, Database, eq } from "@/storage"
-import { SessionTable } from "./session.sql"
+import { NotFoundError, Database, eq, and } from "@/storage"
+import { SessionTable, MessageTable } from "./session.sql"
 import { SyncEvent } from "@/sync"
 import { Bus } from "../bus"
 import { Question } from "../question"
@@ -133,7 +133,7 @@ import {
 } from "./trajectory"
 import { prefixCaptureRef } from "./prefix-capture-ref"
 import { spawnRef } from "@/actor/spawn-ref"
-import { Inbox } from "@/inbox"
+import { Inbox, InboxTable } from "@/inbox"
 import { sessionPromptRef, defaultModelRef } from "@/inbox/inbox-ref"
 import { orphanToolIdleSweepRef, assistantMessageIdsSnapshotRef } from "./orphan-tool-idle-hook"
 import { Tool } from "@/tool"
@@ -2727,7 +2727,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return yield* provider.defaultModel()
     })
 
-    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (
+      input: PromptInput,
+      onCommitted?: (message: MessageV2.User) => void,
+    ) {
       const agentName = input.agent || (yield* agents.defaultAgent())
       const ag = yield* agents.get(agentName)
       if (!ag) {
@@ -3271,7 +3274,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       })
 
-      yield* sessions.updateMessage(message)
+      // Commit ownership before a part write can fail or this preparation is interrupted.
+      yield* sessions.updateMessage(message).pipe(
+        Effect.tap(() => Effect.sync(() => onCommitted?.(message))),
+        Effect.uninterruptible,
+      )
       for (const part of parts) yield* sessions.updatePart(part)
 
       return { info: message, parts }
@@ -3474,13 +3481,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       function* (input: PromptInput, onPrepared?: () => Effect.Effect<void>) {
         const messageID = input.messageID ?? MessageID.ascending()
         input = { ...input, messageID }
+        let committedUserID: MessageID | undefined
         let loopStarted = false
         const dispatch = { registered: false }
         const previousAssistantIDs = new Set<MessageID>()
+        let knownUserID = false
         return yield* Effect.gen(function* () {
         const session = yield* sessions.get(input.sessionID)
         for (const message of yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })) {
           if (message.info.role === "assistant") previousAssistantIDs.add(message.info.id)
+          if (message.info.role === "user" && message.info.id === messageID) knownUserID = true
         }
         if (
           hookNonTextRequiresProvenance({
@@ -3510,7 +3520,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
         const eligibleTitle = input.source !== "hook" && input.source !== "spawn" && !input.provenance && session.titleSource === "fallback" && session.titleRevision === 0 && !session.parentID && (input.agentID ?? "main") === "main"
         const previous = eligibleTitle ? yield* sessions.messages({ sessionID: input.sessionID, agentID: "main" }) : []
-        const message = yield* createUserMessage(input)
+        const message = yield* createUserMessage(input, message => { committedUserID = message.id })
         yield* sessions.touch(input.sessionID)
         const permissions: Permission.Ruleset = []
         for (const [t, enabled] of Object.entries(input.tools ?? {})) {
@@ -3532,9 +3542,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // turn entirely. Running loop() here would produce a spurious assistant
         // response with no user turn.
         if (message.parts.length === 0) return message
+        // Explicit-ID upserts update message data but retain the SQL creation column.
+        // Select the same persisted order as MessageV2.page, not data.time.created.
+        const persistedOrder = yield* Effect.sync(() => Database.use(db => db
+          .select({ created: MessageTable.time_created, id: MessageTable.id })
+          .from(MessageTable)
+          .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.agent_id, input.agentID ?? "main"), eq(MessageTable.id, message.info.id)))
+          .get()))
         loopStarted = true
         return yield* loop({
           preparedUserID: message.info.id,
+          preparedSeenAssistantIDs: knownUserID ? undefined : previousAssistantIDs,
+          preparedUserOrder: persistedOrder ? [persistedOrder.created, persistedOrder.id] : undefined,
           dispatch,
           sessionID: input.sessionID,
           agentID: input.agentID ?? "main",
@@ -3548,8 +3567,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }).pipe(Effect.catchCause((cause) => Effect.gen(function* () {
           // Joined runners own their own outcome. Only preparation failures belong to this input here.
           if ((loopStarted && dispatch.registered) || Cause.hasInterruptsOnly(cause)) return yield* Effect.failCause(cause)
+          if (!committedUserID) return yield* Effect.failCause(cause)
           const settled = yield* settleUnhandledFailure({ sessionID: input.sessionID, agentID: input.agentID ?? "main",
-            parentID: messageID, previousAssistantIDs, cause })
+            parentID: committedUserID, previousAssistantIDs, cause })
           if (!settled) return yield* Effect.failCause(cause)
           if (onPrepared) yield* onPrepared()
           return settled
@@ -3711,6 +3731,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
        */
       strictParentTail?: boolean,
       preparedUserID?: MessageID,
+      preparedSeenAssistantIDs?: ReadonlySet<MessageID>,
     ) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (
         sessionID: SessionID,
@@ -3725,6 +3746,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         parentUserID?: MessageID,
         strictParentTail = false,
         preparedUserID?: MessageID,
+        preparedSeenAssistantIDs?: ReadonlySet<MessageID>,
       ) {
         let failureParentID = parentUserID ?? preparedUserID
         let failureAssistantID: MessageID | undefined
@@ -3741,8 +3763,25 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return message
         })
         return yield* Effect.gen(function* () {
-        for (const message of yield* sessions.messages({ sessionID, agentID: agentID ?? "main" })) {
+        const entranceMessages = yield* sessions.messages({ sessionID, agentID: agentID ?? "main" })
+        for (const message of entranceMessages) {
           if (message.info.role === "assistant") previousAssistantIDs.add(message.info.id)
+        }
+        // A live owner can consume a registered prompt before its coalesced wake starts.
+        // Reuse that result before starting another turn's fallible preparation.
+        if (preparedUserID && preparedSeenAssistantIDs) {
+          const user = entranceMessages.findLast(message => message.info.role === "user")
+          const assistant = entranceMessages.at(-1)
+          if (user?.info.role === "user" && user.info.id === preparedUserID && assistant?.info.role === "assistant"
+            && assistant.info.parentID === preparedUserID && !preparedSeenAssistantIDs.has(assistant.info.id)
+            && assistant.info.time.completed !== undefined
+            && (assistant.info.error !== undefined || (assistant.info.finish !== "length"
+              && classifyAssistantStep({ lastUser: user.info, assistant: assistant.info, parts: assistant.parts,
+                phase: "existing-assistant" }).type === "final"))) {
+            const pendingInbox = Database.use(db => db.select({ id: InboxTable.id }).from(InboxTable)
+              .where(and(eq(InboxTable.receiver_session_id, sessionID), eq(InboxTable.receiver_actor_id, agentID ?? "main"))).get())
+            if (!pendingInbox && ((agentID ?? "main") !== "main" || !(yield* goal.get(sessionID)))) return assistant
+          }
         }
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
@@ -5874,9 +5913,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       },
     )
 
-    const loop: (input: z.infer<typeof LoopInput> & { preparedUserID?: MessageID; dispatch?: { registered: boolean } }) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
+    const loop: (input: z.infer<typeof LoopInput> & { preparedUserID?: MessageID; preparedSeenAssistantIDs?: ReadonlySet<MessageID>; preparedUserOrder?: readonly [number, string]; dispatch?: { registered: boolean } }) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
       "SessionPrompt.loop",
-    )(function* (input: z.infer<typeof LoopInput> & { preparedUserID?: MessageID; dispatch?: { registered: boolean } }) {
+    )(function* (input: z.infer<typeof LoopInput> & { preparedUserID?: MessageID; preparedSeenAssistantIDs?: ReadonlySet<MessageID>; preparedUserOrder?: readonly [number, string]; dispatch?: { registered: boolean } }) {
       const agentID = input.agentID ?? "main"
       const work = runLoop(
         input.sessionID,
@@ -5891,10 +5930,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         undefined,
         false,
         input.preparedUserID,
+        input.preparedSeenAssistantIDs,
       )
       if (!input.notifyParentOnComplete || agentID === "main") {
         return yield* state.ensureRunning(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), work,
-          () => { if (input.dispatch) input.dispatch.registered = true })
+          () => { if (input.dispatch) input.dispatch.registered = true }, input.preparedUserOrder)
       }
       return yield* Effect.acquireUseRelease(
         executions.acquire(input.sessionID, agentID),
@@ -5924,7 +5964,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const continued = Effect.gen(function* () {
             if (execution.cancelled) return yield* Effect.interrupt
             const final = yield* state.ensureRunning(input.sessionID, agentID, lastAssistant(input.sessionID, agentID), work,
-              () => { if (input.dispatch) input.dispatch.registered = true })
+              () => { if (input.dispatch) input.dispatch.registered = true }, input.preparedUserOrder)
             lastFinal = final
             if (final.info.role === "assistant" && final.info.error) {
               return yield* Effect.die(new Error(sessionErrorText(final.info.error)))
