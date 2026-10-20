@@ -101,6 +101,11 @@ describe("rebuild boundary placement", () => {
                   (message) => message.info.id > watermark.info.id,
                 )
                 expect(tail.map((message) => message.info.role)).toEqual(["user", "assistant", "assistant"])
+                const reminded = (message: (typeof tail)[number]) =>
+                  message.parts.some(
+                    (part) => part.type === "text" && part.synthetic && part.text.includes(RECALL_REMINDER_MARKER),
+                  )
+                expect(reminded(tail[0]!)).toBe(true)
 
                 yield* prompt.command({
                   sessionID: session.id,
@@ -131,7 +136,7 @@ describe("rebuild boundary placement", () => {
                 const live = text(first[1]!)
                 expect(live).toContain("after rebuild")
                 expect(live).not.toContain("run the checks on alpha and beta")
-                // The recall reminder persisted on the tail user message attaches to the newest user message instead.
+                // The recall reminder persisted on the tail user message is attached again to the newest user message.
                 expect(live).toContain(RECALL_REMINDER_MARKER)
 
                 yield* say("next step")
