@@ -1,14 +1,27 @@
 ---
 feature: session-memory-dir-reminder
-status: in-progress
+status: delivered
 updated: 2026-09-27
 branch: feat/remove-recall-reminder
-commits:
+commits: 113e319256..aad4951ba8
 ---
 
 # Session Memory Directory Reminder
 
 ## Report
+
+**What was built** — The per-user-message recall reminder and `SessionCheckpoint.hasMemoryOrTasks` are gone. The `# Memory system` block names the session directory as `<memoryRoot>/sessions/<session_id>` and says the real path is given in a system reminder, so the system prompt stays byte-identical across sessions and never contains a nonexistent path.
+
+The runLoop persists one `Current session memory directory: <real dir>/` reminder per context window, for main/peer actors only (`servesCheckpoint`). It lands on the session's first user message, or on the boundary message after a checkpoint rebuild or compaction. Fork copies and sessions that predate the change get it on their next new user message. Messages already sent to the model are never rewritten.
+
+**Verification** — `bun typecheck` (packages/cli): PASS. `bun test --timeout 60000 test/session test/actor test/tool/actor-subagent-gating.test.ts`: PASS, 1658 pass / 0 fail / 1672 tests across 154 files. Independent review: two rounds; all findings fixed, none open.
+
+**Journey log**
+
+1. Putting the real session id into `buildMemoryInstructions` was rejected: the literal placeholder dates from #2258 (c9c4ff4330, 576b5c12fd), which keeps the system prompt identical across sessions for cross-session prefix caching.
+2. Matching any synthetic part containing the directory is wrong: the checkpoint rebuild boundary text contains `File: <dir>/checkpoint.md`. Only this session's own marker counts.
+3. "Has a reply with this parentID" does not mean "already sent": batched and mid-turn inputs never become a `parentID`. Any later non-summary assistant message is the test.
+4. `Session.fork` rewrites copied messages' `sessionID`, so copied history looks like the session's own; it is detected as already sent instead.
 
 ## [S1] Problem
 
@@ -56,7 +69,7 @@ runLoop calls it each step where the recall block used to be, only when `actorRe
 
 ## Tasks
 
-- [ ] T1: Delete the recall reminder code, `hasMemoryOrTasks`, and the recall-only tests; move retained marker/helper tests to `test/session/synthetic-reminder.test.ts` — acceptance: no references to the removed symbols remain under `packages/cli`; retained helper tests pass (covers: S2)
-- [ ] T2: `buildMemoryInstructions` uses `<session_id>` and the explanatory sentence — acceptance: llm-system-prompt test asserts `<session_id>` paths are present and neither `current_session_id` nor the real session id appears in the system prompt (covers: S2)
-- [ ] T3: Add the session memory directory reminder helpers and runLoop injection — acceptance: unit tests cover rules 1–3 (checkpoint rebuild boundary naming the directory, compaction boundary with summary reply, fork copy with the parent's reminder, sent first message, batched input that is never a parentID, contextFrom history); integration test shows a multi-step turn persists exactly one reminder with the real path on the first user message, a second user turn adds none, and every request carries it; existing tests that pin exact user parts tolerate the reminder (covers: S2; depends: T1)
-- [ ] T4: Update `synthetic-parts-persistence-cache.md` to the current state — acceptance: no claim that a recall reminder is injected (covers: S2)
+- [x] T1: Delete the recall reminder code, `hasMemoryOrTasks`, and the recall-only tests; move retained marker/helper tests to `test/session/synthetic-reminder.test.ts` — acceptance: no references to the removed symbols remain under `packages/cli`; retained helper tests pass (covers: S2)
+- [x] T2: `buildMemoryInstructions` uses `<session_id>` and the explanatory sentence — acceptance: llm-system-prompt test asserts `<session_id>` paths are present and neither `current_session_id` nor the real session id appears in the system prompt (covers: S2)
+- [x] T3: Add the session memory directory reminder helpers and runLoop injection — acceptance: unit tests cover rules 1–3 (checkpoint rebuild boundary naming the directory, compaction boundary with summary reply, fork copy with the parent's reminder, sent first message, batched input that is never a parentID, contextFrom history); integration test shows a multi-step turn persists exactly one reminder with the real path on the first user message, a second user turn adds none, and every request carries it; existing tests that pin exact user parts tolerate the reminder (covers: S2; depends: T1)
+- [x] T4: Update `synthetic-parts-persistence-cache.md` to the current state — acceptance: no claim that a recall reminder is injected (covers: S2)
