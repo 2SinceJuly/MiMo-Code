@@ -911,10 +911,11 @@ export const layer = Layer.effect(
 
     // Shared rebuild-from-checkpoint step used by BOTH the automatic overflow
     // path in runLoop and the manual `/rebuild` command, so the two can never
-    // drift in logic or boundary conditions. Inserts a checkpoint boundary
-    // marker (never deletes DB messages) at the current watermark so the next
-    // runLoop iteration rebuilds context from the on-disk checkpoint while the
-    // live message tail after the watermark is preserved verbatim. Does NOT
+    // drift in logic or boundary conditions. Appends a checkpoint boundary
+    // marker (never deletes DB messages) after the newest message so the next
+    // runLoop iteration rebuilds context from the on-disk checkpoint; the tail
+    // after the watermark reaches the model only through the boundary's
+    // Recent activity and Recent user input sections. Does NOT
     // block on an in-flight writer (same policy as the auto path — a slightly
     // stale checkpoint now beats a fresh one that never arrives). Returns true
     // iff a boundary was inserted (i.e. a usable checkpoint existed); callers
@@ -936,20 +937,17 @@ export const layer = Layer.effect(
         .pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!boundary) return false
 
-      const boundaryMsg = input.msgs.find((m) => m.info.id === boundary)
       const inserted = yield* checkpoint
         .insertRebuildBoundary({
           sessionID: input.sessionID,
           boundary,
           lastMessageInfo: computeLastMessageInfo(input.msgs.map((m) => m.info)),
-          // Freeze the digest range at insert time: only this tail is eligible
-          // for activity-log collapse. Auto rebuild mid-tool-loop keeps later
-          // tool rounds live; manual rebuild digests the whole idle tail.
+          // Freeze the digest range at insert time: the tail (boundary,
+          // digestUpTo] is what the boundary's digest stands for.
           digestUpTo: input.msgs.at(-1)?.info.id,
           agentID: input.agentID,
           agent: input.agent,
           model: { providerID: input.model.providerID, modelID: input.model.id },
-          boundaryCreatedAt: boundaryMsg?.info.time.created,
         })
         .pipe(Effect.catch(() => Effect.succeed(false)))
 

@@ -522,9 +522,10 @@ export interface Interface {
   readonly isWriterRunning: (sessionID: SessionID) => Effect.Effect<boolean>
 
   /**
-   * Insert a synthetic checkpoint-boundary user message (boundary marker +
-   * index overview + rebuild context + active-actors text) just after the
-   * given boundary. Inserts nothing and returns false when rebuild context is
+   * Append a synthetic checkpoint-boundary user message (boundary marker +
+   * index overview + rebuild context + active-actors text) after the newest
+   * message of the session, so the tail after `boundary` falls outside every
+   * later window. Inserts nothing and returns false when rebuild context is
    * empty. Never deletes DB messages.
    */
   readonly insertRebuildBoundary: (input: {
@@ -535,7 +536,6 @@ export interface Interface {
     agentID?: string
     agent: string
     model: { providerID: string; modelID: string }
-    boundaryCreatedAt?: number
   }) => Effect.Effect<boolean>
 }
 
@@ -1490,9 +1490,9 @@ export const layer: Layer.Layer<
       }
 
       // Section: Recent activity — messages that already exist after the
-      // watermark at insert time, as a compact name+args list. Written into
-      // the same rebuild-context block as the checkpoint body so send-time
-      // collapse only has to drop those messages (no second digest block).
+      // watermark at insert time, as a compact name+args list. The boundary
+      // is appended after them, so this list is the only form in which they
+      // reach later windows.
       // Slice from opts.boundary (the watermark this insert is using) —
       // re-reading lastBoundary here can disagree with the insert if a
       // concurrent writer advances the watermark between the two reads.
@@ -1601,14 +1601,14 @@ export const layer: Layer.Layer<
       lastMessageInfo?: LastMessageInfo
       /**
        * Newest message that already exists at insert time. Stored as
-       * CheckpointPart.digestUpTo so send-time collapse digests only the
-       * pre-insert tail and leaves post-insert messages live.
+       * CheckpointPart.digestUpTo: the tail (boundary, digestUpTo] is what
+       * the boundary's Recent activity digest stands for and what the
+       * checkpoint writer reads back from the database.
        */
       digestUpTo?: MessageID
       agentID?: string
       agent: string
       model: { providerID: string; modelID: string }
-      boundaryCreatedAt?: number
     }) {
       const rendered = yield* renderRebuildContext(input.sessionID, {
         lastMessageInfo: input.lastMessageInfo,
@@ -1619,19 +1619,17 @@ export const layer: Layer.Layer<
       if (!rendered.text) return false
 
       const indexText = yield* renderIndex(input.sessionID).pipe(Effect.catch(() => Effect.succeed("")))
-      // Persist digestUpTo only when the activity section was actually
-      // rendered. Sending-time collapse would otherwise drop the tail while
-      // nothing recorded what those messages were.
-      const hasActivity = rendered.hasActivity
+      // digestUpTo is an existing message, so the tail is non-empty exactly
+      // when it lies after the watermark.
+      const hasTail = input.digestUpTo !== undefined && input.digestUpTo > input.boundary
 
-      const syntheticTime = (input.boundaryCreatedAt ?? Date.now()) + 1
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user" as const,
         model: { providerID: input.model.providerID as ProviderID, modelID: input.model.modelID as ModelID },
         sessionID: input.sessionID,
         agent: input.agent,
-        time: { created: syntheticTime },
+        time: { created: Date.now() },
       })
 
       yield* session.updatePart({
@@ -1642,7 +1640,7 @@ export const layer: Layer.Layer<
         checkpointDir: "",
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
-        ...(input.digestUpTo && hasActivity ? { digestUpTo: input.digestUpTo } : {}),
+        ...(hasTail ? { digestUpTo: input.digestUpTo } : {}),
       })
 
       if (indexText) {

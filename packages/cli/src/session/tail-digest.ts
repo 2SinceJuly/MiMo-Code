@@ -54,8 +54,8 @@ function digestLines(tail: readonly WithParts[]): { lines: string[]; interrupted
     // Never re-digest a prior rebuild/compaction boundary — that folds the
     // previous dump into itself on a second rebuild.
     if (isBoundaryUser(msg)) continue
-    // User-role messages always stay live after collapse (see
-    // collapseCheckpointTail); do not also log them.
+    // Tail user messages are quoted in the boundary's Recent user input
+    // section (and stay live after a legacy boundary); do not also log them.
     if (msg.info.role === "user") continue
     for (const part of msg.parts) {
       if (part.type === "text" && !part.ignored && !part.synthetic) {
@@ -97,14 +97,19 @@ function checkpointPart(msg: WithParts): CheckpointPart | undefined {
 }
 
 /**
- * Drop assistant messages in (coveredUpTo, digestUpTo] after the latest
- * rebuild boundary. The activity list itself is already in the boundary's
- * rebuild context (written at insert time), so this only removes the
- * now-redundant verbatim tool/assistant tail. Post-insert messages stay live.
+ * Drop assistant messages in (coveredUpTo, digestUpTo] after a legacy
+ * rebuild boundary. A boundary appended after the newest message leaves its
+ * tail outside the window, so there is nothing to drop. Older boundaries were
+ * stamped at watermark + 1 ms and sort before the tail they digest; such a
+ * boundary is recognised from stored data alone: its `time.created` is
+ * earlier than that of the `digestUpTo` message. For those, the activity list
+ * already sits in the boundary's rebuild context, so this removes the
+ * now-redundant verbatim tool/assistant tail while post-insert messages stay
+ * live.
  *
  * Filtering by message-id range — not by the boundary's position in the
  * array — so a same-millisecond tail message cannot escape collapse by
- * sorting before the boundary's synthetic time (watermark+1).
+ * sorting before the boundary's synthetic time.
  *
  * User-role messages are never dropped: the last user is where insertReminders
  * persists skill-catalog gates, and a file-only or
@@ -120,6 +125,9 @@ export function collapseCheckpointTail(msgs: readonly WithParts[]): WithParts[] 
   if (!part?.digestUpTo) return msgs as WithParts[]
 
   const digestUpTo = part.digestUpTo
+  const newest = msgs.find((m) => m.info.id === digestUpTo)
+  if (!newest || boundary.info.time.created >= newest.info.time.created) return msgs as WithParts[]
+
   const coveredUpTo = part.coveredUpTo
   const live = msgs.filter(
     (m) => m.info.id <= coveredUpTo || m.info.id > digestUpTo || m.info.role === "user",
