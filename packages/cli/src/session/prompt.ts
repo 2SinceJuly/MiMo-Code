@@ -18,7 +18,7 @@ import {
 } from "@/util/media"
 import { shrinkAttachment } from "@/provider/image"
 import { classifyAssistantStep } from "./classify"
-import { Log } from "../util"
+import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent, resolveStoredAgent } from "../agent/agent"
@@ -176,11 +176,11 @@ import { errorMessage } from "../util/error"
 import { RecoverableError } from "../tool/recoverable"
 import { shouldAutoDream, shouldAutoDistill, DREAM_TASK, DISTILL_TASK, AUTO_DREAM_TITLE, AUTO_DISTILL_TITLE } from "./auto-dream"
 import {
-  announcedDeferredMcpTools,
   createMcpToolSearchCatalog,
-  deferredMcpToolsDelta,
+  mcpReminderMarker,
+  announcedMcpReminders,
   mcpToolCatalogBudget,
-  MCP_DEFERRED_TOOLS_METADATA_KEY,
+  MCP_REMINDER_METADATA_KEY,
   MCP_TOOL_SEARCH_ID,
   MCP_TOOL_USE_DESCRIPTION,
   MCP_TOOL_USE_ID,
@@ -188,9 +188,13 @@ import {
   checkMcpToolArguments,
   neutralizeHarnessTags,
   parseMcpToolSearchMode,
-  renderDeferredMcpToolsReminder,
+  renderMcpEntryReminder,
+  renderMcpServerReminder,
   renderMcpToolFunctions,
   shouldDeferMcpTools,
+  type McpReadiness,
+  type McpReminderMeta,
+  type McpServerReminder,
   type McpToolSearchEntry,
 } from "@/tool/mcp-tool-search"
 import { mcpToolSearchMode, usesGPTToolset } from "@/tool/gpt"
@@ -1463,9 +1467,14 @@ export const layer = Layer.effect(
       message: MessageV2.WithParts
       marker: string
       text: string
+      metadata?: Record<string, unknown>
     }) {
       const existingIdx = input.message.parts.findIndex(
-        (p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(input.marker),
+        (p) =>
+          p.type === "text" &&
+          p.synthetic === true &&
+          !p.ignored &&
+          (p.text.includes(input.marker) || p.metadata?.syntheticMarker === input.marker),
       )
       if (existingIdx >= 0) return
       const part = yield* sessions.updatePart({
@@ -1475,6 +1484,7 @@ export const layer = Layer.effect(
         type: "text" as const,
         synthetic: true,
         text: input.text,
+        metadata: { ...(input.metadata ?? {}), syntheticMarker: input.marker },
       })
       input.message.parts.push(part)
     })
@@ -2028,6 +2038,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       const localToolNames = new Set(Object.keys(tools))
       const mcpTools = Object.entries(yield* mcp.tools(input.mcpContext)).toSorted(([a], [b]) => a.localeCompare(b))
+      const readiness: McpReadiness = mcp.readiness
+        ? yield* mcp.readiness()
+        : { configured: false, servers: [] }
       const agentToolAllowlist = input.agent.toolAllowlist ? new Set(input.agent.toolAllowlist) : undefined
       const disabledMcpTools = Permission.disabled(
         mcpTools.map(([key]) => key),
@@ -2251,17 +2264,37 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
         }
       }
+      // Connection state comes from MCP; advertised capabilities must match the
+      // same request-authorized view that search and dispatch actually expose.
+      const visibleMcpTools = new Map(mcpSearchEntries.map((entry) => [entry.name, entry]))
+      const mcpReadiness: McpReadiness = {
+        ...readiness,
+        servers: readiness.servers.map((server) => {
+          if (server.status !== "connected") return server
+          const names = new Set((server.tools ?? []).map((tool) => tool.name))
+          const tools = [...names].flatMap((name) => {
+            const entry = visibleMcpTools.get(name)
+            return entry ? [{ name, description: entry.description }] : []
+          })
+          return { ...server, tools, toolCount: tools.length }
+        }),
+      }
       mcpCatalog.current = createMcpToolSearchCatalog(
         mcpSearchEntries.toSorted((a, b) => a.name.localeCompare(b.name)),
+        mcpReadiness,
       )
-      // Evidence the conversation already ran in deferred mode: a deferred-tools
-      // announcement or a search/use call. Compaction drops it, which is fine —
+      // Reuse actual announcements and calls as evidence, including legacy
+      // announcements when resuming older conversations.
+      // Compaction drops evidence, which is fine —
       // compaction rewrites the prefix anyway.
       const deferredEarlier = input.messages.some((message) =>
         message.parts.some(
           (part) =>
             (part.type === "tool" && (part.tool === MCP_TOOL_SEARCH_ID || part.tool === MCP_TOOL_USE_ID)) ||
-            (part.type === "text" && !!part.synthetic && !!part.metadata?.[MCP_DEFERRED_TOOLS_METADATA_KEY]),
+            (part.type === "text" && !!part.synthetic && !!(
+              part.metadata?.[MCP_REMINDER_METADATA_KEY] ||
+              part.metadata?.mcpDeferredTools
+            )),
         ),
       )
       deferMcpTools = shouldDeferMcpTools(
@@ -2319,59 +2352,101 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return {
         tools,
         activeTools: [...activeTools].filter((name) => tools[name]),
-        // What the model must be told is reachable through mcp_tool_search;
-        // empty when search is not exposed, so earlier announcements get retracted.
-        deferredMcpTools: searchExposed ? mcpCatalog.current.entries : [],
-        // auto mode only: an empty first announcement records that the conversation
-        // runs deferred, which keeps it deferred once tools arrive under the threshold.
-        recordDeferredMode: searchExposed && searchMode.type === "auto",
+        searchExposed,
+        mcpReadiness,
       }
     })
 
-    // Announces deferred MCP tools as a persisted <system-reminder> on the last
-    // user message: tool definitions stay byte-stable (prefix cache) while the
-    // model still learns what exists. The first announcement lists everything;
-    // later ones carry only the delta against what earlier reminders announced
-    // (compaction drops those, so the full list is re-announced afterwards).
-    const announceDeferredMcpTools = Effect.fn("SessionPrompt.announceDeferredMcpTools")(function* (input: {
+    // Standard synthetic user reminders on the last user message (turn boundary
+    // only): one entry listing configured MCP servers, then one outcome per
+    // server. Injection is driven by readiness, not the search catalog.
+    const announceMcpReminders = Effect.fn("SessionPrompt.announceMcpReminders")(function* (input: {
       messages: MessageV2.WithParts[]
-      entries: McpToolSearchEntry[]
-      recordDeferredMode: boolean
+      readiness: McpReadiness
+      enabled: boolean
       model: Provider.Model
     }) {
+      if (!input.enabled) return
       const userIndex = input.messages.findLastIndex((message) => message.info.role === "user")
       if (userIndex < 0) return
       // Only while the user message is still the tail of the conversation. Mid-turn
       // it precedes this turn's assistant steps, and appending would rewrite the
-      // cached history; such changes wait for the next turn (mcp_tool_search
-      // always searches the live catalog meanwhile).
+      // cached history; such changes wait for the next turn.
       if (input.messages.slice(userIndex + 1).some((message) => message.info.role === "assistant")) return
       const userMessage = input.messages[userIndex]
-      const deltas = input.messages.flatMap((message) =>
-        message.info.role !== "user"
-          ? []
-          : message.parts.flatMap((part) =>
-              part.type === "text" && part.synthetic && part.metadata?.[MCP_DEFERRED_TOOLS_METADATA_KEY]
-                ? [part.metadata[MCP_DEFERRED_TOOLS_METADATA_KEY]]
-                : [],
-            ),
+      const { entry: previousEntry, byServer } = announcedMcpReminders(
+        input.messages.flatMap((message) =>
+          message.info.role !== "user"
+            ? []
+            : message.parts.flatMap((part) =>
+                part.type === "text" && part.synthetic && !part.ignored && part.metadata?.[MCP_REMINDER_METADATA_KEY]
+                  ? [part.metadata[MCP_REMINDER_METADATA_KEY]]
+                  : [],
+              ),
+        ),
       )
-      const delta =
-        deferredMcpToolsDelta(announcedDeferredMcpTools(deltas), input.entries) ??
-        (input.recordDeferredMode && deltas.length === 0 ? { added: [], removed: [] } : undefined)
-      if (!delta) return
+      if (!input.readiness.configured && byServer.size === 0) return
       const cfg = yield* config.get()
-      const budget = mcpToolCatalogBudget({ usable: usable({ cfg, model: input.model }), context: input.model.limit.context })
-      const part = yield* sessions.updatePart({
-        id: PartID.ascending(),
-        messageID: userMessage.info.id,
-        sessionID: userMessage.info.sessionID,
-        type: "text" as const,
-        synthetic: true,
-        text: renderDeferredMcpToolsReminder(delta, input.entries, budget),
-        metadata: { [MCP_DEFERRED_TOOLS_METADATA_KEY]: delta },
+      let remaining = mcpToolCatalogBudget({
+        usable: usable({ cfg, model: input.model }),
+        context: input.model.limit.context,
       })
-      userMessage.parts.push(part)
+
+      const serverNames = input.readiness.servers
+        .filter((server) => server.status !== "disabled")
+        .map((server) => server.name)
+        .toSorted()
+      const entryMeta: McpReminderMeta = { kind: "entry", servers: serverNames }
+      if (
+        serverNames.length > 0 &&
+        (!previousEntry || mcpReminderMarker(previousEntry) !== mcpReminderMarker(entryMeta))
+      ) {
+        const text = renderMcpEntryReminder(serverNames, remaining)
+        if (text) {
+          yield* ensurePersistedUserSynthetic({
+            message: userMessage,
+            marker: mcpReminderMarker(entryMeta),
+            text,
+            metadata: { [MCP_REMINDER_METADATA_KEY]: entryMeta },
+          })
+          remaining -= Token.estimate(text) + 1
+        }
+      }
+
+      const currentNames = new Set(input.readiness.servers.map((server) => server.name))
+      const servers: McpServerReminder[] = [
+        ...input.readiness.servers,
+        ...[...byServer.keys()]
+          .filter((name) => !currentNames.has(name))
+          .map((name) => ({ name, status: "removed" as const })),
+      ]
+      const changed = servers.flatMap((server) => {
+        const previous = byServer.get(server.name)
+        // Initial pending is covered by entry; initially disabled servers add no noise.
+        if (!previous && (server.status === "pending" || server.status === "disabled")) return []
+        const toolNames = server.tools?.map((tool) => tool.name).toSorted()
+        const meta: McpReminderMeta = {
+          kind: "server",
+          server: server.name,
+          status: server.status,
+          ...(toolNames ? { toolNames } : {}),
+          ...(server.error ? { error: server.error } : {}),
+        }
+        if (previous && mcpReminderMarker(previous) === mcpReminderMarker(meta)) return []
+        return [{ server, meta, previous }]
+      })
+      for (const [index, { server, meta, previous }] of changed.entries()) {
+        // Share one budget across all outcomes, including boilerplate and retractions.
+        const text = renderMcpServerReminder(server, Math.floor(remaining / (changed.length - index)), previous)
+        if (!text) continue
+        yield* ensurePersistedUserSynthetic({
+          message: userMessage,
+          marker: mcpReminderMarker(meta),
+          text,
+          metadata: { [MCP_REMINDER_METADATA_KEY]: meta },
+        })
+        remaining -= Token.estimate(text) + 1
+      }
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -5493,10 +5568,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 })
                 const tools = resolvedTools.tools
                 const activeTools = resolvedTools.activeTools
-                yield* announceDeferredMcpTools({
+                yield* announceMcpReminders({
                   messages: msgs,
-                  entries: resolvedTools.deferredMcpTools,
-                  recordDeferredMode: resolvedTools.recordDeferredMode,
+                  readiness: resolvedTools.mcpReadiness,
+                  enabled: resolvedTools.searchExposed,
                   model,
                 })
 
