@@ -79,11 +79,14 @@ export function isTransientCapacityError(error: unknown): boolean {
  *   writer-as-curator ownership, Active recall protocol after rebuild dumps.
  *
  * `memoryRoot` is the same absolute root returned by Memory.root(), so these
- * paths match the files used by checkpoint restore and memory/task detection.
+ * paths match the files used by checkpoint restore. The session segment stays
+ * the literal `<session_id>` so the system prompt is byte-identical across
+ * sessions; the real directory reaches the model through the per-window
+ * session memory directory reminder (session/prompt.ts).
  */
 function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string): string {
   const memoryFile = path.join(memoryRoot, "projects", projectID, "MEMORY.md")
-  const sessionMemoryDir = path.join(memoryRoot, "sessions", "current_session_id")
+  const sessionMemoryDir = path.join(memoryRoot, "sessions", "<session_id>")
   const globalMemoryFile = path.join(memoryRoot, "global", "MEMORY.md")
   const notesFile = path.join(sessionMemoryDir, "notes.md")
   const checkpointEnabled = !Flag.MIMOCODE_DISABLE_CHECKPOINT
@@ -104,7 +107,9 @@ function buildMemoryInstructions(projectID: ProjectID, memoryRoot: string): stri
 
 You have a persistent file-based memory system. ${checkpointEnabled ? "Four" : "Two"} file types:
 
-${files.join("\n")}`,
+${files.join("\n")}
+
+\`<session_id>\` in these paths stands for the current session. Its real directory is given in a system reminder near the start of the conversation history; use that real path in tool calls.`,
     ...(checkpointEnabled
       ? [
           "The checkpoint writer is the sole curator of the structured files. You don't maintain them mid-task — the writer extracts everything from the conversation at checkpoint events.",

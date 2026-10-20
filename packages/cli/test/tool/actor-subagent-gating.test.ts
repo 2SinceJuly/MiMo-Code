@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { ToolRegistry } from "../../src/tool"
 import { Agent } from "../../src/agent/agent"
@@ -105,4 +105,25 @@ describe("ToolRegistry.tools: actor tool subagent gating", () => {
       { config: { agent: { helper: { description: "Helper", mode: "subagent" } } } },
     ),
   )
+})
+
+describe("hasActorTool", () => {
+  test("primaries and system-spawned agents keep it, other subagents don't", () => {
+    expect(hasActorTool({ name: "build", mode: "primary" })).toBe(true)
+    expect(hasActorTool({ name: "helper", mode: "all" })).toBe(true)
+    expect(hasActorTool({ name: "checkpoint-writer", mode: "subagent" })).toBe(true)
+    expect(hasActorTool({ name: "general", mode: "subagent" })).toBe(false)
+    expect(hasActorTool({ name: "explore", mode: "subagent" })).toBe(false)
+  })
+
+  // dream/distill are system-spawned, so the mode gate exempts them, but their
+  // toolAllowlist omits `actor`.
+  test("an allowlist without actor wins over the system-spawned exemption", () => {
+    expect(hasActorTool({ name: "distill", mode: "subagent", toolAllowlist: ["read", "memory"] })).toBe(false)
+    expect(hasActorTool({ name: "build", mode: "primary", toolAllowlist: ["read"] })).toBe(false)
+  })
+
+  test("an unresolvable agent keeps the tool", () => {
+    expect(hasActorTool(undefined)).toBe(true)
+  })
 })

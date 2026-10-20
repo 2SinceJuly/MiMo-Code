@@ -72,8 +72,9 @@ write* subsections inside that block, not the block itself.
    main/peer; flag only narrows content.
 3. `tool/checkpoint-description.ts` — unchanged. Base `memory.txt` stays;
    only `memory.checkpoint.txt` extra stays gated.
-4. Session recall reminder (`session/prompt.ts` `hasMemoryOrTasks`) — already
-   independent of the checkpoint flag; no change.
+4. Session memory directory reminder (`session/prompt.ts`
+   `sessionMemoryDirReminderTarget`, see `session-memory-dir-reminder.md`) —
+   gated on `servesCheckpoint`, independent of the checkpoint flag.
 5. `memory.disable_write` remains the write switch (separate axis); this
    feature does not couple prompts to it.
 

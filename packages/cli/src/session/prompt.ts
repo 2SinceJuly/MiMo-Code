@@ -5,6 +5,7 @@ import os from "os"
 import z from "zod"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2, COMPOSE_REMINDER_MARKER } from "./message-v2"
+import { metaDir } from "./checkpoint-paths"
 export { COMPOSE_REMINDER_MARKER }
 import {
   base64ByteSize,
@@ -22,7 +23,7 @@ import { Log, Token } from "../util"
 import { SessionRevert } from "./revert"
 import * as Session from "./session"
 import { Agent, resolveStoredAgent } from "../agent/agent"
-import { decideAskRouting, hasActorTool, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { decideAskRouting, SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
 import { makeTerminalNotifier } from "@/actor/notification"
 import { inboxControllerRef, schedulerRef, type Lane } from "@/inbox"
 import { MAX_CLAIM_PER_STEP, type Receipt } from "@/inbox/schema"
@@ -52,7 +53,6 @@ import { computeLastMessageInfo } from "./last-message-info"
 import { usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
-import { Global } from "@/global"
 import { NotFoundError, Database, eq, and, inArray, isNull } from "@/storage"
 import { InboxTable } from "@/inbox/inbox.sql"
 import * as QueueSync from "@/inbox/sync"
@@ -204,41 +204,50 @@ import { SessionPrefixSnapshot } from "./prefix-snapshot"
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
 
-// Recall-reminder hints, using each tool's JSON invocation shape. `hasActor`
-// false drops the actor line for an agent the tool is masked out for. Exported
-// for unit testing.
-export function recallHintLines(hasActor = true): string[] {
-  return [
-    `- memory({ operation: "search", query: "<keyword>" })`,
-    `- task({ operation: "list" })`,
-    ...(hasActor ? [`- actor({ operation: "status", actor_id: "<id>" })`] : []),
-  ]
-}
-
 // Stable substring markers for user-side synthetic reminders that must be
 // persisted once per message (runLoop reloads msgs from DB every step; bare
 // parts.push re-attaches a new PartID and reorders the user tail → prompt-cache miss).
 // COMPOSE_REMINDER_MARKER re-exported from message-v2 (hydrate promotes it to head).
-export const RECALL_REMINDER_MARKER = "This session has memory at"
 export const LOOP_STREAK_REMINDER_MARKER = "repeating the same action without making progress"
+export const SESSION_MEMORY_DIR_MARKER = "Current session memory directory:"
 
 /** True when `parts` already carries a non-ignored synthetic text reminder containing `marker`. */
 export function hasSyntheticReminder(parts: readonly MessageV2.Part[], marker: string): boolean {
   return parts.some((p) => p.type === "text" && p.synthetic === true && !p.ignored && p.text.includes(marker))
 }
 
-export function buildRecallReminderText(input: { sessMemDir: string; hints: string[] }): string {
+export function buildSessionMemoryDirReminderText(dir: string): string {
   return [
     "<system-reminder>",
-    `${RECALL_REMINDER_MARKER} ${input.sessMemDir}/. Recall content`,
-    "not in your context with:",
-    input.hints[0],
-    `- read(file_path="${input.sessMemDir}/...")`,
-    ...input.hints.slice(1),
-    "",
-    "Don't ask the user about something memory may already record.",
+    `${SESSION_MEMORY_DIR_MARKER} ${dir}/ — the real path of \`<session_id>\` in the Memory system instructions.`,
     "</system-reminder>",
   ].join("\n")
+}
+
+// The system prompt keeps `<session_id>` literal so it stays byte-identical
+// across sessions; the real directory rides on one user message per context
+// window. `msgs` starts at the latest checkpoint/compaction boundary, so the
+// first own user message is the session's first message or the boundary.
+// An inherited history (fork copy / contextFrom) already showing another
+// session's directory gets the reminder on the newest user message instead,
+// leaving the shared prefix untouched. A target the model already answered
+// (compaction summaries excluded) was sent without the reminder; rewriting it
+// would invalidate the cached prefix, so the window waits for its next boundary.
+export function sessionMemoryDirReminderTarget(input: {
+  msgs: readonly MessageV2.WithParts[]
+  sessionID: SessionID
+  dir: string
+}): MessageV2.WithParts | undefined {
+  const users = input.msgs.filter((m) => m.info.role === "user")
+  if (users.some((m) => hasSyntheticReminder(m.parts, `${input.dir}/`))) return undefined
+  const target = users.some((m) => hasSyntheticReminder(m.parts, SESSION_MEMORY_DIR_MARKER))
+    ? users.at(-1)
+    : users.find((m) => m.info.sessionID === input.sessionID)
+  if (!target) return undefined
+  const answered = input.msgs.some(
+    (m) => m.info.role === "assistant" && m.info.parentID === target.info.id && !m.info.summary,
+  )
+  return answered ? undefined : target
 }
 
 export function buildLoopStreakReminderText(threshold: number): string {
@@ -5083,25 +5092,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 msg.parts.some((part) => part.type === "checkpoint" || part.type === "compaction"),
             )
 
-          // Per-user-message active recall reminder. Once the session has
-          // any memory artifacts (memory dir populated OR tasks recorded),
-          // append a brief recall protocol so the agent's reflex to query
-          // memory.search / task / actor / Read stays warm across many
-          // post-rebuild turns. Cost ~120 tokens per turn, conditional on
-          // hasMemoryOrTasks. Persisted + marker-deduped so multi-step turns
-          // do not re-push after reload (prompt-cache stability).
-          const lastUserMsgForRecall = msgs.findLast((m) => m.info.role === "user")
-          if (lastUserMsgForRecall && !hasSyntheticReminder(lastUserMsgForRecall.parts, RECALL_REMINDER_MARKER)) {
-            const hasRecallTarget = yield* checkpoint
-              .hasMemoryOrTasks(sessionID)
-              .pipe(Effect.catch(() => Effect.succeed(false)))
-            if (hasRecallTarget) {
-              const sessMemDir = path.join(Global.Path.data, "memory", "sessions", sessionID)
-              const hints = recallHintLines(hasActorTool(yield* resolveStoredAgent(agents, lastUser.agent)))
+          if (yield* actorRegistry.servesCheckpoint(sessionID, lastUser.agentID)) {
+            const sessionMemoryDir = metaDir(sessionID)
+            const target = sessionMemoryDirReminderTarget({ msgs, sessionID, dir: sessionMemoryDir })
+            if (target) {
               yield* ensurePersistedUserSynthetic({
-                message: lastUserMsgForRecall,
-                marker: RECALL_REMINDER_MARKER,
-                text: buildRecallReminderText({ sessMemDir, hints }),
+                message: target,
+                marker: `${SESSION_MEMORY_DIR_MARKER} ${sessionMemoryDir}/`,
+                text: buildSessionMemoryDirReminderText(sessionMemoryDir),
               })
             }
           }
