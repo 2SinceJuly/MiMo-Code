@@ -228,23 +228,26 @@ export function buildSessionMemoryDirReminderText(dir: string): string {
 // across sessions; the real directory rides on one user message per context
 // window. `msgs` starts at the latest checkpoint/compaction boundary, so the
 // first own user message is the session's first message or the boundary.
-// A user message the model already answered (compaction summaries excluded)
-// was sent without the reminder; rewriting it would invalidate the cached
-// prefix, so copied fork history and sessions predating the reminder get it
-// on the newest, not yet answered user message instead.
+// A user message followed by any model reply (compaction summaries excluded)
+// was already sent without the reminder — batched or mid-turn inputs never
+// become a reply's parentID, so position is the test. Rewriting sent history
+// would invalidate the cached prefix, so copied fork history and sessions
+// predating the reminder get it on the newest own user message instead.
 export function sessionMemoryDirReminderTarget(input: {
   msgs: readonly MessageV2.WithParts[]
   sessionID: SessionID
   dir: string
 }): MessageV2.WithParts | undefined {
-  const users = input.msgs.filter((m) => m.info.role === "user")
+  const users = input.msgs.filter((m) => m.info.role === "user" && m.info.sessionID === input.sessionID)
   if (users.some((m) => hasSyntheticReminder(m.parts, `${SESSION_MEMORY_DIR_MARKER} ${input.dir}/`))) return undefined
-  const unanswered = (target: MessageV2.WithParts | undefined) =>
+  const unsent = (target: MessageV2.WithParts | undefined) =>
     target &&
-    !input.msgs.some((m) => m.info.role === "assistant" && m.info.parentID === target.info.id && !m.info.summary)
+    !input.msgs
+      .slice(input.msgs.indexOf(target) + 1)
+      .some((m) => m.info.role === "assistant" && !m.info.summary)
       ? target
       : undefined
-  return unanswered(users.find((m) => m.info.sessionID === input.sessionID)) ?? unanswered(users.at(-1))
+  return unsent(users.at(0)) ?? unsent(users.at(-1))
 }
 
 export function buildLoopStreakReminderText(threshold: number): string {

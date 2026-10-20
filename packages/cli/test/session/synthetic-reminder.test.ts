@@ -107,6 +107,20 @@ describe("session memory directory reminder", () => {
     expect(sessionMemoryDirReminderTarget({ msgs: answered, sessionID, dir })).toBeUndefined()
   })
 
+  test("a batched input sent before a reply counts as sent though it is never a parentID", () => {
+    const msgs = [
+      message("msg_1", sessionID, "user", [textPart("first of batch")]),
+      message("msg_2", sessionID, "user", [textPart("second of batch")]),
+      message("msg_3", sessionID, "assistant", [], { parentID: "msg_2" }),
+    ]
+    expect(sessionMemoryDirReminderTarget({ msgs, sessionID, dir })).toBeUndefined()
+  })
+
+  test("never targets a contextFrom parent message", () => {
+    const msgs = [message("msg_1", parentID, "user", [textPart("parent")])]
+    expect(sessionMemoryDirReminderTarget({ msgs, sessionID, dir })).toBeUndefined()
+  })
+
   test("a checkpoint rebuild boundary is targeted even though its text names the directory", () => {
     const boundary = message("msg_5", sessionID, "user", [
       {
