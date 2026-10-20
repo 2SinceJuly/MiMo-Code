@@ -1168,28 +1168,27 @@ export const layer: Layer.Layer<
 
     const drainWriters = Effect.fn("SessionCheckpoint.drainWriters")(function* (input?: { timeoutMs?: number }) {
       const timeoutMs = input?.timeoutMs ?? 120_000
-      const pending = [...writers.values()]
-      if (pending.length === 0) return { drained: 0, timedOut: 0 }
+      const inFlight = [...writers.values()].map((state) => state.writing)
+      if (inFlight.length === 0) return { drained: 0, timedOut: 0 }
       log.info("draining checkpoint writers before shutdown", {
-        count: pending.length,
+        count: inFlight.length,
         timeoutMs,
       })
 
       // Deferred.await ignores fiber interruption during shutdown because
       // it resolves via Deferred.succeed in the detached writer. We only
       // need a collective upper bound so a stuck writer doesn't block exit.
-      yield* Effect.all(
-        pending.map((state) => Deferred.await(state.writing)),
-        { concurrency: "unbounded" },
-      ).pipe(
+      yield* Effect.all(inFlight.map((writing) => Deferred.await(writing)), { concurrency: "unbounded" }).pipe(
         Effect.timeout(timeoutMs),
         Effect.catch(() => Effect.succeed(undefined)),
       )
 
-      // Writers delete themselves from the map on success/failure, so anything
-      // still present after the timeout is a writer that didn't settle in time.
-      const timedOut = writers.size
-      const drained = pending.length - timedOut
+      // Classify the snapshot, not the live map: the settle watcher removes its
+      // entry only after a DB write, and writers started during the wait would
+      // otherwise be counted as timed out.
+      const settled = yield* Effect.forEach(inFlight, (writing) => Deferred.isDone(writing))
+      const drained = settled.filter(Boolean).length
+      const timedOut = inFlight.length - drained
       if (timedOut > 0) log.warn("drain timed out, writers still pending", { drained, timedOut })
       else log.info("drain complete", { drained })
       return { drained, timedOut }
