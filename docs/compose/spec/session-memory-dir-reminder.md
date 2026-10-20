@@ -3,7 +3,7 @@ feature: session-memory-dir-reminder
 status: delivered
 updated: 2026-09-27
 branch: feat/remove-recall-reminder
-commits: 113e319256..aad4951ba8
+commits: 4e58a80184..954ddecbac
 ---
 
 # Session Memory Directory Reminder
@@ -14,7 +14,7 @@ commits: 113e319256..aad4951ba8
 
 The runLoop persists one `Current session memory directory: <real dir>/` reminder per context window, for main/peer actors only (`servesCheckpoint`). It lands on the session's first user message, or on the boundary message after a checkpoint rebuild or compaction. Fork copies and sessions that predate the change get it on their next new user message. Messages already sent to the model are never rewritten.
 
-**Verification** — `bun typecheck` (packages/cli): PASS. `bun test --timeout 60000 test/session test/actor test/tool/actor-subagent-gating.test.ts`: PASS, 1658 pass / 0 fail / 1672 tests across 154 files. Independent review: two rounds; all findings fixed, none open.
+**Verification** — `bun typecheck` (packages/cli): PASS. `bun test --timeout 60000 test/session test/actor test/tool`: PASS, 2355 pass / 0 fail / 2378 tests across 205 files. Independent review: two rounds; all findings fixed, none open.
 
 **Journey log**
 
