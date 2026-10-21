@@ -1437,7 +1437,7 @@ describe("Actor.spawn structured output (P3)", () => {
     ),
   )
 
-  it.live("exhausted checkpoint-writer invalid output produces a failed actor outcome", () =>
+  it.live("checkpoint-writer invalid output exhausting a bounded server budget produces a failed actor outcome", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
         const actor = yield* Actor.Service
