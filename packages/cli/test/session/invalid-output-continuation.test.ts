@@ -24,6 +24,7 @@ import { tmpdir } from "../fixture/fixture"
 import {
   startScriptedLLMServer,
   textStopResponse,
+  toolCallResponse,
   emptyStopResponse,
   reasoningLengthResponse,
   reasoningStopResponse,
@@ -146,11 +147,10 @@ describe("invalid-output continuation — integration", () => {
           return { atBarrier, afterCancel, providerCalls: stub.captures.length }
         })),
       })
-      // Cancel after the turn settled changes nothing except clearing the retry
-      // record of that successful turn.
-      const withoutRecord = result.atBarrier.map((m) => ({ ...m, parts: m.parts.filter((p) => p.type !== "retry") }))
+      // Cancelling at the barrier, before the run reached its success exit, changes
+      // nothing: the retry record of the recovered step stays.
       expect(retryParts(result.atBarrier)).toHaveLength(1)
-      expect(result.afterCancel).toEqual(withoutRecord)
+      expect(result.afterCancel).toEqual(result.atBarrier)
       const assistants = assistantOnly(result.afterCancel)
       expect(assistants.length).toBe(1)
       const assistant = assistants[0]!
@@ -561,6 +561,58 @@ describe("invalid-output continuation — integration", () => {
           ),
       })
     } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a turn cancelled between tool steps keeps its retry record", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "notes.txt"), "fixture notes")
+    // The recorded step completes with tool-calls and no error; the run is then
+    // cancelled while the next step is being prepared, before any assistant for
+    // it exists. Nothing marks the turn as failed, so only a success-exit rule
+    // keeps the record.
+    const reached = Promise.withResolvers<void>()
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      { lines: toolCallResponse({ id: "call_0", name: "read", args: JSON.stringify({ filePath: path.join(tmp.path, "notes.txt") }) }) },
+      { lines: textStopResponse("never delivered") },
+    ])
+    const advance = spyOn(SessionPrefixSnapshot, "advance").mockImplementation(() =>
+      Effect.sync(reached.resolve).pipe(Effect.andThen(Effect.never)),
+    )
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      const kept = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-cancel-between-steps" })
+              const fiber = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Read the notes." }],
+              }).pipe(Effect.exit, Effect.forkChild)
+              yield* Effect.promise(() => reached.promise).pipe(Effect.timeout("10 seconds"))
+              yield* prompt.cancel(session.id)
+              yield* Fiber.join(fiber)
+              advance.mockRestore()
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const recorded = assistantOnly(msgs).find((m) => m.parts.some((p) => p.type === "retry"))
+              return { kept: retryParts(msgs), recorded: recorded?.info, calls: stub.captures.length }
+            }),
+          ),
+      })
+      expect(kept.calls).toBe(2)
+      expect(kept.recorded).toMatchObject({ finish: "tool-calls" })
+      expect(kept.recorded?.error).toBeUndefined()
+      expect(kept.kept).toHaveLength(1)
+      expect(kept.kept[0]).toMatchObject({ attempt: 1, kind: "server", message: "empty output" })
+    } finally {
+      advance.mockRestore()
       await stub.stop()
     }
   }, 30_000)

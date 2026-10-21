@@ -14,7 +14,7 @@ import {
 import { LSP } from "../lsp"
 import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
-import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/storage"
+import { Database, NotFoundError, and, desc, eq, inArray, lt, or, sql } from "@/storage"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProviderError } from "@/provider"
 import { errorMessage } from "@/util/error"
@@ -1427,6 +1427,24 @@ export function* stream(sessionID: SessionID, options?: { agentID?: string }) {
     if (!next.more || !next.cursor) break
     before = next.cursor
   }
+}
+
+/** Retry records of one actor slice, read without loading other parts. */
+export function retryParts(sessionID: SessionID, agentID: string): RetryPart[] {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: PartTable.id, message_id: PartTable.message_id, session_id: PartTable.session_id, data: PartTable.data })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
+      .where(and(
+        eq(PartTable.session_id, sessionID),
+        eq(MessageTable.agent_id, agentID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'retry'`,
+      ))
+      .orderBy(PartTable.id)
+      .all(),
+  )
+  return rows.map((row) => ({ ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id }) as RetryPart)
 }
 
 export function parts(message_id: MessageID) {

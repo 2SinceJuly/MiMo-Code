@@ -47,14 +47,14 @@ The unused `error: APIError` field is removed. The SDK types are regenerated; re
 
 - The retry part ID is never pushed to `ctx.stepPartIds`, so the `tapError` cleanup of a retry-safe failed attempt keeps it.
 - The empty-turn reset (`processor.ts`, empty/think-only branch) removes every part of the message except retry parts.
-- When `runLoop.dropEmptyAssistant` deletes a stale empty assistant, its retry part is carried to the next step's assistant of the same run, so the count stays visible.
+- When `runLoop.dropEmptyAssistant` deletes a stale empty assistant, its retry part is carried to the next step's assistant of the same run when that assistant answers the same user message, so the count stays visible.
 - A successful retried attempt does not remove the part; it stays visible above the recovered content until the turn ends.
 
 ### S2.4 Clearing
 
-- On every `runLoop` exit (normal final, structured-output capture, compaction stop, failure or interruption) the engine scans the actor's full message slice, ignoring compaction filtering. For each user turn whose newest assistant completed without error, every retry part on that turn's assistants is removed.
-- A turn whose newest assistant has an error (failed, aborted, abandoned) or is not completed keeps its retry parts, so the failed turn still shows how often it retried next to the error.
-- A turn superseded by a queued prompt is cleared on the exit of the run that handled it, because the rule looks at each user turn's own newest assistant.
+- Clearing happens only at the run loop's two success exits: the existing-assistant `final` classification and the structured-output capture. It runs after the goal gate and subagent wait, so a turn that re-enters keeps its records until it really ends.
+- It removes every retry part of the actor whose assistant answers the run's first user message or a later one (synthetic re-entries and queued prompts admitted into the same run belong to the completed work). Retry parts are found by a query over retry-typed parts of the actor slice, not by loading the slice.
+- Failure, abort, interruption (including cancellation between steps, when the last assistant finished with `tool-calls` and no error), compaction stop, text-loop give-up and blocked permission exits do not clear, so the turn still shows how often it retried.
 - A later successful resume of the same turn clears them by the same rule.
 
 ### S2.5 Model context
@@ -71,6 +71,6 @@ The unused `error: APIError` field is removed. The SDK types are regenerated; re
 - [ ] T1: Reshape `RetryPart` and regenerate the SDK — acceptance: typecheck passes with the S2.1 shape and the old `error` field gone (covers: S2.1)
 - [ ] T2: Write the retry part from stream and request retries for every actor — acceptance: integration test with two empty stops then text shows one retry part with `attempt` 2 and the empty-output message on the main assistant before the turn ends; a subagent run shows the same on its own assistant (covers: S2.2; depends: T1)
 - [ ] T3: Keep the part across cleanup — acceptance: after the empty-turn reset and a retry-safe stream failure the part still exists and no other residue survives (covers: S2.3; depends: T2)
-- [ ] T4: Clear on turn success, keep on failure/abort — acceptance: successful turn leaves no retry part; a structured-output turn and a turn superseded by a queued prompt are cleared; cancelled turn keeps it with the last attempt; bounded-exhausted turn keeps it next to the terminal error (covers: S2.4; depends: T2)
+- [ ] T4: Clear on turn success, keep on failure/abort — acceptance: successful turn leaves no retry part; a structured-output turn and a turn superseded by a queued prompt are cleared; cancelled turn keeps it with the last attempt; a turn cancelled between tool steps keeps it; bounded-exhausted turn keeps it next to the terminal error (covers: S2.4; depends: T2)
 - [ ] T5: Lock model context — acceptance: a request built from a history containing retry parts contains no retry content and no message created only from them (covers: S2.5; depends: T1)
 - [ ] T6: Verify — acceptance: repo typecheck and affected session/actor/server suites pass, results recorded (covers: S2; depends: T2, T3, T4, T5)
