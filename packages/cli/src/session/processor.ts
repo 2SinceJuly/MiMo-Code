@@ -970,9 +970,9 @@ export const layer: Layer.Layer<
 
             // Empty / think-only output is a failed step. Raise InvalidOutputError
             // so SessionRetry.policy (decide → retryable unknown) owns the retry
-            // budget instead of a parallel counter. Drop the empty turn from the
-            // database first so it never sits in session history; recreate a clean
-            // shell so the retry attempt has a live assistant to write into.
+            // budget instead of a parallel counter. Clear the empty turn's parts so
+            // it never sits in session history, keeping the assistant identity the
+            // retry writes into.
             // Length finish is owned by autoContinueOutputLength; json_schema
             // empty output is owned by structured-output retry.
             // Only replay when the stream is retrySafe (no tool side effects) and
@@ -997,10 +997,17 @@ export const layer: Layer.Layer<
               ) {
                 const reason = classification.type === "invalid" ? classification.reason : "think-only"
                 slog.info("invalid output, dropping empty turn", { reason, finish: ctx.assistantMessage.finish })
-                yield* session.removeMessage({
-                  sessionID: ctx.sessionID,
-                  messageID: ctx.assistantMessage.id,
-                })
+                // Reset the content but keep the message identity: removing the message and
+                // rebuilding it under the same ID is indistinguishable, on the wire, from a
+                // late frame of an already-deleted entity, so consumers that order by events
+                // discard the retried content for good.
+                for (const part of parts) {
+                  yield* session.removePart({
+                    sessionID: ctx.sessionID,
+                    messageID: ctx.assistantMessage.id,
+                    partID: part.id,
+                  })
+                }
                 ctx.assistantMessage.finish = undefined
                 ctx.assistantMessage.error = undefined
                 ctx.assistantMessage.time.completed = undefined
