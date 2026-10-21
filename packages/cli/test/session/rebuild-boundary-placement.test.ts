@@ -555,6 +555,87 @@ describe("rebuild boundary placement", () => {
     },
     60_000,
   )
+
+  test(
+    "an input still queued across two rebuilds and cancelled after the second reaches the next request",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        { lines: textStopResponse("live reply") },
+      ])
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const inbox = yield* InboxController.Service
+                const session = yield* sessions.create({ title: "queued across two rebuilds" })
+                const rebuild = prompt.command({
+                  sessionID: session.id,
+                  command: Command.Default.REBUILD,
+                  arguments: "",
+                  agent: "build",
+                })
+                const boundaries = Effect.map(sessions.messages({ sessionID: session.id }), (messages) =>
+                  messages.filter((message) => message.parts.some((part) => part.type === "checkpoint")),
+                )
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "start the task" }] })
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                const original = (yield* sessions.messages({ sessionID: session.id })).find(
+                  (message) => message.info.role === "user",
+                )!
+                const queuedID = MessageID.ascending()
+                yield* inbox.accept(
+                  {
+                    lane: { sessionID: session.id, agentID: "main" },
+                    message: { ...(original.info as MessageV2.User), id: queuedID, time: { created: Date.now() } },
+                    parts: [
+                      { id: PartID.ascending(), sessionID: session.id, messageID: queuedID, type: "text", text: "QUEUED-ACROSS-REBUILDS" },
+                    ],
+                    type: "prompt",
+                    idempotencyKey: queuedID,
+                  },
+                  { deferKick: true },
+                )
+                yield* rebuild
+                const first = (yield* boundaries)[0]!
+
+                yield* prompt.prompt({
+                  sessionID: session.id,
+                  agent: "build",
+                  noReply: true,
+                  parts: [{ type: "text", text: "a note after the first rebuild" }],
+                })
+                yield* seedCheckpoint(session.id, first.info.id)
+                yield* rebuild
+                const second = (yield* boundaries).at(-1)!
+                expect(second.info.id).not.toBe(first.info.id)
+                const marker = second.parts.find((part) => part.type === "checkpoint")!
+                if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
+                expect(marker.coveredUpTo).toBe(first.info.id)
+                expect(marker.deferredInputs).toEqual([queuedID])
+
+                expect(yield* inbox.abortSession(session.id)).toBe(1)
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "after rebuild" }] })
+                const request = conversation(server.captures.at(-1)!.messages)
+                expect(request.map((message) => message.role)).toEqual(["user", "user", "user"])
+                expect(text(request[0]!)).toContain("a note after the first rebuild")
+                expect(text(request[1]!)).toContain("QUEUED-ACROSS-REBUILDS")
+                expect(text(request[2]!)).toContain("after rebuild")
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
 })
 
 function seedCheckpoint(sessionID: SessionID, watermark: string) {

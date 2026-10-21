@@ -320,28 +320,22 @@ function undeliveredInputs(sessionID: SessionID): Set<MessageID> {
 
 /**
  * Main-slice messages after `after` (and before `before`, when given), oldest
- * first, without earlier boundaries and without undelivered inbox inputs;
- * `skipped` lists the undelivered inputs in that range.
+ * first, without earlier boundaries and without the `undelivered` inputs.
  */
 function conversationAfter(
   sessionID: SessionID,
+  undelivered: ReadonlySet<MessageID>,
   after: MessageID,
   before?: MessageID,
-): { messages: MessageV2.WithParts[]; skipped: MessageID[] } {
-  const undelivered = undeliveredInputs(sessionID)
+): MessageV2.WithParts[] {
   const messages: MessageV2.WithParts[] = []
-  const skipped: MessageID[] = []
   for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
     if (message.info.id === after) break
     if (message.info.id <= after || (before && message.info.id >= before)) continue
-    if (isBoundaryUser(message)) continue
-    if (undelivered.has(message.info.id)) {
-      skipped.push(message.info.id)
-      continue
-    }
+    if (isBoundaryUser(message) || undelivered.has(message.info.id)) continue
     messages.push(message)
   }
-  return { messages: messages.reverse(), skipped: skipped.reverse() }
+  return messages.reverse()
 }
 
 export type RebuildTail = { boundary: MessageID; messages: MessageV2.WithParts[] }
@@ -356,7 +350,10 @@ export function readRebuildTail(sessionID: SessionID, window: MessageV2.WithPart
   const boundary = window.findLast((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
   const part = boundary?.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
   if (!boundary || !part) return undefined
-  return { boundary: boundary.info.id, messages: conversationAfter(sessionID, part.coveredUpTo, boundary.info.id).messages }
+  return {
+    boundary: boundary.info.id,
+    messages: conversationAfter(sessionID, undeliveredInputs(sessionID), part.coveredUpTo, boundary.info.id),
+  }
 }
 
 /**
@@ -1714,8 +1711,12 @@ export const layer: Layer.Layer<
       // The tail is everything after the watermark at insert time; callers
       // hold a window read before their current step, so it is read here.
       // Unanswered user messages at its end are copied onto the boundary in
-      // full and stay out of the digest.
-      const { messages: tail, skipped: deferredInputs } = conversationAfter(input.sessionID, input.boundary)
+      // full and stay out of the digest. Every input the inbox still holds
+      // undelivered is recorded, including ones an earlier boundary deferred,
+      // so the newest boundary alone can bring back those that end unsent.
+      const undelivered = undeliveredInputs(input.sessionID)
+      const deferredInputs = [...undelivered].toSorted()
+      const tail = conversationAfter(input.sessionID, undelivered, input.boundary)
       const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
       const unanswered = tail.slice(answered)
       const digestUpTo = tail[answered - 1]?.info.id
@@ -1726,7 +1727,7 @@ export const layer: Layer.Layer<
         agentID: input.agentID,
         digestUpTo,
         boundary: input.boundary,
-        exclude: new Set([...unanswered.map((m) => m.info.id), ...undeliveredInputs(input.sessionID)]),
+        exclude: new Set([...unanswered.map((m) => m.info.id), ...undelivered]),
       }).pipe(Effect.catch(() => Effect.succeed({ text: "" })))
       if (!rendered.text) return false
 
