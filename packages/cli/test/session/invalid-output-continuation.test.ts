@@ -37,6 +37,10 @@ function assistantOnly(
   return msgs.filter((m): m is MessageV2.WithParts & { info: MessageV2.Assistant } => m.info.role === "assistant")
 }
 
+function retryParts(msgs: MessageV2.WithParts[]): MessageV2.RetryPart[] {
+  return msgs.flatMap((m) => m.parts.filter((p): p is MessageV2.RetryPart => p.type === "retry"))
+}
+
 // The retry must resend the first attempt's history unchanged: no injected reminder.
 function nonSystemMessages(capture: { messages: unknown }) {
   return (capture.messages as { role: string; content: unknown }[]).filter((m) => m.role !== "system")
@@ -291,7 +295,12 @@ describe("invalid-output continuation — integration", () => {
 
   test("ordinary actor retry deletes the empty turn and injects no reminder", async () => {
     await using tmp = await tmpdir({ git: true })
-    const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: textStopResponse("actor result") }])
+    let readRecord: (() => MessageV2.RetryPart[]) | undefined
+    let midTurn: MessageV2.RetryPart[] = []
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      { lines: textStopResponse("actor result"), beforeReply: async () => { midTurn = readRecord?.() ?? [] } },
+    ])
     try {
       await writeConfig(tmp.path, stub.origin)
       await Instance.provide({
@@ -302,6 +311,7 @@ describe("invalid-output continuation — integration", () => {
               const sessions = yield* Session.Service
               const prompt = yield* SessionPrompt.Service
               const session = yield* sessions.create({ title: "invalid-actor" })
+              readRecord = () => retryParts(MessageV2.page({ sessionID: session.id, limit: 50, agentID: "general-1" }).items)
               yield* prompt.prompt({
                 sessionID: session.id,
                 agent: "build",
@@ -317,6 +327,10 @@ describe("invalid-output continuation — integration", () => {
               const assistants = assistantOnly(msgs)
               expect(assistants.length).toBe(1)
               expect(assistants.some((m) => m.info.error)).toBe(false)
+              // The actor's own assistant carried the retry record while retrying.
+              expect(midTurn).toHaveLength(1)
+              expect(midTurn[0]).toMatchObject({ messageID: assistants[0]?.info.id, attempt: 1, message: "empty output" })
+              expect(retryParts(msgs)).toEqual([])
             }),
           ),
       })
@@ -363,10 +377,14 @@ describe("invalid-output continuation — integration", () => {
 
   test("consecutive empty stops keep retrying past the bounded unknown budget and recover", async () => {
     await using tmp = await tmpdir({ git: true })
+    // Read the live retry record while the third attempt is in flight, before the
+    // turn succeeds: it must exist on the main assistant with the latest attempt.
+    let readRecord: (() => MessageV2.RetryPart[]) | undefined
+    let midTurn: MessageV2.RetryPart[] = []
     const stub = startScriptedLLMServer([
       { lines: emptyStopResponse() },
       { lines: emptyStopResponse() },
-      { lines: emptyStopResponse() },
+      { lines: emptyStopResponse(), beforeReply: async () => { midTurn = readRecord?.() ?? [] } },
       { lines: textStopResponse("recovered after empties") },
     ])
     try {
@@ -379,6 +397,7 @@ describe("invalid-output continuation — integration", () => {
               const sessions = yield* Session.Service
               const prompt = yield* SessionPrompt.Service
               const session = yield* sessions.create({ title: "invalid-persistent" })
+              readRecord = () => retryParts(MessageV2.page({ sessionID: session.id, limit: 50 }).items)
               const result = yield* prompt.prompt({
                 sessionID: session.id,
                 agent: "build",
@@ -388,9 +407,15 @@ describe("invalid-output continuation — integration", () => {
               expect(result.info.role).toBe("assistant")
               if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
               expect(result.parts.some((p) => p.type === "text" && p.text === "recovered after empties")).toBe(true)
-              const assistants = assistantOnly(yield* sessions.messages({ sessionID: session.id, agentID: "main" }))
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const assistants = assistantOnly(msgs)
               expect(assistants.length).toBe(1)
               expect(assistants[0]?.info.id).toBe(result.info.id)
+              expect(midTurn).toHaveLength(1)
+              expect(midTurn[0]).toMatchObject({ messageID: result.info.id, attempt: 2, kind: "server", message: "empty output" })
+              // The turn succeeded: the retry record is cleared and never reached the model.
+              expect(retryParts(msgs)).toEqual([])
+              for (const capture of stub.captures) expect(JSON.stringify(capture.messages)).not.toContain("empty output")
             }),
           ),
       })
@@ -399,7 +424,7 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("cancel ends an endless empty-output retry with an aborted error", async () => {
+  test("cancel ends an endless empty-output retry with an aborted error and keeps the retry record", async () => {
     await using tmp = await tmpdir({ git: true })
     const reached = Promise.withResolvers<void>()
     let calls = 0
@@ -441,6 +466,10 @@ describe("invalid-output continuation — integration", () => {
       expect(outcome.after).toBe(outcome.settled)
       expect(outcome.assistants.length).toBe(1)
       expect(outcome.assistants[0]?.info.error?.name).toBe("MessageAbortedError")
+      const kept = retryParts(outcome.assistants)
+      expect(kept).toHaveLength(1)
+      expect(kept[0]).toMatchObject({ messageID: outcome.assistants[0]?.info.id, kind: "server", message: "empty output" })
+      expect(kept[0]!.attempt).toBeGreaterThanOrEqual(outcome.settled - 1)
     } finally {
       await stub.stop()
     }

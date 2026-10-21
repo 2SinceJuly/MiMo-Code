@@ -355,12 +355,21 @@ export const CompactionPart = PartBase.extend({
 })
 export type CompactionPart = z.infer<typeof CompactionPart>
 
+// Durable retry record of one assistant message: upserted on every retry of the
+// step, kept through retry cleanup, removed once the turn succeeds. Never sent
+// to the model.
 export const RetryPart = PartBase.extend({
   type: z.literal("retry"),
   attempt: z.number(),
-  error: APIError.Schema,
+  phase: z.enum(["request", "stream"]),
+  scope: z.enum(["request", "live-step"]),
+  kind: z.enum(["network", "rate_limit", "server", "stream", "unknown"]),
+  message: z.string(),
+  hostCode: z.string().optional(),
+  next: z.number(),
   time: z.object({
     created: z.number(),
+    updated: z.number(),
   }),
 }).meta({
   ref: "RetryPart",

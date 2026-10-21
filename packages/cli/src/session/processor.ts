@@ -237,6 +237,8 @@ interface ProcessorContext extends Input {
   retrySafe: boolean
   /** First provider frame of this process() already marked busy; later retry frames must not clobber session.status{retry}. */
   startedBusy: boolean
+  /** Durable retry record of this assistant message; survives retry cleanup, never part of stepPartIds. */
+  retryPart: MessageV2.RetryPart | undefined
 }
 
 type StreamEvent = Event
@@ -313,6 +315,7 @@ export const layer: Layer.Layer<
         textPartPersisted: false,
         retrySafe: true,
         startedBusy: false,
+        retryPart: undefined,
       }
       let aborted = false
       // Only the main agent owns session-level status. Subagents (explore,
@@ -322,6 +325,38 @@ export const layer: Layer.Layer<
       // and the TUI spinner stays spinning after the main agent has finished.
       const isMain = !ctx.assistantMessage.agentID || ctx.assistantMessage.agentID === "main"
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
+
+      // Every actor records its retries on its own assistant message, so the
+      // record is visible for subagents too and survives reloads until the turn
+      // succeeds. Max-mode candidate/judge retries are not the user-visible step.
+      const recordRetry = Effect.fn("SessionProcessor.recordRetry")(function* (info: {
+        phase: MessageV2.RetryPart["phase"]
+        scope: SessionRetry.RetryScope
+        kind: SessionRetry.RetryKind
+        message: string
+        hostCode?: string
+        next: number
+      }) {
+        if (info.scope !== "request" && info.scope !== "live-step") return
+        if (info.kind === "terminal") return
+        const existing = ctx.retryPart ??
+          MessageV2.parts(ctx.assistantMessage.id).find((part): part is MessageV2.RetryPart => part.type === "retry")
+        const now = Date.now()
+        ctx.retryPart = yield* session.updatePart({
+          id: existing?.id ?? PartID.ascending(),
+          messageID: ctx.assistantMessage.id,
+          sessionID: ctx.sessionID,
+          type: "retry",
+          attempt: (existing?.attempt ?? 0) + 1,
+          phase: info.phase,
+          scope: info.scope,
+          kind: info.kind,
+          message: info.message,
+          ...(info.hostCode ? { hostCode: info.hostCode } : {}),
+          next: info.next,
+          time: { created: existing?.time.created ?? now, updated: now },
+        } satisfies MessageV2.RetryPart)
+      })
 
       const parse = (e: unknown) =>
         MessageV2.fromLiveError(e, {
@@ -947,18 +982,27 @@ export const layer: Layer.Layer<
               // Request-ladder retries must write SessionStatus (not just bus events):
               // GET /session/status serves the same map after renderer reload.
               onRetryStatus: (info) =>
-                isMain
-                  ? status.setRetry(ctx.sessionID, {
-                      type: "retry",
-                      attempt: info.attempt,
-                      phaseAttempt: info.attempt,
-                      message: info.message,
-                      next: info.next,
-                      phase: info.phase,
-                      scope: info.scope,
-                      hostCode: info.hostCode,
-                    }).pipe(Effect.asVoid)
-                  : Effect.void,
+                Effect.gen(function* () {
+                  yield* recordRetry({
+                    phase: info.phase ?? "request",
+                    scope: info.scope ?? "request",
+                    kind: info.kind,
+                    message: info.message,
+                    hostCode: info.hostCode,
+                    next: info.next,
+                  })
+                  if (!isMain) return
+                  yield* status.setRetry(ctx.sessionID, {
+                    type: "retry",
+                    attempt: info.attempt,
+                    phaseAttempt: info.attempt,
+                    message: info.message,
+                    next: info.next,
+                    phase: info.phase,
+                    scope: info.scope,
+                    hostCode: info.hostCode,
+                  })
+                }),
             })
 
             yield* stream.pipe(
@@ -1002,6 +1046,7 @@ export const layer: Layer.Layer<
                 // late frame of an already-deleted entity, so consumers that order by events
                 // discard the retried content for good.
                 for (const part of parts) {
+                  if (part.type === "retry") continue
                   yield* session.removePart({
                     sessionID: ctx.sessionID,
                     messageID: ctx.assistantMessage.id,
@@ -1056,6 +1101,14 @@ export const layer: Layer.Layer<
                     : Effect.void,
                 set: (info) =>
                   Effect.gen(function* () {
+                    yield* recordRetry({
+                      phase: info.phase,
+                      scope: info.scope,
+                      kind: info.kind,
+                      message: info.message,
+                      hostCode: info.hostCode,
+                      next: info.next,
+                    })
                     let attempt = info.attempt
                     if (isMain) {
                       attempt = yield* status.setRetry(ctx.sessionID, {

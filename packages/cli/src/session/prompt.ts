@@ -4540,6 +4540,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return true
         })
 
+        // A turn that ends successfully drops its retry records. Failed, aborted or
+        // incomplete turns keep them so the retries stay visible next to the error.
+        const clearTurnRetryRecords = Effect.fn("SessionPrompt.clearTurnRetryRecords")(function* (
+          msgs: readonly MessageV2.WithParts[],
+        ) {
+          const start = msgs.findLastIndex((msg) => msg.info.role === "user" && !msg.parts.every(isSyntheticPart))
+          for (const msg of msgs.slice(start + 1)) {
+            if (msg.info.role !== "assistant") continue
+            for (const part of msg.parts) {
+              if (part.type !== "retry") continue
+              yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+            }
+          }
+        })
+
         // Stale empty / think-only assistant left in history (resume, crash). Drop
         // it and start a fresh step — the new step's process() raises
         // InvalidOutputError on empty output so SessionRetry.policy owns retries.
@@ -5189,6 +5204,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 continue
               }
               if (yield* goalGate(lastUser)) continue
+              if (classification.type === "final") yield* clearTurnRetryRecords(msgs)
               yield* slog.info("exiting loop", { classification: classification.type })
               break
             }
