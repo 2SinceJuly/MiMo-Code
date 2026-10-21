@@ -860,13 +860,21 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export function planResumeTrim(input: WithParts[], parentID: MessageID) {
   const parent = input.findIndex((message) => message.info.id === parentID && message.info.role === "user")
   if (parent < 0) throw new Error("Resume parent is missing")
+  const parentInfo = input[parent].info
+  const actor = (info: Info) => info.agentID ?? "main"
+  const earlierParents = new Set(input.slice(0, parent).filter(message => message.info.role === "user"
+    && message.info.sessionID === parentInfo.sessionID && actor(message.info) === actor(parentInfo)).map(message => message.info.id))
   const sourceTail = input.slice(parent + 1)
-  if (sourceTail.some((message) => message.info.role !== "assistant" || message.info.parentID !== parentID)) {
+  if (sourceTail.some((message) => message.info.role !== "assistant"
+    || message.info.sessionID !== parentInfo.sessionID || actor(message.info) !== actor(parentInfo)
+    || (message.info.parentID !== parentID && !earlierParents.has(message.info.parentID)))) {
     throw new Error("Resume trim crosses a parent boundary")
   }
   const removeMessages: MessageID[] = []
   const removeParts: Part[] = []
-  const tail = sourceTail.map((message) => ({
+  // Earlier owners can finish after this user was appended. They remain
+  // immutable history; only the resumed parent's blocks belong to this trim.
+  const tail = sourceTail.filter(message => message.info.role === "assistant" && message.info.parentID === parentID).map((message) => ({
     ...message,
     parts: message.parts.filter((part) => {
       if (part.type !== "tool" || part.execution !== "not-started" || part.metadata?.providerExecuted ||
@@ -955,7 +963,13 @@ export function planResumeTrim(input: WithParts[], parentID: MessageID) {
     }
     return [{ info, parts }]
   })
-  return { messages: [...input.slice(0, parent + 1), ...retained], removeMessages, removeParts, updateParts, updateMessages }
+  const byID = new Map(retained.map(message => [message.info.id, message]))
+  const merged = sourceTail.flatMap(message => {
+    if (message.info.role !== "assistant" || message.info.parentID !== parentID) return [message]
+    const retained = byID.get(message.info.id)
+    return retained ? [retained] : []
+  })
+  return { messages: [...input.slice(0, parent + 1), ...merged], removeMessages, removeParts, updateParts, updateMessages }
 }
 
 export function assertResumeModelBoundary(messages: ModelMessage[]) {

@@ -1301,6 +1301,9 @@ export const SessionRoutes = lazy(() =>
 
         c.status(200)
         c.header("Content-Type", "application/json")
+        // This is a streaming response. Node's adapter otherwise pre-reads a
+        // native Response and can convert an early read error into empty 200.
+        c.header("Transfer-Encoding", "chunked")
         return stream(c, async (stream) => {
           const body = c.req.valid("json")
           // Disconnect only detaches this stream. Admitted work lives in the
@@ -1315,7 +1318,14 @@ export const SessionRoutes = lazy(() =>
               c,
               SessionPrompt.Service.use((svc) => svc.prompt({ ...body, sessionID })),
             )
-            void stream.write(JSON.stringify(msg))
+            await stream.write(JSON.stringify(msg))
+          } catch (error) {
+            log.error("prompt response failed", { sessionID, error })
+            // Headers may already be sent. Unpersistable outcomes must fail the
+            // body read rather than close a successful response with empty JSON.
+            await stream.pipe(new ReadableStream<Uint8Array>({
+              start(controller) { controller.error(error) },
+            }))
           } finally {
             clearInterval(heartbeat)
             void signal
@@ -1363,10 +1373,8 @@ export const SessionRoutes = lazy(() =>
           SessionPrompt.Service.use((svc) => svc.promptAsync({ ...body, sessionID })),
         ).catch(async (err) => {
           log.error("prompt_async failed", { sessionID, error: err })
-          await Bus.publish(Session.Event.Error, {
-            sessionID,
-            error: new NamedError.Unknown({ message: err instanceof Error ? err.message : String(err) }).toObject(),
-          })
+          // Durable execution failures belong to the claim owner. Admission
+          // failures are returned by HTTP; cancellation/deletion are not relabelled.
           throw err
         }).finally(releaseInstance)
         if (!accepted.receiptId) return c.body(null, 204)
