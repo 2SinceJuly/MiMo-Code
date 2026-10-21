@@ -1429,8 +1429,8 @@ export function* stream(sessionID: SessionID, options?: { agentID?: string }) {
   }
 }
 
-/** Retry records of one actor slice, read without loading other parts. */
-export function retryParts(sessionID: SessionID, agentID: string): RetryPart[] {
+/** Retry records of one actor slice on assistants answering `fromUserID` or later, read without loading other parts. */
+export function retryParts(sessionID: SessionID, agentID: string, fromUserID: MessageID): RetryPart[] {
   const rows = Database.use((db) =>
     db
       .select({ id: PartTable.id, message_id: PartTable.message_id, session_id: PartTable.session_id, data: PartTable.data })
@@ -1440,6 +1440,8 @@ export function retryParts(sessionID: SessionID, agentID: string): RetryPart[] {
         eq(PartTable.session_id, sessionID),
         eq(MessageTable.agent_id, agentID),
         sql`json_extract(${PartTable.data}, '$.type') = 'retry'`,
+        sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+        sql`json_extract(${MessageTable.data}, '$.parentID') >= ${fromUserID}`,
       ))
       .orderBy(PartTable.id)
       .all(),

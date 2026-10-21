@@ -3968,9 +3968,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       agentID: string,
       fromUserID: MessageID,
     ) {
-      for (const part of MessageV2.retryParts(sessionID, agentID)) {
-        const owner = MessageV2.get({ sessionID, messageID: part.messageID }).info
-        if (owner.role !== "assistant" || owner.parentID < fromUserID) continue
+      for (const part of MessageV2.retryParts(sessionID, agentID, fromUserID)) {
         yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
       }
     })
@@ -5104,7 +5102,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           if (!lastUser) {
             throw new Error("No user message found in stream. This should never happen.")
           }
-          runFirstUserID ??= lastUser.id
+          runFirstUserID ??= msgs.findLast((msg) =>
+            msg.info.role === "user" && msg.info.id <= lastUser!.id && !msg.parts.every(isSyntheticPart),
+          )?.info.id ?? lastUser.id
           const taskReceipt = claimOwner.receipts.find((receipt) => receipt.inputMessageID === lastUser!.id)
           task_id = taskReceipt
             ? receiptPrompts.get(taskReceipt.id)?.task_id ?? lastUser.task_id
@@ -6358,6 +6358,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }).pipe(
           Effect.onExit(firePostSession),
           Effect.onExit((exit) => settleClaims({ sessionID, agentID: resolvedAgentID }, claimOwner, exit)),
+          // A record carried off a dropped empty step and never re-attached (the run
+          // ended before the next step's assistant existed) goes back onto the newest
+          // assistant of that user turn, so the turn keeps showing its retries.
+          Effect.onExit(() => Effect.gen(function* () {
+            const carried = carriedRetry
+            carriedRetry = undefined
+            if (!carried) return
+            const owner = (yield* sessions.messages({ sessionID, agentID: resolvedAgentID, limit: 20 }))
+              .findLast((msg) => msg.info.role === "assistant" && msg.info.parentID === carried.parentID)
+            if (owner) yield* sessions.updatePart({ ...carried.part, id: PartID.ascending(), messageID: owner.info.id })
+          })),
           Effect.ensuring(MCP.releaseTurnClients(mcpContext)),
           Effect.orDie,
         )

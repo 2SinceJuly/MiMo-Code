@@ -47,14 +47,14 @@ The unused `error: APIError` field is removed. The SDK types are regenerated; re
 
 - The retry part ID is never pushed to `ctx.stepPartIds`, so the `tapError` cleanup of a retry-safe failed attempt keeps it.
 - The empty-turn reset (`processor.ts`, empty/think-only branch) removes every part of the message except retry parts.
-- When `runLoop.dropEmptyAssistant` deletes a stale empty assistant, its retry part is carried to the next step's assistant of the same run when that assistant answers the same user message, so the count stays visible.
+- When `runLoop.dropEmptyAssistant` deletes a stale empty assistant, its retry part is carried to the next step's assistant of the same run when that assistant answers the same user message, so the count stays visible. If the run ends before such an assistant exists, the carried record is written back onto the newest assistant of that user turn on exit.
 - A successful retried attempt does not remove the part; it stays visible above the recovered content until the turn ends.
 
 ### S2.4 Clearing
 
 - Clearing happens only at the run loop's two success exits: the existing-assistant `final` classification and the structured-output capture. It runs after the goal gate and subagent wait, so a turn that re-enters keeps its records until it really ends.
-- It removes every retry part of the actor whose assistant answers the run's first user message or a later one (synthetic re-entries and queued prompts admitted into the same run belong to the completed work). Retry parts are found by a query over retry-typed parts of the actor slice, not by loading the slice.
-- Failure, abort, interruption (including cancellation between steps, when the last assistant finished with `tool-calls` and no error), compaction stop, text-loop give-up and blocked permission exits do not clear, so the turn still shows how often it retried.
+- It removes every retry part of the actor whose assistant answers the run's first real user message or a later one (synthetic re-entries and queued prompts admitted into the same run belong to the completed work). The run's first real user message is the newest non-synthetic user message at or before the run's first `lastUser`, so a run resumed on a synthetic re-entry still covers its real turn. Retry parts are selected by one query filtering part type, actor, assistant role and `parentID` in SQL, without loading the slice.
+- Failure, abort, interruption (including cancellation between steps, when the last assistant finished with `tool-calls` and no error), compaction stop (compaction reports success and failure with the same `stop`), text-loop give-up and blocked permission exits do not clear, so the turn still shows how often it retried.
 - A later successful resume of the same turn clears them by the same rule.
 
 ### S2.5 Model context
