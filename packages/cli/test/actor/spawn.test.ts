@@ -1447,7 +1447,8 @@ describe("Actor.spawn structured output (P3)", () => {
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
 
-        // SessionRetry unknown budget: 1 retry after the initial attempt.
+        // Empty output retries under the server budget, configured bounded here:
+        // 1 retry after the initial attempt.
         yield* llm.push(...Array.from({ length: 2 }, () => reply().stop()))
 
         const result = yield* actor.spawn({
@@ -1469,7 +1470,7 @@ describe("Actor.spawn structured output (P3)", () => {
         config: (url: string) => ({
           ...providerCfg(url),
           retry: {
-            unknown: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 1000 },
+            server: { mode: "bounded", maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 1000 },
           },
         }),
       },

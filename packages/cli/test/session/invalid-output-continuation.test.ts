@@ -2,8 +2,8 @@
  * Integration tests for T01: a `finish=stop` step with no usable output
  * (think-only = reasoning only, or empty = nothing at all) must not silently
  * break into an empty assistant. process() drops the empty turn and raises
- * InvalidOutputError so SessionRetry.policy (decide → retryable unknown) owns
- * the retry budget; on exhaustion the terminal InvalidOutputError is written.
+ * InvalidOutputError so SessionRetry.policy (decide → persistent server budget)
+ * owns the retry; it keeps retrying until usable output or cancellation.
  * No reminder message is injected.
  *
  * Driven through a real Session.prompt(...) against the scripted HTTP LLM stub.
@@ -65,8 +65,10 @@ function writeConfig(dir: string, origin: string) {
         build: { model: "alibaba/qwen-plus" },
         "checkpoint-writer": { model: "alibaba/qwen-plus" },
       },
-      // Empty/think-only output is retried via SessionRetry.policy (unknown budget).
+      // Empty/think-only output retries under the persistent server budget; the
+      // bounded unknown budget stays configured to prove it no longer applies.
       retry: {
+        server: { initialDelayMs: 1, maxDelayMs: 1 },
         unknown: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 2000 },
       },
     }),
@@ -359,11 +361,14 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("retry exhaustion writes a terminal InvalidOutputError", async () => {
+  test("consecutive empty stops keep retrying past the bounded unknown budget and recover", async () => {
     await using tmp = await tmpdir({ git: true })
-    // writeConfig sets retry.unknown.maxRetries=1: initial attempt + 1 retry,
-    // then the empty stop is terminal under SessionRetry.policy.
-    const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }, { lines: emptyStopResponse() }])
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      { lines: emptyStopResponse() },
+      { lines: emptyStopResponse() },
+      { lines: textStopResponse("recovered after empties") },
+    ])
     try {
       await writeConfig(tmp.path, stub.origin)
       await Instance.provide({
@@ -373,20 +378,19 @@ describe("invalid-output continuation — integration", () => {
             Effect.gen(function* () {
               const sessions = yield* Session.Service
               const prompt = yield* SessionPrompt.Service
-              const session = yield* sessions.create({ title: "invalid-exhaust" })
+              const session = yield* sessions.create({ title: "invalid-persistent" })
               const result = yield* prompt.prompt({
                 sessionID: session.id,
                 agent: "build",
                 parts: [{ type: "text", text: "Answer my question." }],
               })
-              expect(stub.captures.length).toBe(2)
+              expect(stub.captures.length).toBe(4)
               expect(result.info.role).toBe("assistant")
-              if (result.info.role === "assistant") expect(result.info.error?.name).toBe("InvalidOutputError")
-              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
-              const assistants = assistantOnly(msgs)
-              // Empty attempts were dropped; only the terminal assistant remains.
+              if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+              expect(result.parts.some((p) => p.type === "text" && p.text === "recovered after empties")).toBe(true)
+              const assistants = assistantOnly(yield* sessions.messages({ sessionID: session.id, agentID: "main" }))
               expect(assistants.length).toBe(1)
-              expect(assistants[0]?.info.error?.name).toBe("InvalidOutputError")
+              expect(assistants[0]?.info.id).toBe(result.info.id)
             }),
           ),
       })
@@ -394,6 +398,53 @@ describe("invalid-output continuation — integration", () => {
       await stub.stop()
     }
   })
+
+  test("cancel ends an endless empty-output retry with an aborted error", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const reached = Promise.withResolvers<void>()
+    let calls = 0
+    const stub = startScriptedLLMServer([
+      {
+        lines: emptyStopResponse(),
+        beforeReply: async () => {
+          calls++
+          if (calls === 5) reached.resolve()
+        },
+      },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      const outcome = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-persistent-cancel" })
+              const fiber = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.exit, Effect.forkChild)
+              yield* Effect.promise(() => reached.promise).pipe(Effect.timeout("10 seconds"))
+              yield* prompt.cancel(session.id)
+              yield* Fiber.join(fiber)
+              const settled = stub.captures.length
+              yield* Effect.sleep("200 millis")
+              const assistants = assistantOnly(yield* sessions.messages({ sessionID: session.id, agentID: "main" }))
+              return { settled, after: stub.captures.length, assistants }
+            }),
+          ),
+      })
+      expect(outcome.settled).toBeGreaterThan(2)
+      expect(outcome.after).toBe(outcome.settled)
+      expect(outcome.assistants.length).toBe(1)
+      expect(outcome.assistants[0]?.info.error?.name).toBe("MessageAbortedError")
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
 
   // [TP-SR-R21-07]
   test("GPT reasoning-only stop step is terminal and is not retried", async () => {
