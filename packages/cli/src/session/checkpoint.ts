@@ -499,15 +499,6 @@ export interface Interface {
 
   readonly hasCheckpoint: (sessionID: SessionID) => Effect.Effect<boolean>
 
-  /**
-   * Returns true when the session has any memory artifacts:
-   * either a populated `<data>/memory/sessions/<sid>/` directory, or
-   * any tasks recorded in the task registry. Used by the per-user-message
-   * recall reminder so it fires whenever there is anything to recall —
-   * not only when classic v2 checkpoints exist.
-   */
-  readonly hasMemoryOrTasks: (sessionID: SessionID) => Effect.Effect<boolean>
-
   /** Returns the content of the latest checkpoint file, or undefined if none exists. */
   readonly loadLatest: (sessionID: SessionID) => Effect.Effect<string | undefined>
 
@@ -1198,17 +1189,6 @@ export const layer: Layer.Layer<
       return yield* Effect.promise(() => Bun.file(checkpointPath(sessionID)).exists())
     })
 
-    const hasMemoryOrTasks = Effect.fn("SessionCheckpoint.hasMemoryOrTasks")(function* (sessionID: SessionID) {
-      const memoryRoot = yield* memory.root()
-      const sessMemDir = path.join(memoryRoot, "sessions", sessionID)
-      const memEntries = yield* Effect.promise(() =>
-        fs.readdir(sessMemDir).catch(() => [] as string[]),
-      )
-      if (memEntries.length > 0) return true
-      const tasks = yield* taskRegistry.list({ session_id: sessionID, include_terminal: true })
-      return tasks.length > 0
-    })
-
     const loadLatest = Effect.fn("SessionCheckpoint.loadLatest")(function* (sessionID: SessionID) {
       const content = yield* Effect.promise(() =>
         Bun.file(checkpointPath(sessionID)).text().catch(() => ""),
@@ -1779,7 +1759,6 @@ export const layer: Layer.Layer<
       waitForWriterSettlement,
       drainWriters,
       hasCheckpoint,
-      hasMemoryOrTasks,
       loadLatest,
       loadCheckpoints,
       renderIndex,

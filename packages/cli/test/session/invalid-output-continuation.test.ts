@@ -36,6 +36,11 @@ function assistantOnly(
   return msgs.filter((m): m is MessageV2.WithParts & { info: MessageV2.Assistant } => m.info.role === "assistant")
 }
 
+// The retry must resend the first attempt's history unchanged: no injected reminder.
+function nonSystemMessages(capture: { messages: unknown }) {
+  return (capture.messages as { role: string; content: unknown }[]).filter((m) => m.role !== "system")
+}
+
 afterEach(async () => {
   await Instance.disposeAll()
 })
@@ -182,7 +187,7 @@ describe("invalid-output continuation — integration", () => {
               const nonSystem = retry.filter((m) => m.role !== "system")
               expect(nonSystem.length).toBe(1)
               expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
-              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
+              expect(nonSystem).toEqual(nonSystemMessages(stub.captures[0]))
             }),
           ),
       })
@@ -224,7 +229,7 @@ describe("invalid-output continuation — integration", () => {
               const nonSystem = retry.filter((m) => m.role !== "system")
               expect(nonSystem.length).toBe(1)
               expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
-              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
+              expect(nonSystem).toEqual(nonSystemMessages(stub.captures[0]))
             }),
           ),
       })
@@ -256,7 +261,7 @@ describe("invalid-output continuation — integration", () => {
               const nonSystem = retry.filter((m) => m.role !== "system")
               expect(nonSystem.length).toBe(1)
               expect(nonSystem.some((m) => JSON.stringify(m.content).includes("no usable"))).toBe(false)
-              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
+              expect(nonSystem).toEqual(nonSystemMessages(stub.captures[0]))
               const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "general-1" })
               const assistants = assistantOnly(msgs)
               expect(assistants.length).toBe(1)
@@ -295,7 +300,7 @@ describe("invalid-output continuation — integration", () => {
               expect(nonSystem.length).toBe(1)
               expect(nonSystem.some((m) => JSON.stringify(m.content).includes("checkpoint writer turn ended"))).toBe(false)
               expect(nonSystem.some((m) => JSON.stringify(m.content).includes("CHECKPOINT_COMPLETE"))).toBe(false)
-              expect(nonSystem.some((m) => JSON.stringify(m.content).includes("system-reminder"))).toBe(false)
+              expect(nonSystem).toEqual(nonSystemMessages(stub.captures[0]))
               expect(result.parts.some((part) => part.type === "text" && part.text === "CHECKPOINT_COMPLETE")).toBe(true)
             }),
           ),
