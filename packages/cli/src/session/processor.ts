@@ -1175,6 +1175,14 @@ export const layer: Layer.Layer<
                       message: decision.message,
                       tools: toolParts.length,
                     })
+                    yield* recordRetry({
+                      phase: "stream",
+                      scope: "live-step",
+                      kind: decision.kind,
+                      message: decision.message,
+                      hostCode: decision.hostCode,
+                      next: Date.now(),
+                    })
                     if (isMain) {
                       yield* status
                         .setRetry(ctx.sessionID, {

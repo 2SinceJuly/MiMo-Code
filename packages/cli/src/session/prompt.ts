@@ -3957,6 +3957,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
       })
 
+    // A user turn that ended successfully drops its retry records; failed,
+    // aborted or incomplete turns keep them next to the error. A user turn ended
+    // successfully when its newest assistant completed without error. Runs on every
+    // runLoop exit over the actor's full slice (not the compaction-filtered
+    // context), so every success exit, records behind a compaction boundary and
+    // turns superseded by a queued prompt are all covered.
+    const clearTurnRetryRecords = Effect.fn("SessionPrompt.clearTurnRetryRecords")(function* (
+      sessionID: SessionID,
+      agentID: string,
+    ) {
+      const msgs = yield* sessions.messages({ sessionID, agentID })
+      const newest = new Map<string, MessageV2.Assistant>()
+      for (const msg of msgs) {
+        if (msg.info.role === "assistant") newest.set(msg.info.parentID, msg.info)
+      }
+      for (const msg of msgs) {
+        if (msg.info.role !== "assistant") continue
+        const last = newest.get(msg.info.parentID)
+        if (!last || last.error || last.time.completed === undefined) continue
+        for (const part of msg.parts) {
+          if (part.type !== "retry") continue
+          yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+        }
+      }
+    })
+
     const runLoop: (
       sessionID: SessionID,
       agentID?: string,
@@ -4015,6 +4041,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // prose text instead of a structured tool_use). Local to runLoop so each
         // fresh user turn starts clean.
         let textToolCallRetries = 0
+        // Retry record of an empty step dropped by dropEmptyAssistant, re-attached
+        // to the next step's assistant.
+        let carriedRetry: MessageV2.RetryPart | undefined
         const resolvedAgentID = agentID ?? "main"
         // MAIN user turns own the hint token. Child/hook runLoops must not overwrite it
         // (SessionRunState.cancel targets session:main only).
@@ -4540,29 +4569,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return true
         })
 
-        // A turn that ends successfully drops its retry records. Failed, aborted or
-        // incomplete turns keep them so the retries stay visible next to the error.
-        const clearTurnRetryRecords = Effect.fn("SessionPrompt.clearTurnRetryRecords")(function* (
-          msgs: readonly MessageV2.WithParts[],
-        ) {
-          const start = msgs.findLastIndex((msg) => msg.info.role === "user" && !msg.parts.every(isSyntheticPart))
-          for (const msg of msgs.slice(start + 1)) {
-            if (msg.info.role !== "assistant") continue
-            for (const part of msg.parts) {
-              if (part.type !== "retry") continue
-              yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
-            }
-          }
-        })
-
         // Stale empty / think-only assistant left in history (resume, crash). Drop
         // it and start a fresh step — the new step's process() raises
         // InvalidOutputError on empty output so SessionRetry.policy owns retries.
+        // Its retry record moves to the next step's assistant so the turn's retry
+        // count stays visible.
         const dropEmptyAssistant = Effect.fn("SessionPrompt.dropEmptyAssistant")(function* (input: {
           assistant: MessageV2.Assistant
         }) {
           if (input.assistant.error || input.assistant.summary || input.assistant.structured !== undefined) return false
           yield* slog.info("dropping empty assistant", { messageID: input.assistant.id })
+          carriedRetry = MessageV2.parts(input.assistant.id).find((part): part is MessageV2.RetryPart => part.type === "retry") ?? carriedRetry
           yield* sessions.removeMessage({
             sessionID: input.assistant.sessionID,
             messageID: input.assistant.id,
@@ -5204,7 +5221,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 continue
               }
               if (yield* goalGate(lastUser)) continue
-              if (classification.type === "final") yield* clearTurnRetryRecords(msgs)
               yield* slog.info("exiting loop", { classification: classification.type })
               break
             }
@@ -5581,7 +5597,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               for (const receipt of claimOwner.receipts) {
                 if (receipt.inputMessageID === message.parentID) receipt.preparedAssistantID = message.id
               }
-            }))),
+            })), Effect.tap((message) => {
+              const carried = carriedRetry
+              carriedRetry = undefined
+              return carried
+                ? sessions.updatePart({ ...carried, id: PartID.ascending(), messageID: message.id })
+                : Effect.void
+            })),
             () => Effect.gen(function* () {
               const handle = yield* processor.create({
                 assistantMessage: msg,
@@ -6336,6 +6358,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }).pipe(
           Effect.onExit(firePostSession),
           Effect.onExit((exit) => settleClaims({ sessionID, agentID: resolvedAgentID }, claimOwner, exit)),
+          Effect.onExit(() => clearTurnRetryRecords(sessionID, resolvedAgentID).pipe(Effect.ignore)),
           Effect.ensuring(MCP.releaseTurnClients(mcpContext)),
           Effect.orDie,
         )

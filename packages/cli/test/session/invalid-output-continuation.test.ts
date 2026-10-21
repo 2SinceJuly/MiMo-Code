@@ -146,7 +146,11 @@ describe("invalid-output continuation — integration", () => {
           return { atBarrier, afterCancel, providerCalls: stub.captures.length }
         })),
       })
-      expect(result.afterCancel).toEqual(result.atBarrier)
+      // Cancel after the turn settled changes nothing except clearing the retry
+      // record of that successful turn.
+      const withoutRecord = result.atBarrier.map((m) => ({ ...m, parts: m.parts.filter((p) => p.type !== "retry") }))
+      expect(retryParts(result.atBarrier)).toHaveLength(1)
+      expect(result.afterCancel).toEqual(withoutRecord)
       const assistants = assistantOnly(result.afterCancel)
       expect(assistants.length).toBe(1)
       const assistant = assistants[0]!
@@ -470,6 +474,92 @@ describe("invalid-output continuation — integration", () => {
       expect(kept).toHaveLength(1)
       expect(kept[0]).toMatchObject({ messageID: outcome.assistants[0]?.info.id, kind: "server", message: "empty output" })
       expect(kept[0]!.attempt).toBeGreaterThanOrEqual(outcome.settled - 1)
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a bounded budget that runs out keeps the retry record next to the terminal error", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const stub = startScriptedLLMServer([{ lines: emptyStopResponse() }])
+    try {
+      await Bun.write(
+        path.join(tmp.path, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          enabled_providers: ["alibaba"],
+          provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${stub.origin}/v1` } } },
+          agent: { build: { model: "alibaba/qwen-plus" } },
+          retry: { server: { mode: "bounded", maxRetries: 2, initialDelayMs: 1, maxDelayMs: 1, deadlineMs: 2000 } },
+        }),
+      )
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-bounded-record" })
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              })
+              expect(stub.captures.length).toBe(3)
+              if (result.info.role === "assistant") expect(result.info.error?.name).toBe("InvalidOutputError")
+              const kept = retryParts(yield* sessions.messages({ sessionID: session.id, agentID: "main" }))
+              expect(kept).toHaveLength(1)
+              expect(kept[0]).toMatchObject({ messageID: result.info.id, attempt: 2, kind: "server", message: "empty output" })
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  })
+
+  test("a turn superseded by a queued prompt still clears its retry record once it succeeded", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const queued = Promise.withResolvers<void>()
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      { lines: textStopResponse("first answer"), beforeReply: () => queued.promise },
+      { lines: textStopResponse("second answer") },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-queued-record" })
+              const first = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "First question." }],
+              }).pipe(Effect.forkChild)
+              yield* Effect.promise(async () => {
+                while (stub.captures.length < 2) await Bun.sleep(10)
+              }).pipe(Effect.timeout("10 seconds"))
+              const second = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Second question." }],
+              }).pipe(Effect.forkChild)
+              queued.resolve()
+              yield* Fiber.join(first)
+              yield* Fiber.join(second)
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "first answer"))).toBe(true)
+              expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "second answer"))).toBe(true)
+              expect(retryParts(msgs)).toEqual([])
+            }),
+          ),
+      })
     } finally {
       await stub.stop()
     }

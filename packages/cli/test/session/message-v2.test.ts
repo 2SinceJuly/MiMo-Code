@@ -524,7 +524,7 @@ describe("session.message-v2.toModelMessage", () => {
     const input: MessageV2.WithParts[] = [
       { info: userInfo("m-user-1"), parts: [{ ...basePart("m-user-1", "u1"), type: "text", text: "first" }] as MessageV2.Part[] },
       {
-        info: assistantInfo("m-retry-only", "m-user-1", new MessageV2.AbortedError({ message: "Aborted" }).toObject()),
+        info: assistantInfo("m-retry-only", "m-user-1"),
         parts: [retry("m-retry-only", "r1")],
       },
       { info: userInfo("m-user-2"), parts: [{ ...basePart("m-user-2", "u2"), type: "text", text: "second" }] as MessageV2.Part[] },
