@@ -1,6 +1,6 @@
 ---
 feature: empty-turn-part-reset
-status: in-progress
+status: delivered
 updated: 2026-10-20
 source: Branch fix/empty-turn-part-reset
 ---
@@ -8,6 +8,18 @@ source: Branch fix/empty-turn-part-reset
 # Empty Turn Keeps Message Identity
 
 ## Report
+
+**What was built** — Dropping a think-only/empty step now clears that message's parts and keeps the message itself, instead of deleting the message and rebuilding a shell under the same ID. The retry writes into the surviving identity, the trigger condition and the retry request history are untouched, and the final persisted result is still exactly one assistant message carrying the retried answer. On the wire the sequence is now `message.part.removed` × N → `message.updated` → `message.part.updated`; no `message.removed` is published for a turn that will still deliver content.
+
+The change removes the ambiguity that made downstreams lose the reply: a delete followed by a same-ID rebuild is byte-identical on the wire to a late frame of an already-deleted entity, so consumers that order by events (Mimo Desktop's session-state center) discarded the rebuilt content permanently — the whole turn vanished from the UI, survived session switching (history reads are gated by the same deletion fact), and only came back after an engine restart. It also aligns this branch with the retry cleanup that already existed in the same file (`Effect.tapError` removes parts, never the message), and as a side effect the transcript writer now learns about those part deletions instead of relying on an FK cascade that emitted no events.
+
+**Verification** — `bun run typecheck` (repo root) PASS: `@mimo-ai/shared`, `@mimo-ai/plugin`, `@mimo-ai/sdk`, `@mimo-ai/cli` all clean. `cd packages/cli && bun test test/session` PASS: 1397 pass / 13 skip / 1 todo / 0 fail, 1411 tests across 125 files. After the review-driven edits: `bun run typecheck` PASS again, and `bun test test/session/invalid-output-continuation.test.ts test/session/retry.test.ts test/session/classify.test.ts` PASS: 151 pass / 0 fail. Regression proof is RED→GREEN: before the fix the new test failed with `expect(observed.removedMessages).not.toContain(assistant.info.id)` receiving the final assistant's own ID in the collected `message.removed` list; after the fix it passes with no removals. Independent review: no CRITICAL findings; two pre-merge items (stale `processor.ts` comment, unrecorded T3 results) and the inaccurate `isEmptyAssistantResidue` wording in [S2] were fixed and re-verified.
+
+**Journey log** —
+1. The same symptom was first attacked on the Desktop side by narrowing its deletion tombstone; two unit tests rejected it. Reads and events are two connections with no cross-connection ordering, so a tombstone is the only thing stopping a live event produced before a query-side prune from resurrecting the row.
+2. The next attempt let a live `message.updated` lift the tombstone, on the theory that a rebuild must announce itself. A Desktop e2e fixture (`retiredFrame`) then rejected it: it builds exactly `message.removed` → same-ID `message.updated` → `part.updated` and requires all of it to be dropped. Rebuild and stale frame are indistinguishable by shape, so no consumer-side predicate can separate them.
+3. That closed the question: the defect is the engine expressing "reset content" as "delete identity". `runLoop.dropEmptyAssistant` is safe by contrast — it deletes and then mints a *fresh* ID on the next step, so it never rebuilds under the same identity.
+4. Reviewer caught that [S2]'s original exhaustion claim was wrong: on retry exhaustion `halt` sets `assistantMessage.error`, so `dropEmptyAssistant` bails and the error shell is kept — `isEmptyAssistantResidue` only runs on the resume path. Behaviour is unchanged there; the wording was corrected rather than the code.
 
 ## [S1] Problem
 
@@ -25,7 +37,7 @@ source: Branch fix/empty-turn-part-reset
 - message 身份在重试前后不变，下游不需要「重建」语义，删除事实也不再被误用成「这条消息被删了」。
 - 与同文件 `Effect.tapError` 的重试清理对齐：那里本来就只 `removePart`、不动 message 身份。
 - 删 parts 使用 `process` 内已读到的 `MessageV2.parts(ctx.assistantMessage.id)`（覆盖该 message 的全部 parts），而不是 `ctx.stepPartIds`（只含当前 step），避免多 step 场景残留。
-- 空壳兜底不变：重试耗尽后 `isEmptyAssistantResidue` 会清理无 parts 的 assistant；重试期间由 `liveOwned` 保护不误删。
+- 空壳终态不变：重试耗尽时 `halt` 写入 `assistantMessage.error`，runLoop 的 `dropEmptyAssistant` 因 error 存在而跳过，最终留下一条带 error 的空 assistant——与改动前一致。`isEmptyAssistantResidue` / `cleanupEmptyResidueAssistants` 只在 resume 路径使用，不参与本分支。
 
 契约不变项：
 
@@ -40,6 +52,6 @@ source: Branch fix/empty-turn-part-reset
 - 不提升 `dropping empty turn` 的日志级别。
 
 ## Tasks
-- [ ] T1: 回归测试锁住事件流 — acceptance: 空回合重试后，最终 assistant message 的 ID 不出现在 `message.removed` 事件中、空回合 parts 不残留在最终消息里，且该测试在当前实现上失败 (covers: S2)
-- [ ] T2: 把丢弃路径改为 removePart — acceptance: T1 转绿，`invalid-output-continuation` 既有用例全部保持绿 (covers: S2; depends: T1)
-- [ ] T3: 验证 — acceptance: typecheck 与受影响 session 测试套件通过，并记录每条命令结果 (covers: S2; depends: T2)
+- [x] T1: 回归测试锁住事件流 — acceptance: 空回合重试后，最终 assistant message 的 ID 不出现在 `message.removed` 事件中、空回合 parts 不残留在最终消息里，且该测试在当前实现上失败 (covers: S2)
+- [x] T2: 把丢弃路径改为 removePart — acceptance: T1 转绿，`invalid-output-continuation` 既有用例全部保持绿 (covers: S2; depends: T1)
+- [x] T3: 验证 — acceptance: typecheck 与受影响 session 测试套件通过，并记录每条命令结果 (covers: S2; depends: T2)

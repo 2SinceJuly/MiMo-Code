@@ -217,15 +217,15 @@ describe("invalid-output continuation — integration", () => {
               const prompt = yield* SessionPrompt.Service
               const session = yield* sessions.create({ title: "empty-turn-identity" })
               const removedMessages: string[] = []
-              const stopMessages = Bus.subscribe(MessageV2.Event.Removed, (event) => {
+              const unsubscribe = Bus.subscribe(MessageV2.Event.Removed, (event) => {
+                if (event.properties.sessionID !== session.id) return
                 removedMessages.push(event.properties.messageID)
               })
               yield* prompt.prompt({
                 sessionID: session.id,
                 agent: "build",
                 parts: [{ type: "text", text: "Answer my question." }],
-              })
-              yield* Effect.sync(stopMessages)
+              }).pipe(Effect.ensuring(Effect.sync(unsubscribe)))
               const messages = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
               return { messages, removedMessages }
             }),

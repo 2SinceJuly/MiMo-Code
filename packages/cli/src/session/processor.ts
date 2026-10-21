@@ -970,9 +970,9 @@ export const layer: Layer.Layer<
 
             // Empty / think-only output is a failed step. Raise InvalidOutputError
             // so SessionRetry.policy (decide → retryable unknown) owns the retry
-            // budget instead of a parallel counter. Drop the empty turn from the
-            // database first so it never sits in session history; recreate a clean
-            // shell so the retry attempt has a live assistant to write into.
+            // budget instead of a parallel counter. Clear the empty turn's parts so
+            // it never sits in session history, keeping the assistant identity the
+            // retry writes into.
             // Length finish is owned by autoContinueOutputLength; json_schema
             // empty output is owned by structured-output retry.
             // Only replay when the stream is retrySafe (no tool side effects) and
