@@ -25,8 +25,9 @@ afterEach(async () => {
 const FILES = ["alpha.txt", "beta.txt"]
 const fileBody = (name: string) => Array.from({ length: 300 }, (_, i) => `${name} body line ${i}`).join("\n")
 
-function config(origin: string): Partial<Config.Info> {
+function config(origin: string, extra: Partial<Config.Info> = {}): Partial<Config.Info> {
   return {
+    ...extra,
     enabled_providers: ["test"],
     model: "test/model",
     provider: {
@@ -146,6 +147,85 @@ describe("rebuild boundary placement", () => {
                 expect(text(second[1]!)).toContain("after rebuild")
                 expect(text(second[2]!)).toContain("live reply")
                 expect(text(second[3]!)).toContain("next step")
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
+
+  test(
+    "an automatic rebuild after a tool step digests that step, keeps the turn on its user message, and ends after the final step",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting", { promptTokens: 1_000 }) },
+        {
+          lines: toolCallsResponse(
+            FILES.map((file, index) => ({ id: `call-${index}`, name: "read", args: JSON.stringify({ file_path: file }) })),
+            { promptTokens: 50_000 },
+          ),
+        },
+        { lines: textStopResponse("checks passed", { promptTokens: 1_000 }) },
+        { lines: textStopResponse("extra reply", { promptTokens: 1_000 }) },
+      ])
+      try {
+        await using tmp = await tmpdir({
+          git: true,
+          config: config(server.origin, {
+            compaction: { reserved: 100, max_context: 40_000 },
+            checkpoint: { thresholds: [], reserved: 100 },
+          }),
+        })
+        for (const file of FILES) await Bun.write(path.join(tmp.path, file), fileBody(file))
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const session = yield* sessions.create({ title: "automatic rebuild after a tool step" })
+                const say = (value: string) =>
+                  prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: value }] })
+
+                yield* say("start the task")
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                expect(watermark.info.role).toBe("assistant")
+                yield* seedCheckpoint(session.id, watermark.info.id)
+
+                yield* say("run the checks on alpha and beta")
+                expect(server.captures).toHaveLength(3)
+
+                const stored = yield* sessions.messages({ sessionID: session.id })
+                const user = stored.find((message) => message.info.role === "user" && message.info.id > watermark.info.id)!
+                const step = stored.find((message) => message.parts.some((part) => part.type === "tool"))!
+                const boundary = stored.find((message) => message.parts.some((part) => part.type === "checkpoint"))!
+                const reply = stored.at(-1)!
+                expect(stored.map((message) => message.info.id).slice(-4)).toEqual([
+                  user.info.id,
+                  step.info.id,
+                  boundary.info.id,
+                  reply.info.id,
+                ])
+                const marker = boundary.parts.find((part) => part.type === "checkpoint")!
+                if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
+                expect(marker.coveredUpTo).toBe(watermark.info.id)
+                expect(marker.digestUpTo).toBe(step.info.id)
+                if (reply.info.role !== "assistant") throw new Error("expected the final assistant reply")
+                expect(reply.info.parentID).toBe(user.info.id)
+                expect(reply.parts.some((part) => part.type === "text" && part.text === "checks passed")).toBe(true)
+
+                const request = conversation(server.captures[2]!.messages)
+                expect(request.map((message) => message.role)).toEqual(["user"])
+                const digest = text(request[0]!)
+                expect(digest).toContain("run the checks on alpha and beta")
+                expect(digest).toContain("# Recent activity")
+                for (const file of FILES) expect(digest).toContain(`read(file_path="${file}")`)
+                expect(digest).toContain("mid-loop in an autonomous task")
+                for (const file of FILES) expect(JSON.stringify(request)).not.toContain(`${file} body line 0`)
               }),
             ),
         })

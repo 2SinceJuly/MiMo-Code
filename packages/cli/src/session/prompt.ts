@@ -48,8 +48,8 @@ import { InstallationVersion } from "@/installation/version"
 import type { JSONObject, JSONSchema7 } from "@ai-sdk/provider"
 import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
+import { isBoundaryUser } from "./tail-digest"
 import { SessionCompaction } from "./compaction"
-import { computeLastMessageInfo } from "./last-message-info"
 import { usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
@@ -922,7 +922,6 @@ export const layer = Layer.effect(
     // fall back to compaction when it returns false.
     const rebuildFromCheckpoint = Effect.fn("SessionPrompt.rebuildFromCheckpoint")(function* (input: {
       sessionID: SessionID
-      msgs: MessageV2.WithParts[]
       agentID?: string
       agent: string
       model: { providerID: string; id: string }
@@ -941,10 +940,6 @@ export const layer = Layer.effect(
         .insertRebuildBoundary({
           sessionID: input.sessionID,
           boundary,
-          lastMessageInfo: computeLastMessageInfo(input.msgs.map((m) => m.info)),
-          // Freeze the digest range at insert time: the tail (boundary,
-          // digestUpTo] is what the boundary's digest stands for.
-          digestUpTo: input.msgs.at(-1)?.info.id,
           agentID: input.agentID,
           agent: input.agent,
           model: { providerID: input.model.providerID, modelID: input.model.id },
@@ -1017,7 +1012,6 @@ export const layer = Layer.effect(
     // and therefore drops all pre-boundary history with no summary at all.
     const rebuildEnsuringCheckpoint = Effect.fn("SessionPrompt.rebuildEnsuringCheckpoint")(function* (input: {
       sessionID: SessionID
-      msgs: MessageV2.WithParts[]
       agentID?: string
       agent: string
       model: { providerID: string; id: string }
@@ -5017,6 +5011,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
+          // A rebuild boundary is appended after its tail, so the user message and
+          // steps of the turn it interrupted sit outside the window. Turn state
+          // (resume parent, last user, last assistant) is read from the window with
+          // that tail restored in front of the later messages; the model still
+          // receives `msgs`.
+          const newestUser = msgs.findLast((msg) => msg.info.role === "user")
+          const turnMsgs =
+            newestUser && isBoundaryUser(newestUser) ? SessionCheckpoint.withRebuildTail(sessionID, msgs) : msgs
+
           let lastUser: MessageV2.User | undefined
           let lastAssistant: MessageV2.Assistant | undefined
           let lastFinished: MessageV2.Assistant | undefined
@@ -5027,24 +5030,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // plan did not require strict tail (empty-shell siblings); trailing-user is strict.
           const lockParentOnStep0 = step === 0 && parentUserID !== undefined
           if (lockParentOnStep0) {
-            const lockedIdx = msgs.findIndex((m) => m.info.role === "user" && m.info.id === parentUserID)
+            const lockedIdx = turnMsgs.findIndex((m) => m.info.role === "user" && m.info.id === parentUserID)
             if (lockedIdx < 0) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer in session slice ${sessionID}`,
               )
             }
-            const laterUser = msgs.slice(lockedIdx + 1).some((m) => m.info.role === "user")
+            const laterUser = turnMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "user")
             if (laterUser) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer the last user in ${sessionID}`,
               )
             }
-            if (strictParentTail && msgs.slice(lockedIdx + 1).some((m) => m.info.role === "assistant")) {
+            if (strictParentTail && turnMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "assistant")) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer the slice tail in ${sessionID}`,
               )
             }
-            const locked = msgs[lockedIdx]!
+            const locked = turnMsgs[lockedIdx]!
             if (locked.info.role !== "user") {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer in session slice ${sessionID}`,
@@ -5052,8 +5055,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
             lastUser = locked.info
           }
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const msg = msgs[i]
+          for (let i = turnMsgs.length - 1; i >= 0; i--) {
+            const msg = turnMsgs[i]
             if (!lastUser && msg.info.role === "user") lastUser = msg.info
             if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info
             if (!lastFinished && msg.info.role === "assistant" && msg.info.finish) lastFinished = msg.info
@@ -5117,7 +5120,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
-          const lastAssistantMsg = msgs.findLast(
+          const lastAssistantMsg = turnMsgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
           )
           // Some providers return "stop" even when the assistant message contains tool calls.
@@ -5367,7 +5370,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // logic/boundary conditions can't drift.
             const attempt: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
               sessionID,
-              msgs,
               agentID: lastUser.agentID,
               agent: lastUser.agent,
               model: { providerID: model.providerID, id: model.id },
@@ -6155,7 +6157,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   // compaction fallback stays ONE condition, not three lookalikes.
                   const attempt2: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
                     sessionID,
-                    msgs,
                     agentID: lastUser.agentID,
                     agent: lastUser.agent,
                     model: { providerID: model.providerID, id: model.id },
@@ -6473,9 +6474,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // inserts the legitimate rebuild BOUNDARY (a role:"user" message carrying
       // a `checkpoint` part, via rebuildFromCheckpoint → insertRebuildBoundary)
       // and then lets the session settle — WITHOUT fabricating a second,
-      // standalone user turn. The auto path (~prompt.ts:3205/3778) `continue`s
-      // the runLoop because it has a PENDING user message to answer; a manual
-      // /rebuild is a user-initiated maintenance action with NO pending
+      // standalone user turn. The auto paths in runLoop `continue` the loop,
+      // which then judges the interrupted turn from the boundary's tail: a
+      // finished turn ends there, an unfinished tool loop takes its next step.
+      // A manual /rebuild is a user-initiated maintenance action with NO pending
       // question, so after inserting the boundary it simply returns to idle
       // (no model turn, no auto-reply).
       //
@@ -6505,7 +6507,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const rebuildFailedMsg =
           "A checkpoint was written but the context could not be rebuilt from it. Context is unchanged and nothing was compacted — retry /rebuild, or report this if it repeats."
         const rebuiltMsg =
-          "Context rebuilt from the latest checkpoint. Recent messages are preserved; earlier context is now summarized."
+          "Context rebuilt from the latest checkpoint. Earlier context is now summarized, and recent activity is listed in its place."
 
         // Set busy status so the TUI shows a spinner while we wait on the
         // writer (cases 2/3) or assemble context (case 1).
@@ -6520,7 +6522,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // session produces the first checkpoint on the spot rather than deferring.
         const attempt: RebuildAttempt = yield* rebuildEnsuringCheckpoint({
           sessionID: input.sessionID,
-          msgs,
           agentID: lastUser?.info.agentID ?? "main",
           agent: agentName,
           model: { providerID: model.providerID, id: model.modelID },

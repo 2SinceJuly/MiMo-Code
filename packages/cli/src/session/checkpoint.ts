@@ -36,7 +36,7 @@ import {
   migrateProjectMemory,
 } from "./checkpoint-paths"
 import { readBudgeted, readBudgetedSectionAware } from "./budgeted-read"
-import type { LastMessageInfo } from "./last-message-info"
+import { computeLastMessageInfo, type LastMessageInfo } from "./last-message-info"
 import { CHECKPOINT_TEMPLATE, MEMORY_TEMPLATE, NOTES_TEMPLATE, CHECKPOINT_SECTION_BUDGETS } from "./checkpoint-templates"
 import { adjustBoundaryForApiInvariants } from "./boundary"
 import { alignToNonToolResultUser } from "./checkpoint-align"
@@ -125,8 +125,9 @@ function userMsgText(parts: Array<{ type: string; text?: string; synthetic?: boo
 function autonomousLoopReminder(): string {
   return [
     "<system-reminder>",
-    "You are mid-loop in an autonomous task. Continue your work loop:",
-    "respond to the tool results below and proceed to the next iteration.",
+    "You are mid-loop in an autonomous task. The outputs of your latest tool",
+    "calls are not in this context. Continue the work loop from where the",
+    "blocks above leave off, and re-run a call when you need its output.",
     "</system-reminder>",
   ].join("\n")
 }
@@ -309,11 +310,12 @@ export function computeBoundary(
 }
 
 /**
- * The checkpoint writer reads full-fidelity history. A rebuild boundary
- * appended after its tail leaves (coveredUpTo, digestUpTo] outside the
- * window, so read that tail back from the main slice in stream order and
- * place it between the boundary and the messages after it: the list the
- * writer receives is boundary, tail, live messages. A legacy boundary's tail
+ * The conversation as stored, for readers that need more than the model
+ * window: the checkpoint writer (full-fidelity history) and the runLoop's
+ * turn state. A rebuild boundary appended after its tail leaves
+ * (coveredUpTo, digestUpTo] outside the window, so read that tail back from
+ * the main slice in stream order and place it between the boundary and the
+ * messages after it: boundary, tail, live messages. A legacy boundary's tail
  * is already inside the window. Earlier boundaries inside the id range stay
  * out, as they were outside the window that preceded the rebuild.
  */
@@ -542,7 +544,7 @@ export interface Interface {
        */
       boundary?: MessageID
     },
-  ) => Effect.Effect<{ text: string; hasActivity: boolean }>
+  ) => Effect.Effect<{ text: string }>
 
   readonly lastBoundary: (sessionID: SessionID) => Effect.Effect<MessageID | undefined>
 
@@ -551,15 +553,15 @@ export interface Interface {
   /**
    * Append a synthetic checkpoint-boundary user message (boundary marker +
    * index overview + rebuild context + active-actors text) after the newest
-   * message of the session, so the tail after `boundary` falls outside every
-   * later window. Inserts nothing and returns false when rebuild context is
-   * empty. Never deletes DB messages.
+   * main-agent message of the session, so the tail after `boundary` falls
+   * outside every later window. The tail and the rebuild context's closing
+   * reminder are taken from that newest message at insert time. Inserts
+   * nothing and returns false when rebuild context is empty. Never deletes DB
+   * messages.
    */
   readonly insertRebuildBoundary: (input: {
     sessionID: SessionID
     boundary: MessageID
-    lastMessageInfo?: LastMessageInfo
-    digestUpTo?: MessageID
     agentID?: string
     agent: string
     model: { providerID: string; modelID: string }
@@ -1250,7 +1252,7 @@ export const layer: Layer.Layer<
       // message-v2.ts populates info.agentID from agent_id column), and the
       // runLoop calls this with that value. Treating "main" as subagent here
       // would skip rebuild → fall through to F39 compaction → context loss.
-      if (opts?.agentID && opts.agentID !== "main") return { text: "", hasActivity: false }
+      if (opts?.agentID && opts.agentID !== "main") return { text: "" }
 
       // Decide whether a usable checkpoint exists using the WATERMARK
       // (last_checkpoint_message_id), not the on-disk file's text. The writer's
@@ -1389,7 +1391,7 @@ export const layer: Layer.Layer<
         actors.length === 0 &&
         recentUserEntries.length === 0
       ) {
-        return { text: "", hasActivity: false }
+        return { text: "" }
       }
 
       const lines: string[] = []
@@ -1576,7 +1578,7 @@ export const layer: Layer.Layer<
         }
       }
 
-      return { text: lines.join("\n"), hasActivity }
+      return { text: lines.join("\n") }
     })
 
     const lastBoundary = Effect.fn("SessionCheckpoint.lastBoundary")(function* (sessionID: SessionID) {
@@ -1627,30 +1629,23 @@ export const layer: Layer.Layer<
     const insertRebuildBoundary = Effect.fn("SessionCheckpoint.insertRebuildBoundary")(function* (input: {
       sessionID: SessionID
       boundary: MessageID
-      lastMessageInfo?: LastMessageInfo
-      /**
-       * Newest message that already exists at insert time. Stored as
-       * CheckpointPart.digestUpTo: the tail (boundary, digestUpTo] is what
-       * the boundary's Recent activity digest stands for and what the
-       * checkpoint writer reads back from the database.
-       */
-      digestUpTo?: MessageID
       agentID?: string
       agent: string
       model: { providerID: string; modelID: string }
     }) {
+      // The newest main-agent message at insert time ends the tail. Callers
+      // hold a window read before their current step, so it is read here.
+      const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
+      const digestUpTo = newest && newest.info.id > input.boundary ? newest.info.id : undefined
       const rendered = yield* renderRebuildContext(input.sessionID, {
-        lastMessageInfo: input.lastMessageInfo,
+        lastMessageInfo: newest ? computeLastMessageInfo([newest.info]) : undefined,
         agentID: input.agentID,
-        digestUpTo: input.digestUpTo,
+        digestUpTo,
         boundary: input.boundary,
-      }).pipe(Effect.catch(() => Effect.succeed({ text: "", hasActivity: false })))
+      }).pipe(Effect.catch(() => Effect.succeed({ text: "" })))
       if (!rendered.text) return false
 
       const indexText = yield* renderIndex(input.sessionID).pipe(Effect.catch(() => Effect.succeed("")))
-      // digestUpTo is an existing message, so the tail is non-empty exactly
-      // when it lies after the watermark.
-      const hasTail = input.digestUpTo !== undefined && input.digestUpTo > input.boundary
 
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
@@ -1658,7 +1653,8 @@ export const layer: Layer.Layer<
         model: { providerID: input.model.providerID as ProviderID, modelID: input.model.modelID as ModelID },
         sessionID: input.sessionID,
         agent: input.agent,
-        time: { created: Date.now() },
+        // Never earlier than the tail, even if the clock went back.
+        time: { created: Math.max(Date.now(), newest?.info.time.created ?? 0) },
       })
 
       yield* session.updatePart({
@@ -1669,7 +1665,7 @@ export const layer: Layer.Layer<
         checkpointDir: "",
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
-        ...(hasTail ? { digestUpTo: input.digestUpTo } : {}),
+        ...(digestUpTo ? { digestUpTo } : {}),
       })
 
       if (indexText) {
