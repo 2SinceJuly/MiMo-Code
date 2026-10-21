@@ -3888,16 +3888,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // Runner acquisition precedes the runLoop's busy publication.
         if (Exit.isFailure(yield* state.assertNotBusy(input.sessionID, input.agentID).pipe(Effect.exit))) return []
       }
-      // Rebuild boundaries are not turns: a resumable user is the one a boundary carries, not the boundary.
-      const msgs = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })).filter(
-        (m) => !isRebuildBoundary(m),
-      )
+      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
       const candidates: RecoveryCandidate[] = []
       for (const [index, msg] of msgs.entries()) {
         if (msg.info.role !== "assistant") continue
         // Only incomplete assistants are recovery candidates (shared with resume planning via
         // isRecoveryWorthyAssistant). error => not finished => recoverable; abandoned
-        // completed+AbortedError remains retryable.
+        // completed+AbortedError remains retryable. One followed by a rebuild boundary sits in
+        // that boundary's tail, outside the window, and is not offered.
         if (!isRecoveryWorthyAssistant(msg.info, msg.parts)) continue
         const assistant = msg.info
         if (!msgs.some((parent) => parent.info.role === "user" && parent.info.id === assistant.parentID)) continue
@@ -3911,8 +3909,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
       // [SR-R21 D16f] Trailing user with no following assistant: explicit Resume starts the next
       // turn from that user. Source (manual/notification/synthetic/noReply) is irrelevant — Resume
-      // is the user's intent to run now.
-      const last = msgs.at(-1)
+      // is the user's intent to run now. A rebuild boundary is not that user; the unanswered user
+      // it carries is.
+      const last = msgs.findLast((m) => !isRebuildBoundary(m))
       if (last?.info.role === "user") {
         candidates.push({
           kind: "parent-user",
@@ -5014,6 +5013,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               unprocessedPrompt = true
             }
           }
+
+          msgs = SessionCheckpoint.withEndedInputs(sessionID, msgs)
 
           // A rebuild boundary is appended after its tail, so the user message and
           // steps of the turn it interrupted sit outside the window. Turn state

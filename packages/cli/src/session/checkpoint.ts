@@ -12,11 +12,11 @@ import { ActorRegistry } from "@/actor/registry"
 import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
-import { Database, and, eq, inArray, isNull, or } from "@/storage"
+import { Database, and, eq, gt, inArray, isNull, lt, not, or } from "@/storage"
 import { InboxTable } from "@/inbox/inbox.sql"
 import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
-import { SessionTable } from "./session.sql"
+import { MessageTable, SessionTable } from "./session.sql"
 import * as Session from "./session"
 import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
@@ -44,7 +44,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
-import { isBoundaryUser, renderTailDigest } from "./tail-digest"
+import { isBoundaryUser, isRebuildBoundary, renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -364,6 +364,43 @@ export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail
   const missing = tail.messages.filter((m) => !present.has(m.info.id))
   if (missing.length === 0) return window
   return [...window.slice(0, index + 1), ...missing, ...window.slice(index + 1)]
+}
+
+/**
+ * Inputs a rebuild left out of its tail while they were queued, and whose
+ * inbox receipt then ended without delivery (stop, restart sweep,
+ * rejection). Outside a rebuild such an input stays in the window, so it is
+ * placed right after the newest rebuild boundary of `window`.
+ */
+export function withEndedInputs(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isRebuildBoundary(m))
+  if (index < 0) return window
+  const boundary = window[index]
+  const part = boundary.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")!
+  const rows = Database.use((db) =>
+    db
+      .select({ id: MessageTable.id })
+      .from(InboxTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, InboxTable.input_message_id))
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          eq(InboxTable.receiver_actor_id, "main"),
+          isNull(InboxTable.delivery_message_id),
+          not(inArray(InboxTable.state, ["accepted", "claimed"])),
+          gt(MessageTable.id, part.coveredUpTo),
+          lt(MessageTable.id, boundary.info.id),
+        ),
+      )
+      .all(),
+  )
+  const present = new Set(window.map((m) => m.info.id))
+  const ended = [...new Set(rows.map((row) => row.id))]
+    .filter((id) => !present.has(id))
+    .toSorted()
+    .map((messageID) => MessageV2.get({ sessionID, messageID }))
+  if (ended.length === 0) return window
+  return [...window.slice(0, index + 1), ...ended, ...window.slice(index + 1)]
 }
 
 function renderSectionBudgets(budgets: Record<string, number>): string {

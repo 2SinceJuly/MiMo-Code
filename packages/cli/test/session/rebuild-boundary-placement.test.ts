@@ -407,6 +407,77 @@ describe("rebuild boundary placement", () => {
     },
     60_000,
   )
+
+  test(
+    "a queued input left out of a rebuild and then cancelled is offered for resume and reaches the request after the boundary",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        { lines: textStopResponse("resumed reply") },
+      ])
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const inbox = yield* InboxController.Service
+                const session = yield* sessions.create({ title: "cancelled queued input" })
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "start the task" }] })
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                const original = (yield* sessions.messages({ sessionID: session.id })).find(
+                  (message) => message.info.role === "user",
+                )!
+                const queuedID = MessageID.ascending()
+                yield* inbox.accept(
+                  {
+                    lane: { sessionID: session.id, agentID: "main" },
+                    message: { ...(original.info as MessageV2.User), id: queuedID, time: { created: Date.now() } },
+                    parts: [
+                      { id: PartID.ascending(), sessionID: session.id, messageID: queuedID, type: "text", text: "QUEUED-THEN-CANCELLED" },
+                    ],
+                    type: "prompt",
+                    idempotencyKey: queuedID,
+                  },
+                  { deferKick: true },
+                )
+
+                yield* prompt.command({
+                  sessionID: session.id,
+                  command: Command.Default.REBUILD,
+                  arguments: "",
+                  agent: "build",
+                })
+                const boundary = (yield* sessions.messages({ sessionID: session.id })).find((message) =>
+                  message.parts.some((part) => part.type === "checkpoint"),
+                )!
+                expect(JSON.stringify(boundary.parts)).not.toContain("QUEUED-THEN-CANCELLED")
+
+                expect(yield* inbox.abortSession(session.id)).toBe(1)
+                const recovery = yield* prompt.recovery({ sessionID: session.id, agentID: "main" })
+                expect(recovery.map((item) => (item.kind === "parent-user" ? item.userMessageID : item.kind))).toEqual([
+                  queuedID,
+                ])
+
+                const result = yield* prompt.resume({ sessionID: session.id, userMessageID: queuedID, agentID: "main" })
+                expect(result.info).toMatchObject({ role: "assistant", parentID: queuedID, finish: "stop" })
+                const request = conversation(server.captures.at(-1)!.messages)
+                expect(request.map((message) => message.role)).toEqual(["user", "user"])
+                expect(text(request[0]!)).not.toContain("QUEUED-THEN-CANCELLED")
+                expect(text(request[1]!)).toContain("QUEUED-THEN-CANCELLED")
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
 })
 
 function seedCheckpoint(sessionID: SessionID, watermark: string) {

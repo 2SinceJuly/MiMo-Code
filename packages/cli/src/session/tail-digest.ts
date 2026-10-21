@@ -105,7 +105,7 @@ function checkpointPart(msg: WithParts): CheckpointPart | undefined {
  * before the tail they digest. A boundary appended after its tail is created
  * no earlier than the newest tail message.
  */
-export function isLegacyBoundary(boundary: WithParts, newest: WithParts): boolean {
+function isLegacyBoundary(boundary: WithParts, newest: WithParts): boolean {
   return boundary.info.time.created < newest.info.time.created
 }
 
