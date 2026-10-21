@@ -2,7 +2,7 @@
 feature: empty-turn-part-reset
 status: delivered
 updated: 2026-10-20
-source: Branch fix/empty-turn-part-reset
+source: PR #2695
 ---
 
 # Empty Turn Keeps Message Identity
