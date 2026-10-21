@@ -12,6 +12,7 @@
 import path from "path"
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
+import { Bus } from "../../src/bus"
 import { SessionPrefixSnapshot } from "../../src/session/prefix-snapshot"
 import { Server } from "../../src/server/server"
 import { Instance } from "../../src/project/instance"
@@ -191,6 +192,54 @@ describe("invalid-output continuation — integration", () => {
             }),
           ),
       })
+    } finally {
+      await stub.stop()
+    }
+  })
+
+  // 空回合丢弃必须重置内容而不是删除身份：先删再用同一 ID 重建的事件序列
+  // 与「已删实体的迟到帧」完全同形，按事件顺序判定的下游只能按删除处理，
+  // 重试后的正文就永久不再出现（切会话也补不回来，只有重启换新中心才恢复）。
+  test("dropping an empty turn keeps the assistant message identity", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const stub = startScriptedLLMServer([
+      { lines: reasoningStopResponse("let me think about this...") },
+      { lines: textStopResponse("final answer") },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      const observed = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "empty-turn-identity" })
+              const removedMessages: string[] = []
+              const stopMessages = Bus.subscribe(MessageV2.Event.Removed, (event) => {
+                removedMessages.push(event.properties.messageID)
+              })
+              yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              })
+              yield* Effect.sync(stopMessages)
+              const messages = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              return { messages, removedMessages }
+            }),
+          ),
+      })
+      const assistants = assistantOnly(observed.messages)
+      expect(assistants.length).toBe(1)
+      const assistant = assistants[0]!
+      // 身份保留：空回合重置后重试写入的仍是同一条 assistant，删除事实不指向它。
+      expect(observed.removedMessages).not.toContain(assistant.info.id)
+      expect(observed.removedMessages).toEqual([])
+      // 内容重置：空回合的 reasoning 不残留，最终只有重试后的正文。
+      expect(assistant.parts.some((part) => part.type === "text" && part.text === "final answer")).toBe(true)
+      expect(assistant.parts.some((part) => part.type === "reasoning")).toBe(false)
     } finally {
       await stub.stop()
     }

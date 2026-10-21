@@ -997,10 +997,17 @@ export const layer: Layer.Layer<
               ) {
                 const reason = classification.type === "invalid" ? classification.reason : "think-only"
                 slog.info("invalid output, dropping empty turn", { reason, finish: ctx.assistantMessage.finish })
-                yield* session.removeMessage({
-                  sessionID: ctx.sessionID,
-                  messageID: ctx.assistantMessage.id,
-                })
+                // Reset the content but keep the message identity: removing the message and
+                // rebuilding it under the same ID is indistinguishable, on the wire, from a
+                // late frame of an already-deleted entity, so consumers that order by events
+                // discard the retried content for good.
+                for (const part of parts) {
+                  yield* session.removePart({
+                    sessionID: ctx.sessionID,
+                    messageID: ctx.assistantMessage.id,
+                    partID: part.id,
+                  })
+                }
                 ctx.assistantMessage.finish = undefined
                 ctx.assistantMessage.error = undefined
                 ctx.assistantMessage.time.completed = undefined
