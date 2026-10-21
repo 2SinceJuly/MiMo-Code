@@ -1,9 +1,9 @@
 ---
 feature: lossless-session-db
 status: in-progress
-updated: 2026-10-20
+updated: 2026-10-21
 branch: feat/lossless-session-db
-commits: 4e58a80184..3db8b9bb19
+commits: 4e58a80184..e5954afaa8
 ---
 
 # Lossless Session DB
@@ -14,13 +14,18 @@ commits: 4e58a80184..3db8b9bb19
 
 A config that still contains `compaction.prune` loads normally: `normalizeLoadedConfig` drops the key and logs one warning, the mechanism already used for `auto_worktree`. Legacy rows that carry `time.compacted` keep rendering the cleared marker, and `history get` returns their stored text. The generated SDK type loses `compaction.prune`.
 
-**Verification** — From `packages/cli`: `bun typecheck` PASS; `packages/sdk` `bun run typecheck` PASS. New and affected tests (`turn-end-lossless`, `rebuild-boundary-lossless`, `legacy-compacted-row`, `config`, `prune`, `checkpoint-thresholds`, `overflow`): 177 pass / 0 fail. `turn-end-lossless` and `rebuild-boundary-lossless` fail on the base commit and pass on head. Full `bun test`: 6118 pass / 79 fail / 41 skip / 2 errors; every failing file (MCP, project, worktree, cron-bridge, revert-compact, tool-fail-cascade, tool-gate-cancel, apply_patch, spawn-notification) passes when run alone, and the timing-dependent MCP failure in `prompt-effect.test.ts` reproduces with base sources — PRE-EXISTING test interference.
+The rebuild boundary is appended after the newest message (S2.6). `insertRebuildBoundary` reads the tail from the database at insert time, digests it up to the last assistant message, copies the unanswered user messages at its end onto the boundary in full, and records undelivered queued inputs as `deferredInputs` instead of digesting them. `collapseCheckpointTail` applies only to legacy boundaries. The checkpoint writer and the runLoop's turn state read the window with the tail restored (`readRebuildTail` / `withRebuildTail`); the runLoop also places deferred inputs that ended undelivered after the boundary (`withEndedInputs`). `recovery` and resume do not treat a rebuild boundary as a turn. The closing reminder is the loop reminder after a tool step and nothing after a finished reply. The generated SDK type gains `CheckpointPart.deferredInputs`.
+
+**Verification** — From `packages/cli`: `bun typecheck` PASS; `packages/sdk` `bun run typecheck` PASS. The rebuild, checkpoint, fork, threshold, writer, reminder, prune, resume, recovery and overflow test files with `server/session-recovery` and the TUI status tests: 51 files, 514 pass / 0 fail after rerunning `plan-reminder-dedup` alone. Every new test for T6–T11 was run on the commit before its change and failed there for the intended reason. Full `bun test` on the final head: 6131 pass / 77 fail / 41 skip; every failing file (MCP, project, worktree, migrate-global, llm-server tokens, tool-fail-cascade, tool-gate-cancel) passes when run alone except one `prompt-effect` MCP reminder test that exceeds its 5 s limit only under load and passes alone in about 2 s — PRE-EXISTING test interference and timing.
 
 **Journey log**
 - `compaction.prune` was opt-in on the base commit (unset meant off) and the test preload isolates XDG config, so a regression test for the old prune path must write `compaction.prune: true` into the fixture's `mimocode.json`; the first version of the T1 test omitted it and passed on base.
 - Removed config keys are stripped in `normalizeLoadedConfig` because the config schema is strict.
 - Proving a test fails on base: copy it into a detached worktree at the base commit with `node_modules` symlinked, run the file, then remove the worktree.
-- The full `bun test` run takes about 34 minutes and shows about 79 failures from interference between test files that do not reproduce per file.
+- The full `bun test` run takes about 34 minutes and shows about 79 failures from interference between test files that do not reproduce per file. Under heavy machine load it takes up to 52 minutes and more files fail on 5 s timeouts; rerun each failing file alone.
+- Moving the boundary to the end made it the runLoop's newest user message, which also drives turn state, resume and recovery; every reader that inferred the turn from the window needed the restored tail.
+- Automatic rebuild sites hold a window read before their current step, so the tail must be read at insert time.
+- Inbox receipt state cannot tell an input a rebuild skipped from one that had already ended, so the boundary records the skipped ids, and only the newest boundary's record is read.
 
 ## [S1] Problem
 
