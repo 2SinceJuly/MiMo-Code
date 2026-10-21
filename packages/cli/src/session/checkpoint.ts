@@ -12,7 +12,8 @@ import { ActorRegistry } from "@/actor/registry"
 import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
-import { Database, and, eq, or } from "@/storage"
+import { Database, and, eq, inArray, isNull, or } from "@/storage"
+import { InboxTable } from "@/inbox/inbox.sql"
 import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
 import { SessionTable } from "./session.sql"
@@ -43,7 +44,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
-import { isBoundaryUser, isLegacyBoundary, renderTailDigest } from "./tail-digest"
+import { isBoundaryUser, renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -128,21 +129,6 @@ function autonomousLoopReminder(): string {
     "You are mid-loop in an autonomous task. The outputs of your latest tool",
     "calls are not in this context. Continue the work loop from where the",
     "blocks above leave off, and re-run a call when you need its output.",
-    "</system-reminder>",
-  ].join("\n")
-}
-
-function stopReminder(focusTaskID: string | undefined): string {
-  const taskHint = focusTaskID
-    ? `Consult this session's tasks/${focusTaskID}/progress.md head section.`
-    : "Consult the most recently active task's progress.md head section."
-  return [
-    "<system-reminder>",
-    "The previous assistant turn ended with a stop. Before stopping again,",
-    taskHint,
-    "Compare the Task spec to the latest Progress entries. If the task is",
-    "incomplete, proceed to the next concrete step. Only stop when the spec",
-    "is genuinely satisfied or you need user input you cannot infer.",
     "</system-reminder>",
   ].join("\n")
 }
@@ -310,31 +296,74 @@ export function computeBoundary(
 }
 
 /**
+ * Main-slice user inputs the inbox has accepted or claimed but not yet
+ * delivered to a model step. They enter the conversation through the
+ * runLoop's pending-input path, so no rebuild may digest or copy them.
+ */
+function undeliveredInputs(sessionID: SessionID): Set<MessageID> {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: InboxTable.input_message_id })
+      .from(InboxTable)
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          eq(InboxTable.receiver_actor_id, "main"),
+          isNull(InboxTable.delivery_message_id),
+          inArray(InboxTable.state, ["accepted", "claimed"]),
+        ),
+      )
+      .all(),
+  )
+  return new Set(rows.flatMap((row) => (row.id ? [row.id] : [])))
+}
+
+/**
+ * Main-slice messages after `after` (and before `before`, when given), oldest
+ * first, without earlier boundaries and without undelivered inbox inputs.
+ */
+function conversationAfter(sessionID: SessionID, after: MessageID, before?: MessageID): MessageV2.WithParts[] {
+  const skip = undeliveredInputs(sessionID)
+  const messages: MessageV2.WithParts[] = []
+  for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
+    if (message.info.id === after) break
+    if (message.info.id <= after || (before && message.info.id >= before)) continue
+    if (isBoundaryUser(message) || skip.has(message.info.id)) continue
+    messages.push(message)
+  }
+  return messages.reverse()
+}
+
+export type RebuildTail = { boundary: MessageID; messages: MessageV2.WithParts[] }
+
+/**
+ * Everything the newest rebuild boundary of `window` stands for: the stored
+ * messages between its watermark and the boundary, including the unanswered
+ * user messages copied onto it. Undefined when the window has no rebuild
+ * boundary.
+ */
+export function readRebuildTail(sessionID: SessionID, window: MessageV2.WithParts[]): RebuildTail | undefined {
+  const boundary = window.findLast((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
+  const part = boundary?.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
+  if (!boundary || !part) return undefined
+  return { boundary: boundary.info.id, messages: conversationAfter(sessionID, part.coveredUpTo, boundary.info.id) }
+}
+
+/**
  * The conversation as stored, for readers that need more than the model
  * window: the checkpoint writer (full-fidelity history) and the runLoop's
- * turn state. A rebuild boundary appended after its tail leaves
- * (coveredUpTo, digestUpTo] outside the window, so read that tail back from
- * the main slice in stream order and place it between the boundary and the
- * messages after it: boundary, tail, live messages. A legacy boundary's tail
- * is already inside the window. Earlier boundaries inside the id range stay
- * out, as they were outside the window that preceded the rebuild.
+ * turn state. The boundary's tail is placed between the boundary and the
+ * messages after it. Tail messages the window already holds (a legacy
+ * boundary's tail, delivered inputs placed by the inbox) are not repeated.
  */
-export function withRebuildTail(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
-  const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
+export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail | undefined): MessageV2.WithParts[] {
+  if (!tail) return window
+  const index = window.findIndex((m) => m.info.id === tail.boundary)
   if (index < 0) return window
-  const boundary = window[index]
-  const part = boundary.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
-  if (!part?.digestUpTo) return window
-  const tail: MessageV2.WithParts[] = []
-  for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
-    if (message.info.id === part.coveredUpTo) break
-    if (message.info.id <= part.coveredUpTo || message.info.id > part.digestUpTo || isBoundaryUser(message)) continue
-    tail.push(message)
-  }
-  tail.reverse()
-  const newest = tail.at(-1)
-  if (!newest || isLegacyBoundary(boundary, newest)) return window
-  return [...window.slice(0, index + 1), ...tail, ...window.slice(index + 1)]
+  const present = new Set(window.map((m) => m.info.id))
+  const missing = tail.messages.filter((m) => !present.has(m.info.id))
+  if (missing.length === 0) return window
+  return [...window.slice(0, index + 1), ...missing, ...window.slice(index + 1)]
 }
 
 function renderSectionBudgets(budgets: Record<string, number>): string {
@@ -543,6 +572,8 @@ export interface Interface {
        * last_checkpoint_message_id (which can race an in-flight writer).
        */
       boundary?: MessageID
+      /** User messages left out of Recent user input (sent in full elsewhere, or not delivered yet). */
+      exclude?: ReadonlySet<MessageID>
     },
   ) => Effect.Effect<{ text: string }>
 
@@ -554,10 +585,10 @@ export interface Interface {
    * Append a synthetic checkpoint-boundary user message (boundary marker +
    * index overview + rebuild context + active-actors text) after the newest
    * main-agent message of the session, so the tail after `boundary` falls
-   * outside every later window. The tail and the rebuild context's closing
-   * reminder are taken from that newest message at insert time. Inserts
-   * nothing and returns false when rebuild context is empty. Never deletes DB
-   * messages.
+   * outside every later window. The tail is read at insert time; unanswered
+   * user messages at its end are copied onto the boundary in full, the rest
+   * is digested. Inserts nothing and returns false when rebuild context is
+   * empty. Never deletes DB messages.
    */
   readonly insertRebuildBoundary: (input: {
     sessionID: SessionID
@@ -696,7 +727,7 @@ export const layer: Layer.Layer<
         contextWatermark: sessionInfo.contextWatermark,
         agentID: "main",
       })
-      const msgs = withRebuildTail(input.sessionID, window)
+      const msgs = withRebuildTail(window, readRebuildTail(input.sessionID, window))
       if (msgs.length === 0) {
         log.info("no messages, skipping checkpoint", { sessionID: input.sessionID })
         return "skipped" as const
@@ -1241,6 +1272,7 @@ export const layer: Layer.Layer<
         agentID?: string
         digestUpTo?: MessageID
         boundary?: MessageID
+        exclude?: ReadonlySet<MessageID>
       },
     ) {
       // renderRebuildContext is for the user-facing main agent's context rebuild.
@@ -1366,6 +1398,7 @@ export const layer: Layer.Layer<
         const userMsgs = MessageV2.page({ sessionID, agentID: "main", limit: 200 }).items.filter(
           (m) =>
             m.info.role === "user" &&
+            !opts?.exclude?.has(m.info.id) &&
             !m.parts.some((p) => p.type === "tool" || p.type === "checkpoint" || p.type === "compaction"),
         )
         // Iterate most-recent backward so FIFO drops oldest when total cap hits.
@@ -1532,8 +1565,8 @@ export const layer: Layer.Layer<
         const digestUpTo = opts.digestUpTo
         const boundaryID = opts.boundary
         if (boundaryID) {
-          // Main slice only — the runLoop collapse is main-scoped; subagent
-          // activity must not appear as if the main agent performed it.
+          // Main slice only: subagent activity must not appear as if the
+          // main agent performed it.
           const all = yield* session.messages({ sessionID })
           const tail = all.filter((m) => m.info.id > boundaryID && m.info.id <= digestUpTo)
           const activity = renderTailDigest(tail)
@@ -1555,17 +1588,16 @@ export const layer: Layer.Layer<
           : "This session is continued from a checkpoint. The blocks above cover earlier history. Resume the last task from the most recent live messages. Do not recap this dump.",
       )
 
-      // Section 11: tail-aware system reminder. Picks the appropriate nudge
-      // based on how the preserved tail ends: tool-calls → continue loop,
-      // stop → check task spec before stopping again, tool → process results,
-      // user → no addendum needed.
+      // Section 11: tail-aware system reminder, chosen from how the tail ends:
+      // a tool step → continue the loop, a tool result → process it. A
+      // finished reply or a user message needs none; the next request is the
+      // user's.
       const info = opts?.lastMessageInfo
       if (info) {
         const reminder = (() => {
           switch (info.role) {
             case "assistant":
-              if (info.finish === "tool-calls") return autonomousLoopReminder()
-              return stopReminder(undefined)
+              return info.finish === "tool-calls" ? autonomousLoopReminder() : ""
             case "tool":
               return toolResultContinueReminder()
             case "user":
@@ -1633,15 +1665,22 @@ export const layer: Layer.Layer<
       agent: string
       model: { providerID: string; modelID: string }
     }) {
-      // The newest main-agent message at insert time ends the tail. Callers
+      // The tail is everything after the watermark at insert time; callers
       // hold a window read before their current step, so it is read here.
+      // Unanswered user messages at its end are copied onto the boundary in
+      // full and stay out of the digest.
+      const tail = conversationAfter(input.sessionID, input.boundary)
+      const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
+      const unanswered = tail.slice(answered)
+      const digestUpTo = tail[answered - 1]?.info.id
       const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
-      const digestUpTo = newest && newest.info.id > input.boundary ? newest.info.id : undefined
+      const ending = tail.at(-1) ?? newest
       const rendered = yield* renderRebuildContext(input.sessionID, {
-        lastMessageInfo: newest ? computeLastMessageInfo([newest.info]) : undefined,
+        lastMessageInfo: ending ? computeLastMessageInfo([ending.info]) : undefined,
         agentID: input.agentID,
         digestUpTo,
         boundary: input.boundary,
+        exclude: new Set([...unanswered.map((m) => m.info.id), ...undeliveredInputs(input.sessionID)]),
       }).pipe(Effect.catch(() => Effect.succeed({ text: "" })))
       if (!rendered.text) return false
 
@@ -1700,6 +1739,25 @@ export const layer: Layer.Layer<
           synthetic: true,
           text: actorsText,
         })
+      }
+
+      for (const message of unanswered) {
+        for (const part of message.parts) {
+          if (part.type === "text" && !part.ignored) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: msg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: part.text,
+              ...(part.metadata ? { metadata: part.metadata } : {}),
+            })
+          }
+          if (part.type === "file") {
+            yield* session.updatePart({ ...part, id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID })
+          }
+        }
       }
 
       return true

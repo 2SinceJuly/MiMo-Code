@@ -48,7 +48,7 @@ import { InstallationVersion } from "@/installation/version"
 import type { JSONObject, JSONSchema7 } from "@ai-sdk/provider"
 import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
-import { isBoundaryUser } from "./tail-digest"
+import { isBoundaryUser, isRebuildBoundary } from "./tail-digest"
 import { SessionCompaction } from "./compaction"
 import { usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
@@ -3888,7 +3888,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // Runner acquisition precedes the runLoop's busy publication.
         if (Exit.isFailure(yield* state.assertNotBusy(input.sessionID, input.agentID).pipe(Effect.exit))) return []
       }
-      const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })
+      // Rebuild boundaries are not turns: a resumable user is the one a boundary carries, not the boundary.
+      const msgs = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID ?? "main" })).filter(
+        (m) => !isRebuildBoundary(m),
+      )
       const candidates: RecoveryCandidate[] = []
       for (const [index, msg] of msgs.entries()) {
         if (msg.info.role !== "assistant") continue
@@ -4891,6 +4894,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
         let unprocessedPrompt = (claimOwner?.receipts.length ?? 0) > 0
         const deliveredPrompts = new Set<MessageID>()
+        let rebuildTail: SessionCheckpoint.RebuildTail | undefined
         const recordDelivery = Effect.fn("SessionPrompt.recordDelivery")(function* (
           messageID: MessageID,
           msgs: MessageV2.WithParts[],
@@ -5015,10 +5019,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // steps of the turn it interrupted sit outside the window. Turn state
           // (resume parent, last user, last assistant) is read from the window with
           // that tail restored in front of the later messages; the model still
-          // receives `msgs`.
+          // receives `msgs`. The tail before a boundary does not change, so it is
+          // read once per boundary.
           const newestUser = msgs.findLast((msg) => msg.info.role === "user")
+          if (newestUser && isBoundaryUser(newestUser) && rebuildTail?.boundary !== newestUser.info.id)
+            rebuildTail = SessionCheckpoint.readRebuildTail(sessionID, msgs)
           const turnMsgs =
-            newestUser && isBoundaryUser(newestUser) ? SessionCheckpoint.withRebuildTail(sessionID, msgs) : msgs
+            newestUser && isBoundaryUser(newestUser) ? SessionCheckpoint.withRebuildTail(msgs, rebuildTail) : msgs
 
           let lastUser: MessageV2.User | undefined
           let lastAssistant: MessageV2.Assistant | undefined
@@ -5028,26 +5035,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // The locked parent must still be the last user — a later user would
           // enter the model context while parent stays old. Later assistants are allowed only when
           // plan did not require strict tail (empty-shell siblings); trailing-user is strict.
+          // A boundary parent carries its tail's unanswered users, so it is checked against the window.
           const lockParentOnStep0 = step === 0 && parentUserID !== undefined
           if (lockParentOnStep0) {
-            const lockedIdx = turnMsgs.findIndex((m) => m.info.role === "user" && m.info.id === parentUserID)
+            const lockMsgs = newestUser?.info.id === parentUserID ? msgs : turnMsgs
+            const lockedIdx = lockMsgs.findIndex((m) => m.info.role === "user" && m.info.id === parentUserID)
             if (lockedIdx < 0) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer in session slice ${sessionID}`,
               )
             }
-            const laterUser = turnMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "user")
+            const laterUser = lockMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "user")
             if (laterUser) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer the last user in ${sessionID}`,
               )
             }
-            if (strictParentTail && turnMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "assistant")) {
+            if (strictParentTail && lockMsgs.slice(lockedIdx + 1).some((m) => m.info.role === "assistant")) {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer the slice tail in ${sessionID}`,
               )
             }
-            const locked = turnMsgs[lockedIdx]!
+            const locked = lockMsgs[lockedIdx]!
             if (locked.info.role !== "user") {
               throw new Error(
                 `Resume parent user ${parentUserID} is no longer in session slice ${sessionID}`,
@@ -5494,11 +5503,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 if (crop.omitted.length > 0) {
                   msgs = crop.kept as typeof msgs
                   // Persist span on the EXISTING parent user (turn-recovery
-                  // shape). ignored+synthetic: not sent to the model, not a
-                  // user-visible bubble, but extractAllCrops still reads it.
+                  // shape), or on the rebuild boundary standing in for it when
+                  // the parent lies in the boundary's tail, so the window that
+                  // extractAllCrops reads holds it. ignored+synthetic: not sent
+                  // to the model, not a user-visible bubble.
+                  const parentMsg =
+                    msgs.findLast((message) => message.info.id === lastUser.id) ??
+                    msgs.findLast((message) => message.info.role === "user")!
                   const spanPart: MessageV2.TextPart = {
                     id: PartID.ascending(),
-                    messageID: lastUser.id,
+                    messageID: parentMsg.info.id,
                     sessionID,
                     type: "text",
                     synthetic: true,
@@ -5507,8 +5521,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     metadata: cropMetadata(span),
                   }
                   yield* sessions.updatePart(spanPart)
-                  const parentMsg = msgs.findLast((message) => message.info.id === lastUser.id)
-                  if (parentMsg) parentMsg.parts.push(spanPart)
+                  parentMsg.parts.push(spanPart)
                   loopStreakCropped = true
                   yield* slog.info("loop streak: cropped from request", {
                     spanFrom: span.fromId,
@@ -5673,7 +5686,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   // having no toolAllowlist (Task 2.6 + agent.test.ts guard). See ForkContext.tools
                   // JSDoc in packages/cli/src/actor/spawn.ts for the full contract.
                   const queryParts =
-                    msgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? []
+                    turnMsgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? []
                   const query = userQueryText(queryParts)
                   const preQuery = {
                     cancel: undefined as boolean | undefined,
@@ -5969,7 +5982,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 }
 
                 const queryParts =
-                  msgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? []
+                  turnMsgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? []
                 const query = userQueryText(queryParts)
                 const preQuery = {
                   cancel: undefined as boolean | undefined,
@@ -6789,9 +6802,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       }
 
       // [D16f] Trailing-user resume: re-validate the user is still the slice tail, then re-run from it.
+      // Rebuild boundaries appended after it do not count as later messages.
       if (input.userMessageID) {
         const msgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })
-        const last = msgs.at(-1)
+        const last = msgs.findLast((m) => !isRebuildBoundary(m) || m.info.id === input.userMessageID)
         if (last?.info.role !== "user" || last.info.id !== input.userMessageID) {
           const missing: ResumePlan = {
             action: "reject",
@@ -6887,7 +6901,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           yield* Deferred.fail(admission, err)
           throw err
         }
-        const tailMsgs = yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })
+        // Rebuild boundaries appended after the parent are not part of the turn.
+        const tailMsgs = (yield* sessions.messages({ sessionID: input.sessionID, agentID: input.agentID })).filter(
+          (m) => !isRebuildBoundary(m) || m.info.id === plan.parentMessageID,
+        )
         const parentIdx = tailMsgs.findIndex((m) => m.info.role === "user" && m.info.id === plan.parentMessageID)
         const tail = tailMsgs.at(-1)
         const after = tailMsgs.slice(parentIdx + 1)

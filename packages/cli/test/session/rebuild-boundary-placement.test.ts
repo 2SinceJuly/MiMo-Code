@@ -2,14 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { Command } from "../../src/command"
 import type { Config } from "../../src/config"
 import { AppRuntime } from "../../src/effect/app-runtime"
+import { InboxController } from "../../src/inbox"
 import { Instance } from "../../src/project/instance"
 import { Session } from "../../src/session"
 import { checkpointPath } from "../../src/session/checkpoint-paths"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { RECALL_REMINDER_MARKER, SessionPrompt } from "../../src/session/prompt"
-import type { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { SessionTable } from "../../src/session/session.sql"
 import { Database, eq } from "../../src/storage"
 import { Log } from "../../src/util"
@@ -122,6 +125,8 @@ describe("rebuild boundary placement", () => {
                 if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
                 expect(marker.coveredUpTo).toBe(watermark.info.id)
                 expect(marker.digestUpTo).toBe(tail.at(-1)!.info.id)
+                // The turn was finished before the rebuild; the boundary is not a resumable user.
+                expect(yield* prompt.recovery({ sessionID: session.id, agentID: "main" })).toEqual([])
 
                 yield* say("after rebuild")
                 const first = conversation(server.captures.at(-1)!.messages)
@@ -226,6 +231,173 @@ describe("rebuild boundary placement", () => {
                 for (const file of FILES) expect(digest).toContain(`read(file_path="${file}")`)
                 expect(digest).toContain("mid-loop in an autonomous task")
                 for (const file of FILES) expect(JSON.stringify(request)).not.toContain(`${file} body line 0`)
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
+  test(
+    "an unanswered user message at the end of the tail is copied onto the boundary in full; a queued input stays out and arrives live",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        {
+          lines: toolCallsResponse(
+            FILES.map((file, index) => ({ id: `call-${index}`, name: "read", args: JSON.stringify({ file_path: file }) })),
+          ),
+        },
+        { lines: textStopResponse("checks passed") },
+        { lines: textStopResponse("live reply") },
+      ])
+      const long = [...Array.from({ length: 3_000 }, (_, i) => `word${i}`), "END-OF-LONG-PROMPT"].join(" ")
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        for (const file of FILES) await Bun.write(path.join(tmp.path, file), fileBody(file))
+        await Bun.write(path.join(tmp.path, "notes.txt"), "attached notes line 0\nattached notes line 1\n")
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const inbox = yield* InboxController.Service
+                const session = yield* sessions.create({ title: "unanswered tail user" })
+                const say = (value: string) =>
+                  prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: value }] })
+
+                yield* say("start the task")
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                yield* say("run the checks on alpha and beta")
+                const answered = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                expect(answered.info.role).toBe("assistant")
+
+                const unanswered = yield* prompt.prompt({
+                  sessionID: session.id,
+                  agent: "build",
+                  noReply: true,
+                  parts: [
+                    { type: "text", text: long },
+                    {
+                      type: "file",
+                      mime: "text/plain",
+                      filename: "notes.txt",
+                      url: pathToFileURL(path.join(tmp.path, "notes.txt")).href,
+                    },
+                  ],
+                })
+                const queuedID = MessageID.ascending()
+                yield* inbox.accept(
+                  {
+                    lane: { sessionID: session.id, agentID: "main" },
+                    message: { ...(unanswered.info as MessageV2.User), id: queuedID, time: { created: Date.now() } },
+                    parts: [{ id: PartID.ascending(), sessionID: session.id, messageID: queuedID, type: "text", text: "QUEUED-INPUT" }],
+                    type: "prompt",
+                    idempotencyKey: queuedID,
+                  },
+                  { deferKick: true },
+                )
+
+                yield* prompt.command({
+                  sessionID: session.id,
+                  command: Command.Default.REBUILD,
+                  arguments: "",
+                  agent: "build",
+                })
+                const stored = yield* sessions.messages({ sessionID: session.id })
+                const boundary = stored.find((message) => message.parts.some((part) => part.type === "checkpoint"))!
+                expect(stored.at(-1)!.info.id).toBe(boundary.info.id)
+                const marker = boundary.parts.find((part) => part.type === "checkpoint")!
+                if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
+                expect(marker.digestUpTo).toBe(answered.info.id)
+
+                const copied = boundary.parts.filter((part) => part.type === "text" && part.synthetic)
+                expect(copied.some((part) => part.type === "text" && part.text === long)).toBe(true)
+                expect(copied.some((part) => part.type === "text" && part.text.includes("attached notes line 1"))).toBe(true)
+                expect(
+                  boundary.parts.some(
+                    (part) => part.type === "file" && part.filename === "notes.txt" && part.mime === "text/plain",
+                  ),
+                ).toBe(true)
+                const context = boundary.parts
+                  .flatMap((part) => (part.type === "text" ? [part.text] : []))
+                  .find((value) => value.includes("Recent user input (verbatim)"))!
+                expect(context).toContain("run the checks on alpha and beta")
+                expect(context).not.toContain("word0 word1")
+                expect(JSON.stringify(boundary.parts)).not.toContain("QUEUED-INPUT")
+
+                yield* say("after rebuild")
+                const request = conversation(server.captures.at(-1)!.messages)
+                const first = text(request[0]!)
+                expect(first).toContain("END-OF-LONG-PROMPT")
+                expect(first).toContain("attached notes line 1")
+                expect(first).not.toContain("QUEUED-INPUT")
+                expect(request.slice(1).some((message) => text(message).includes("QUEUED-INPUT"))).toBe(true)
+                expect(request.slice(1).some((message) => text(message).includes("after rebuild"))).toBe(true)
+                for (const file of FILES) expect(JSON.stringify(request)).not.toContain(`${file} body line 0`)
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
+
+  test(
+    "after a rebuild, the unanswered user it carries is offered for resume and resumes under that user",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        { lines: textStopResponse("resumed reply") },
+      ])
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const session = yield* sessions.create({ title: "resume after rebuild" })
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "start the task" }] })
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                const unanswered = yield* prompt.prompt({
+                  sessionID: session.id,
+                  agent: "build",
+                  noReply: true,
+                  parts: [{ type: "text", text: "UNANSWERED-BEFORE-REBUILD" }],
+                })
+
+                yield* prompt.command({
+                  sessionID: session.id,
+                  command: Command.Default.REBUILD,
+                  arguments: "",
+                  agent: "build",
+                })
+                const recovery = yield* prompt.recovery({ sessionID: session.id, agentID: "main" })
+                expect(recovery.map((item) => (item.kind === "parent-user" ? item.userMessageID : item.kind))).toEqual([
+                  unanswered.info.id,
+                ])
+
+                const result = yield* prompt.resume({
+                  sessionID: session.id,
+                  userMessageID: unanswered.info.id,
+                  agentID: "main",
+                })
+                expect(result.info).toMatchObject({ role: "assistant", parentID: unanswered.info.id, finish: "stop" })
+                expect(server.captures).toHaveLength(2)
+                const request = conversation(server.captures[1]!.messages)
+                expect(request.map((message) => message.role)).toEqual(["user"])
+                expect(text(request[0]!)).toContain("UNANSWERED-BEFORE-REBUILD")
               }),
             ),
         })

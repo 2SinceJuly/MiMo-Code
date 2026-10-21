@@ -48,6 +48,10 @@ export function isBoundaryUser(msg: WithParts): boolean {
   return msg.info.role === "user" && msg.parts.some((p) => p.type === "checkpoint" || p.type === "compaction")
 }
 
+export function isRebuildBoundary(msg: WithParts): boolean {
+  return msg.info.role === "user" && msg.parts.some((p) => p.type === "checkpoint")
+}
+
 function digestLines(tail: readonly WithParts[]): { lines: string[]; interrupted: boolean } {
   const lines: string[] = []
   for (const msg of tail) {
