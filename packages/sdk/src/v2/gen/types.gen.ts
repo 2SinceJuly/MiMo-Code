@@ -2841,10 +2841,6 @@ export type Config = {
      */
     auto?: boolean
     /**
-     * Enable pruning of old tool outputs (default: true)
-     */
-    prune?: boolean
-    /**
      * Deprecated compatibility setting. Projected compaction now keeps only whole API rounds that arrive while compaction is running.
      */
     tail_turns?: number

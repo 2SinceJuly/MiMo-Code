@@ -4012,8 +4012,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         let step = 0
         const sessionPrompt = yield* sessions.resolvePrompt({ sessionID })
         const session = yield* sessions.get(sessionID)
-        let lastFinishedForPrune: MessageV2.Assistant | undefined
-        let lastModelForPrune: Provider.Model | undefined
         let outputLengthContinuations = 0
         // Structured-output-only retry: cap comes from lastUser.format.retryCount (default 2).
         // Local to runLoop; resets on the next user turn. Empty/think-only output
@@ -5239,8 +5237,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const modelProviderID = modelOverride ? ProviderID.make(modelOverride.providerID) : lastUser.model.providerID
           const modelModelID = modelOverride ? ModelID.make(modelOverride.modelID) : lastUser.model.modelID
           const model = yield* getModel(modelProviderID, modelModelID, sessionID, lastUser)
-          lastModelForPrune = model
-          lastFinishedForPrune = usageRecovered ? undefined : lastFinished
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -6296,18 +6292,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           continue
         }
 
-        const promptOps = yield* ops()
-        if (lastModelForPrune && lastFinishedForPrune) {
-          yield* prune
-            .prune({
-              sessionID,
-              model: lastModelForPrune,
-              tokens: lastFinishedForPrune.tokens,
-              lastAssistantTime: lastFinishedForPrune.time.completed,
-              promptOps,
-            })
-            .pipe(Effect.ignore, Effect.forkIn(scope))
-        }
         const final = yield* lastAssistant(sessionID, agentID)
         const finalIsError = final.info.role === "assistant" && !!final.info.error
         const lastUserForMetrics = yield* sessions.findMessage(
