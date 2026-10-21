@@ -315,6 +315,7 @@ describe("rebuild boundary placement", () => {
                 const marker = boundary.parts.find((part) => part.type === "checkpoint")!
                 if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
                 expect(marker.digestUpTo).toBe(answered.info.id)
+                expect(marker.deferredInputs).toEqual([queuedID])
 
                 const copied = boundary.parts.filter((part) => part.type === "text" && part.synthetic)
                 expect(copied.some((part) => part.type === "text" && part.text === long)).toBe(true)
@@ -456,6 +457,9 @@ describe("rebuild boundary placement", () => {
                   message.parts.some((part) => part.type === "checkpoint"),
                 )!
                 expect(JSON.stringify(boundary.parts)).not.toContain("QUEUED-THEN-CANCELLED")
+                const deferredMarker = boundary.parts.find((part) => part.type === "checkpoint")!
+                if (deferredMarker.type !== "checkpoint") throw new Error("expected a checkpoint part")
+                expect(deferredMarker.deferredInputs).toEqual([queuedID])
 
                 expect(yield* inbox.abortSession(session.id)).toBe(1)
                 const recovery = yield* prompt.recovery({ sessionID: session.id, agentID: "main" })
@@ -469,6 +473,79 @@ describe("rebuild boundary placement", () => {
                 expect(request.map((message) => message.role)).toEqual(["user", "user"])
                 expect(text(request[0]!)).not.toContain("QUEUED-THEN-CANCELLED")
                 expect(text(request[1]!)).toContain("QUEUED-THEN-CANCELLED")
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
+
+  test(
+    "an input cancelled before the rebuild is part of the tail and is not placed after the boundary",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        { lines: textStopResponse("live reply") },
+      ])
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const inbox = yield* InboxController.Service
+                const session = yield* sessions.create({ title: "input cancelled before rebuild" })
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "start the task" }] })
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                const original = (yield* sessions.messages({ sessionID: session.id })).find(
+                  (message) => message.info.role === "user",
+                )!
+                const queuedID = MessageID.ascending()
+                yield* inbox.accept(
+                  {
+                    lane: { sessionID: session.id, agentID: "main" },
+                    message: { ...(original.info as MessageV2.User), id: queuedID, time: { created: Date.now() } },
+                    parts: [
+                      { id: PartID.ascending(), sessionID: session.id, messageID: queuedID, type: "text", text: "CANCELLED-BEFORE-REBUILD" },
+                    ],
+                    type: "prompt",
+                    idempotencyKey: queuedID,
+                  },
+                  { deferKick: true },
+                )
+                expect(yield* inbox.abortSession(session.id)).toBe(1)
+
+                yield* prompt.command({
+                  sessionID: session.id,
+                  command: Command.Default.REBUILD,
+                  arguments: "",
+                  agent: "build",
+                })
+                const boundary = (yield* sessions.messages({ sessionID: session.id })).find((message) =>
+                  message.parts.some((part) => part.type === "checkpoint"),
+                )!
+                const marker = boundary.parts.find((part) => part.type === "checkpoint")!
+                if (marker.type !== "checkpoint") throw new Error("expected a checkpoint part")
+                expect(marker.deferredInputs).toBeUndefined()
+                expect(
+                  boundary.parts.some(
+                    (part) => part.type === "text" && part.synthetic && part.text === "CANCELLED-BEFORE-REBUILD",
+                  ),
+                ).toBe(true)
+
+                yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "after rebuild" }] })
+                const request = conversation(server.captures.at(-1)!.messages)
+                expect(request.map((message) => message.role)).toEqual(["user", "user"])
+                expect(text(request[0]!)).toContain("CANCELLED-BEFORE-REBUILD")
+                expect(text(request[1]!)).toContain("after rebuild")
+                expect(JSON.stringify(request).split("CANCELLED-BEFORE-REBUILD")).toHaveLength(2)
               }),
             ),
         })

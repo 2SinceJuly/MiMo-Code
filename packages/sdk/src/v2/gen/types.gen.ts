@@ -1505,6 +1505,7 @@ export type CheckpointPart = {
   checkpointNumber: number
   coveredUpTo: string
   digestUpTo?: string
+  deferredInputs?: Array<string>
 }
 
 export type CompactionPart = {

@@ -12,7 +12,7 @@ import { ActorRegistry } from "@/actor/registry"
 import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
-import { Database, and, eq, gt, inArray, isNull, lt, not, or } from "@/storage"
+import { Database, and, eq, inArray, isNull, not, or } from "@/storage"
 import { InboxTable } from "@/inbox/inbox.sql"
 import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
@@ -320,18 +320,28 @@ function undeliveredInputs(sessionID: SessionID): Set<MessageID> {
 
 /**
  * Main-slice messages after `after` (and before `before`, when given), oldest
- * first, without earlier boundaries and without undelivered inbox inputs.
+ * first, without earlier boundaries and without undelivered inbox inputs;
+ * `skipped` lists the undelivered inputs in that range.
  */
-function conversationAfter(sessionID: SessionID, after: MessageID, before?: MessageID): MessageV2.WithParts[] {
-  const skip = undeliveredInputs(sessionID)
+function conversationAfter(
+  sessionID: SessionID,
+  after: MessageID,
+  before?: MessageID,
+): { messages: MessageV2.WithParts[]; skipped: MessageID[] } {
+  const undelivered = undeliveredInputs(sessionID)
   const messages: MessageV2.WithParts[] = []
+  const skipped: MessageID[] = []
   for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
     if (message.info.id === after) break
     if (message.info.id <= after || (before && message.info.id >= before)) continue
-    if (isBoundaryUser(message) || skip.has(message.info.id)) continue
+    if (isBoundaryUser(message)) continue
+    if (undelivered.has(message.info.id)) {
+      skipped.push(message.info.id)
+      continue
+    }
     messages.push(message)
   }
-  return messages.reverse()
+  return { messages: messages.reverse(), skipped: skipped.reverse() }
 }
 
 export type RebuildTail = { boundary: MessageID; messages: MessageV2.WithParts[] }
@@ -346,7 +356,7 @@ export function readRebuildTail(sessionID: SessionID, window: MessageV2.WithPart
   const boundary = window.findLast((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
   const part = boundary?.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
   if (!boundary || !part) return undefined
-  return { boundary: boundary.info.id, messages: conversationAfter(sessionID, part.coveredUpTo, boundary.info.id) }
+  return { boundary: boundary.info.id, messages: conversationAfter(sessionID, part.coveredUpTo, boundary.info.id).messages }
 }
 
 /**
@@ -367,16 +377,19 @@ export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail
 }
 
 /**
- * Inputs a rebuild left out of its tail while they were queued, and whose
- * inbox receipt then ended without delivery (stop, restart sweep,
- * rejection). Outside a rebuild such an input stays in the window, so it is
- * placed right after the newest rebuild boundary of `window`.
+ * Inputs a rebuild left out of its tail while they were queued (its
+ * `deferredInputs`), and whose inbox receipt then ended without delivery
+ * (stop, restart sweep, rejection). Outside a rebuild such an input stays in
+ * the window, so it is placed right after the newest rebuild boundary of
+ * `window`.
  */
 export function withEndedInputs(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
   const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isRebuildBoundary(m))
   if (index < 0) return window
-  const boundary = window[index]
-  const part = boundary.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")!
+  const part = window[index].parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")!
+  const present = new Set(window.map((m) => m.info.id))
+  const deferred = (part.deferredInputs ?? []).filter((id) => !present.has(id))
+  if (deferred.length === 0) return window
   const rows = Database.use((db) =>
     db
       .select({ id: MessageTable.id })
@@ -385,18 +398,14 @@ export function withEndedInputs(sessionID: SessionID, window: MessageV2.WithPart
       .where(
         and(
           eq(InboxTable.receiver_session_id, sessionID),
-          eq(InboxTable.receiver_actor_id, "main"),
+          inArray(InboxTable.input_message_id, deferred),
           isNull(InboxTable.delivery_message_id),
           not(inArray(InboxTable.state, ["accepted", "claimed"])),
-          gt(MessageTable.id, part.coveredUpTo),
-          lt(MessageTable.id, boundary.info.id),
         ),
       )
       .all(),
   )
-  const present = new Set(window.map((m) => m.info.id))
   const ended = [...new Set(rows.map((row) => row.id))]
-    .filter((id) => !present.has(id))
     .toSorted()
     .map((messageID) => MessageV2.get({ sessionID, messageID }))
   if (ended.length === 0) return window
@@ -1706,7 +1715,7 @@ export const layer: Layer.Layer<
       // hold a window read before their current step, so it is read here.
       // Unanswered user messages at its end are copied onto the boundary in
       // full and stay out of the digest.
-      const tail = conversationAfter(input.sessionID, input.boundary)
+      const { messages: tail, skipped: deferredInputs } = conversationAfter(input.sessionID, input.boundary)
       const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
       const unanswered = tail.slice(answered)
       const digestUpTo = tail[answered - 1]?.info.id
@@ -1742,6 +1751,7 @@ export const layer: Layer.Layer<
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
         ...(digestUpTo ? { digestUpTo } : {}),
+        ...(deferredInputs.length > 0 ? { deferredInputs } : {}),
       })
 
       if (indexText) {
