@@ -19,6 +19,7 @@ import { SessionTable } from "./session.sql"
 import * as Session from "./session"
 import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
+import type { PromptContext } from "./prompt-context"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Log, Token } from "../util"
 import { Effect, Layer, Deferred, Context, Scope } from "effect"
@@ -561,6 +562,7 @@ export interface Interface {
     agent: string
     model: { providerID: string; modelID: string }
     boundaryCreatedAt?: number
+    promptContext?: PromptContext
   }) => Effect.Effect<boolean>
 }
 
@@ -1634,6 +1636,7 @@ export const layer: Layer.Layer<
       agent: string
       model: { providerID: string; modelID: string }
       boundaryCreatedAt?: number
+      promptContext?: PromptContext
     }) {
       const rendered = yield* renderRebuildContext(input.sessionID, {
         lastMessageInfo: input.lastMessageInfo,
@@ -1657,6 +1660,8 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         agent: input.agent,
         time: { created: syntheticTime },
+        agentID: input.agentID,
+        promptContext: input.promptContext,
       })
 
       yield* session.updatePart({
