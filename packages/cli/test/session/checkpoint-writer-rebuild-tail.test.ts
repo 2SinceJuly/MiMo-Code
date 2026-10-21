@@ -9,6 +9,7 @@ import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
 import { Provider } from "../../src/provider"
 import { Session } from "../../src/session"
+import { SessionCheckpoint } from "../../src/session/checkpoint"
 import { checkpointPath } from "../../src/session/checkpoint-paths"
 import { SessionPrompt } from "../../src/session/prompt"
 import type { MessageID, SessionID } from "../../src/session/schema"
@@ -37,6 +38,7 @@ const it = testEffect(
     Provider.defaultLayer,
     CrossSpawnSpawner.defaultLayer,
     Permission.defaultLayer,
+    SessionCheckpoint.defaultLayer,
   ),
 )
 
@@ -144,6 +146,7 @@ describe("checkpoint writer after a rebuild", () => {
                 for (const file of FILES) yield* Effect.promise(() => Bun.write(path.join(dir, file), fileBody(file)))
                 const sessions = yield* Session.Service
                 const prompt = yield* SessionPrompt.Service
+                const checkpoint = yield* SessionCheckpoint.Service
                 const session = yield* sessions.create({ title: "writer after rebuild" })
                 const say = (value: string) =>
                   prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: value }] })
@@ -204,6 +207,8 @@ describe("checkpoint writer after a rebuild", () => {
                   expect(messages.some((message) => message.role === "tool" && text(message) === output)).toBe(true)
                 // computeBoundary still picks the large step's user message as the writer's watermark.
                 expect(JSON.stringify(messages)).not.toContain("large-reply-start")
+                // Teardown disposes the instance; let the writer finish its run first.
+                expect(yield* checkpoint.waitForWriter(session.id)).toBe("success")
               }),
             { git: true, config: config(server.origin, fork) },
           )
