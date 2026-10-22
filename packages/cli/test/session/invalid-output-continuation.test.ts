@@ -668,6 +668,56 @@ describe("invalid-output continuation — integration", () => {
     }
   }, 30_000)
 
+  test("a retry-safe stream failure keeps the retry record and removes the failed attempt's parts", async () => {
+    await using tmp = await tmpdir({ git: true })
+    // Attempt 1: empty stop (records retry 1). Attempt 2: reasoning, then the
+    // upstream reports a mid-stream read failure with no tool call, so the attempt
+    // is retry-safe and goes through the failed-attempt cleanup. Attempt 3: the
+    // recovered answer.
+    const reasoning = `data: ${JSON.stringify({ id: "chatcmpl-stub", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant", reasoning_content: "half-finished-thought" } }] })}\n\n`
+    const failure = `data: ${JSON.stringify({ error: { type: "upstream_error", message: "upstream stream read failed" } })}\n\n`
+    let readRecord: (() => MessageV2.RetryPart[]) | undefined
+    let beforeRecovery: MessageV2.RetryPart[] = []
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      { lines: [reasoning, failure] },
+      { lines: textStopResponse("recovered after a dropped stream"), beforeReply: async () => { beforeRecovery = readRecord?.() ?? [] } },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "invalid-stream-drop-record" })
+              readRecord = () => retryParts(MessageV2.page({ sessionID: session.id, limit: 50 }).items)
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.timeout("20 seconds"))
+              expect(stub.captures.length).toBe(3)
+              expect(result.parts.some((p) => p.type === "text" && p.text === "recovered after a dropped stream")).toBe(true)
+              // The record survived the dropped attempt's cleanup and counted both retries.
+              expect(beforeRecovery).toHaveLength(1)
+              expect(beforeRecovery[0]).toMatchObject({ messageID: result.info.id, attempt: 2 })
+              const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              const assistants = assistantOnly(msgs)
+              expect(assistants).toHaveLength(1)
+              // No residue of the dropped attempt survives.
+              expect(JSON.stringify(assistants[0]!.parts)).not.toContain("half-finished-thought")
+              expect(retryParts(msgs)).toEqual([])
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
   // [TP-SR-R21-07]
   test("GPT reasoning-only stop step is terminal and is not retried", async () => {
     await using tmp = await tmpdir({ git: true })
