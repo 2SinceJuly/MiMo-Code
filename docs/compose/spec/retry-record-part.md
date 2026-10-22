@@ -2,7 +2,7 @@
 feature: retry-record-part
 status: delivered
 updated: 2026-10-22
-source: Branch fix/empty-output-persistent-retry
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/2703
 ---
 
 # Retry Record Survives Until The Turn Succeeds

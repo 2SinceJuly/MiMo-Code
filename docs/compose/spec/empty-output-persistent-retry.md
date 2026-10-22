@@ -2,7 +2,7 @@
 feature: empty-output-persistent-retry
 status: delivered
 updated: 2026-10-21
-source: Branch fix/empty-output-persistent-retry
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/2703
 ---
 
 # Empty Output Retries Persistently
