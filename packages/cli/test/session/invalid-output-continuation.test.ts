@@ -617,6 +617,57 @@ describe("invalid-output continuation — integration", () => {
     }
   }, 30_000)
 
+  test("request-phase provider errors record retries on the turn and still recover", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const errorLines = [JSON.stringify({ error: { code: "model_not_found", type: "new_api_error", message: "No available channel for model test/model" } })]
+    const stub = startScriptedLLMServer([
+      { lines: errorLines, status: 503 },
+      { lines: errorLines, status: 503 },
+      { lines: textStopResponse("recovered after provider errors") },
+    ])
+    try {
+      const fast = { initialDelayMs: 100, maxDelayMs: 100, jitterRatio: 0 }
+      await Bun.write(
+        path.join(tmp.path, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          enabled_providers: ["alibaba"],
+          provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${stub.origin}/v1` } } },
+          agent: { build: { model: "alibaba/qwen-plus" } },
+          retry: {
+            request: { ...fast, mode: "bounded", maxRetries: 2, noDeadline: true },
+            network: { ...fast, mode: "bounded", maxRetries: 1, deadlineMs: 1 },
+            server: fast,
+            rateLimit: fast,
+            stream: { ...fast, mode: "bounded", maxRetries: 0, noDeadline: true },
+            unknown: fast,
+          },
+        }),
+      )
+      await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "request-retry-record" })
+              const result = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.timeout("20 seconds"))
+              expect(stub.captures.length).toBe(3)
+              expect(result.parts.some((p) => p.type === "text" && p.text === "recovered after provider errors")).toBe(true)
+              expect(retryParts(yield* sessions.messages({ sessionID: session.id, agentID: "main" }))).toEqual([])
+            }),
+          ),
+      })
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
   // [TP-SR-R21-07]
   test("GPT reasoning-only stop step is terminal and is not retried", async () => {
     await using tmp = await tmpdir({ git: true })
