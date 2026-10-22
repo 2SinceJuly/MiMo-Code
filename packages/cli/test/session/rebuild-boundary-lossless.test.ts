@@ -117,7 +117,6 @@ describe("rebuild boundary", () => {
           boundary: boundary.id,
           agent: "build",
           model: { providerID: "test", modelID: "test-model" },
-          boundaryCreatedAt: t0 + 10,
         })
         expect(inserted).toBe(true)
 

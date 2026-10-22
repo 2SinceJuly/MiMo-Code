@@ -12,10 +12,11 @@ import { ActorRegistry } from "@/actor/registry"
 import type { AgentOutcome, FailureInfo, ForkContext } from "@/actor/spawn"
 import { spawnRef } from "@/actor/spawn-ref"
 import { prefixCaptureRef } from "./prefix-capture-ref"
-import { Database, and, eq, or } from "@/storage"
+import { Database, and, eq, inArray, isNull, not, or } from "@/storage"
+import { InboxTable } from "@/inbox/inbox.sql"
 import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
-import { SessionTable } from "./session.sql"
+import { MessageTable, SessionTable } from "./session.sql"
 import * as Session from "./session"
 import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
@@ -36,14 +37,14 @@ import {
   migrateProjectMemory,
 } from "./checkpoint-paths"
 import { readBudgeted, readBudgetedSectionAware } from "./budgeted-read"
-import type { LastMessageInfo } from "./last-message-info"
+import { computeLastMessageInfo, type LastMessageInfo } from "./last-message-info"
 import { CHECKPOINT_TEMPLATE, MEMORY_TEMPLATE, NOTES_TEMPLATE, CHECKPOINT_SECTION_BUDGETS } from "./checkpoint-templates"
 import { adjustBoundaryForApiInvariants } from "./boundary"
 import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
-import { renderTailDigest } from "./tail-digest"
+import { isBoundaryUser, isRebuildBoundary, renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -125,23 +126,9 @@ function userMsgText(parts: Array<{ type: string; text?: string; synthetic?: boo
 function autonomousLoopReminder(): string {
   return [
     "<system-reminder>",
-    "You are mid-loop in an autonomous task. Continue your work loop:",
-    "respond to the tool results below and proceed to the next iteration.",
-    "</system-reminder>",
-  ].join("\n")
-}
-
-function stopReminder(focusTaskID: string | undefined): string {
-  const taskHint = focusTaskID
-    ? `Consult this session's tasks/${focusTaskID}/progress.md head section.`
-    : "Consult the most recently active task's progress.md head section."
-  return [
-    "<system-reminder>",
-    "The previous assistant turn ended with a stop. Before stopping again,",
-    taskHint,
-    "Compare the Task spec to the latest Progress entries. If the task is",
-    "incomplete, proceed to the next concrete step. Only stop when the spec",
-    "is genuinely satisfied or you need user input you cannot infer.",
+    "You are mid-loop in an autonomous task. The outputs of your latest tool",
+    "calls are not in this context. Continue the work loop from where the",
+    "blocks above leave off, and re-run a call when you need its output.",
     "</system-reminder>",
   ].join("\n")
 }
@@ -306,6 +293,120 @@ export function computeBoundary(
     if (hasTextBlocks(msgs[startIdx])) textBlockCount += 1
   }
   return msgs[startIdx].info.id
+}
+
+/**
+ * Main-slice user inputs the inbox has accepted or claimed but not yet
+ * delivered to a model step. They enter the conversation through the
+ * runLoop's pending-input path, so no rebuild may digest or copy them.
+ */
+function undeliveredInputs(sessionID: SessionID): Set<MessageID> {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: InboxTable.input_message_id })
+      .from(InboxTable)
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          eq(InboxTable.receiver_actor_id, "main"),
+          isNull(InboxTable.delivery_message_id),
+          inArray(InboxTable.state, ["accepted", "claimed"]),
+        ),
+      )
+      .all(),
+  )
+  return new Set(rows.flatMap((row) => (row.id ? [row.id] : [])))
+}
+
+/**
+ * Main-slice messages after `after` (and before `before`, when given), oldest
+ * first, without earlier boundaries and without the `undelivered` inputs.
+ */
+function conversationAfter(
+  sessionID: SessionID,
+  undelivered: ReadonlySet<MessageID>,
+  after: MessageID,
+  before?: MessageID,
+): MessageV2.WithParts[] {
+  const messages: MessageV2.WithParts[] = []
+  for (const message of MessageV2.stream(sessionID, { agentID: "main" })) {
+    if (message.info.id === after) break
+    if (message.info.id <= after || (before && message.info.id >= before)) continue
+    if (isBoundaryUser(message) || undelivered.has(message.info.id)) continue
+    messages.push(message)
+  }
+  return messages.reverse()
+}
+
+export type RebuildTail = { boundary: MessageID; messages: MessageV2.WithParts[] }
+
+/**
+ * Everything the newest rebuild boundary of `window` stands for: the stored
+ * messages between its watermark and the boundary, including the unanswered
+ * user messages copied onto it. Undefined when the window has no rebuild
+ * boundary.
+ */
+export function readRebuildTail(sessionID: SessionID, window: MessageV2.WithParts[]): RebuildTail | undefined {
+  const boundary = window.findLast((m) => m.info.sessionID === sessionID && isBoundaryUser(m))
+  const part = boundary?.parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")
+  if (!boundary || !part) return undefined
+  return {
+    boundary: boundary.info.id,
+    messages: conversationAfter(sessionID, undeliveredInputs(sessionID), part.coveredUpTo, boundary.info.id),
+  }
+}
+
+/**
+ * The conversation as stored, for readers that need more than the model
+ * window: the checkpoint writer (full-fidelity history) and the runLoop's
+ * turn state. The boundary's tail is placed between the boundary and the
+ * messages after it. Tail messages the window already holds (a legacy
+ * boundary's tail, delivered inputs placed by the inbox) are not repeated.
+ */
+export function withRebuildTail(window: MessageV2.WithParts[], tail: RebuildTail | undefined): MessageV2.WithParts[] {
+  if (!tail) return window
+  const index = window.findIndex((m) => m.info.id === tail.boundary)
+  if (index < 0) return window
+  const present = new Set(window.map((m) => m.info.id))
+  const missing = tail.messages.filter((m) => !present.has(m.info.id))
+  if (missing.length === 0) return window
+  return [...window.slice(0, index + 1), ...missing, ...window.slice(index + 1)]
+}
+
+/**
+ * Inputs a rebuild left out of its tail while they were queued (its
+ * `deferredInputs`), and whose inbox receipt then ended without delivery
+ * (stop, restart sweep, rejection). Outside a rebuild such an input stays in
+ * the window, so it is placed right after the newest rebuild boundary of
+ * `window`.
+ */
+export function withEndedInputs(sessionID: SessionID, window: MessageV2.WithParts[]): MessageV2.WithParts[] {
+  const index = window.findLastIndex((m) => m.info.sessionID === sessionID && isRebuildBoundary(m))
+  if (index < 0) return window
+  const part = window[index].parts.find((p): p is MessageV2.CheckpointPart => p.type === "checkpoint")!
+  const present = new Set(window.map((m) => m.info.id))
+  const deferred = (part.deferredInputs ?? []).filter((id) => !present.has(id))
+  if (deferred.length === 0) return window
+  const rows = Database.use((db) =>
+    db
+      .select({ id: MessageTable.id })
+      .from(InboxTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, InboxTable.input_message_id))
+      .where(
+        and(
+          eq(InboxTable.receiver_session_id, sessionID),
+          inArray(InboxTable.input_message_id, deferred),
+          isNull(InboxTable.delivery_message_id),
+          not(inArray(InboxTable.state, ["accepted", "claimed"])),
+        ),
+      )
+      .all(),
+  )
+  const ended = [...new Set(rows.map((row) => row.id))]
+    .toSorted()
+    .map((messageID) => MessageV2.get({ sessionID, messageID }))
+  if (ended.length === 0) return window
+  return [...window.slice(0, index + 1), ...ended, ...window.slice(index + 1)]
 }
 
 function renderSectionBudgets(budgets: Record<string, number>): string {
@@ -514,28 +615,30 @@ export interface Interface {
        * last_checkpoint_message_id (which can race an in-flight writer).
        */
       boundary?: MessageID
+      /** User messages left out of Recent user input (sent in full elsewhere, or not delivered yet). */
+      exclude?: ReadonlySet<MessageID>
     },
-  ) => Effect.Effect<{ text: string; hasActivity: boolean }>
+  ) => Effect.Effect<{ text: string }>
 
   readonly lastBoundary: (sessionID: SessionID) => Effect.Effect<MessageID | undefined>
 
   readonly isWriterRunning: (sessionID: SessionID) => Effect.Effect<boolean>
 
   /**
-   * Insert a synthetic checkpoint-boundary user message (boundary marker +
-   * index overview + rebuild context + active-actors text) just after the
-   * given boundary. Inserts nothing and returns false when rebuild context is
+   * Append a synthetic checkpoint-boundary user message (boundary marker +
+   * index overview + rebuild context + active-actors text) after the newest
+   * main-agent message of the session, so the tail after `boundary` falls
+   * outside every later window. The tail is read at insert time; unanswered
+   * user messages at its end are copied onto the boundary in full, the rest
+   * is digested. Inserts nothing and returns false when rebuild context is
    * empty. Never deletes DB messages.
    */
   readonly insertRebuildBoundary: (input: {
     sessionID: SessionID
     boundary: MessageID
-    lastMessageInfo?: LastMessageInfo
-    digestUpTo?: MessageID
     agentID?: string
     agent: string
     model: { providerID: string; modelID: string }
-    boundaryCreatedAt?: number
   }) => Effect.Effect<boolean>
 }
 
@@ -660,12 +763,14 @@ export const layer: Layer.Layer<
       // ForkContext is byte-equal at the watermark moment. Reading the
       // unfiltered session stream would let computeBoundary land on a
       // subagent/prior-writer assistant turn and misalign the prefix cache.
+      // The newest rebuild boundary's tail is added back from the database.
       const sessionInfo = yield* session.get(input.sessionID)
-      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID, {
+      const window = yield* MessageV2.filterCompactedEffect(input.sessionID, {
         contextFrom: sessionInfo.contextFrom,
         contextWatermark: sessionInfo.contextWatermark,
         agentID: "main",
       })
+      const msgs = withRebuildTail(window, readRebuildTail(input.sessionID, window))
       if (msgs.length === 0) {
         log.info("no messages, skipping checkpoint", { sessionID: input.sessionID })
         return "skipped" as const
@@ -1210,6 +1315,7 @@ export const layer: Layer.Layer<
         agentID?: string
         digestUpTo?: MessageID
         boundary?: MessageID
+        exclude?: ReadonlySet<MessageID>
       },
     ) {
       // renderRebuildContext is for the user-facing main agent's context rebuild.
@@ -1221,7 +1327,7 @@ export const layer: Layer.Layer<
       // message-v2.ts populates info.agentID from agent_id column), and the
       // runLoop calls this with that value. Treating "main" as subagent here
       // would skip rebuild → fall through to F39 compaction → context loss.
-      if (opts?.agentID && opts.agentID !== "main") return { text: "", hasActivity: false }
+      if (opts?.agentID && opts.agentID !== "main") return { text: "" }
 
       // Decide whether a usable checkpoint exists using the WATERMARK
       // (last_checkpoint_message_id), not the on-disk file's text. The writer's
@@ -1335,6 +1441,7 @@ export const layer: Layer.Layer<
         const userMsgs = MessageV2.page({ sessionID, agentID: "main", limit: 200 }).items.filter(
           (m) =>
             m.info.role === "user" &&
+            !opts?.exclude?.has(m.info.id) &&
             !m.parts.some((p) => p.type === "tool" || p.type === "checkpoint" || p.type === "compaction"),
         )
         // Iterate most-recent backward so FIFO drops oldest when total cap hits.
@@ -1360,7 +1467,7 @@ export const layer: Layer.Layer<
         actors.length === 0 &&
         recentUserEntries.length === 0
       ) {
-        return { text: "", hasActivity: false }
+        return { text: "" }
       }
 
       const lines: string[] = []
@@ -1490,9 +1597,9 @@ export const layer: Layer.Layer<
       }
 
       // Section: Recent activity — messages that already exist after the
-      // watermark at insert time, as a compact name+args list. Written into
-      // the same rebuild-context block as the checkpoint body so send-time
-      // collapse only has to drop those messages (no second digest block).
+      // watermark at insert time, as a compact name+args list. The boundary
+      // is appended after them, so this list is the only form in which they
+      // reach later windows.
       // Slice from opts.boundary (the watermark this insert is using) —
       // re-reading lastBoundary here can disagree with the insert if a
       // concurrent writer advances the watermark between the two reads.
@@ -1501,8 +1608,8 @@ export const layer: Layer.Layer<
         const digestUpTo = opts.digestUpTo
         const boundaryID = opts.boundary
         if (boundaryID) {
-          // Main slice only — the runLoop collapse is main-scoped; subagent
-          // activity must not appear as if the main agent performed it.
+          // Main slice only: subagent activity must not appear as if the
+          // main agent performed it.
           const all = yield* session.messages({ sessionID })
           const tail = all.filter((m) => m.info.id > boundaryID && m.info.id <= digestUpTo)
           const activity = renderTailDigest(tail)
@@ -1524,17 +1631,16 @@ export const layer: Layer.Layer<
           : "This session is continued from a checkpoint. The blocks above cover earlier history. Resume the last task from the most recent live messages. Do not recap this dump.",
       )
 
-      // Section 11: tail-aware system reminder. Picks the appropriate nudge
-      // based on how the preserved tail ends: tool-calls → continue loop,
-      // stop → check task spec before stopping again, tool → process results,
-      // user → no addendum needed.
+      // Section 11: tail-aware system reminder, chosen from how the tail ends:
+      // a tool step → continue the loop, a tool result → process it. A
+      // finished reply or a user message needs none; the next request is the
+      // user's.
       const info = opts?.lastMessageInfo
       if (info) {
         const reminder = (() => {
           switch (info.role) {
             case "assistant":
-              if (info.finish === "tool-calls") return autonomousLoopReminder()
-              return stopReminder(undefined)
+              return info.finish === "tool-calls" ? autonomousLoopReminder() : ""
             case "tool":
               return toolResultContinueReminder()
             case "user":
@@ -1547,7 +1653,7 @@ export const layer: Layer.Layer<
         }
       }
 
-      return { text: lines.join("\n"), hasActivity }
+      return { text: lines.join("\n") }
     })
 
     const lastBoundary = Effect.fn("SessionCheckpoint.lastBoundary")(function* (sessionID: SessionID) {
@@ -1598,40 +1704,43 @@ export const layer: Layer.Layer<
     const insertRebuildBoundary = Effect.fn("SessionCheckpoint.insertRebuildBoundary")(function* (input: {
       sessionID: SessionID
       boundary: MessageID
-      lastMessageInfo?: LastMessageInfo
-      /**
-       * Newest message that already exists at insert time. Stored as
-       * CheckpointPart.digestUpTo so send-time collapse digests only the
-       * pre-insert tail and leaves post-insert messages live.
-       */
-      digestUpTo?: MessageID
       agentID?: string
       agent: string
       model: { providerID: string; modelID: string }
-      boundaryCreatedAt?: number
     }) {
+      // The tail is everything after the watermark at insert time; callers
+      // hold a window read before their current step, so it is read here.
+      // Unanswered user messages at its end are copied onto the boundary in
+      // full and stay out of the digest. Every input the inbox still holds
+      // undelivered is recorded, including ones an earlier boundary deferred,
+      // so the newest boundary alone can bring back those that end unsent.
+      const undelivered = undeliveredInputs(input.sessionID)
+      const deferredInputs = [...undelivered].toSorted()
+      const tail = conversationAfter(input.sessionID, undelivered, input.boundary)
+      const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
+      const unanswered = tail.slice(answered)
+      const digestUpTo = tail[answered - 1]?.info.id
+      const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
+      const ending = tail.at(-1) ?? newest
       const rendered = yield* renderRebuildContext(input.sessionID, {
-        lastMessageInfo: input.lastMessageInfo,
+        lastMessageInfo: ending ? computeLastMessageInfo([ending.info]) : undefined,
         agentID: input.agentID,
-        digestUpTo: input.digestUpTo,
+        digestUpTo,
         boundary: input.boundary,
-      }).pipe(Effect.catch(() => Effect.succeed({ text: "", hasActivity: false })))
+        exclude: new Set([...unanswered.map((m) => m.info.id), ...undelivered]),
+      }).pipe(Effect.catch(() => Effect.succeed({ text: "" })))
       if (!rendered.text) return false
 
       const indexText = yield* renderIndex(input.sessionID).pipe(Effect.catch(() => Effect.succeed("")))
-      // Persist digestUpTo only when the activity section was actually
-      // rendered. Sending-time collapse would otherwise drop the tail while
-      // nothing recorded what those messages were.
-      const hasActivity = rendered.hasActivity
 
-      const syntheticTime = (input.boundaryCreatedAt ?? Date.now()) + 1
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user" as const,
         model: { providerID: input.model.providerID as ProviderID, modelID: input.model.modelID as ModelID },
         sessionID: input.sessionID,
         agent: input.agent,
-        time: { created: syntheticTime },
+        // Never earlier than the tail, even if the clock went back.
+        time: { created: Math.max(Date.now(), newest?.info.time.created ?? 0) },
       })
 
       yield* session.updatePart({
@@ -1642,7 +1751,8 @@ export const layer: Layer.Layer<
         checkpointDir: "",
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
-        ...(input.digestUpTo && hasActivity ? { digestUpTo: input.digestUpTo } : {}),
+        ...(digestUpTo ? { digestUpTo } : {}),
+        ...(deferredInputs.length > 0 ? { deferredInputs } : {}),
       })
 
       if (indexText) {
@@ -1677,6 +1787,25 @@ export const layer: Layer.Layer<
           synthetic: true,
           text: actorsText,
         })
+      }
+
+      for (const message of unanswered) {
+        for (const part of message.parts) {
+          if (part.type === "text" && !part.ignored) {
+            yield* session.updatePart({
+              id: PartID.ascending(),
+              messageID: msg.id,
+              sessionID: input.sessionID,
+              type: "text",
+              synthetic: true,
+              text: part.text,
+              ...(part.metadata ? { metadata: part.metadata } : {}),
+            })
+          }
+          if (part.type === "file") {
+            yield* session.updatePart({ ...part, id: PartID.ascending(), messageID: msg.id, sessionID: input.sessionID })
+          }
+        }
       }
 
       return true
