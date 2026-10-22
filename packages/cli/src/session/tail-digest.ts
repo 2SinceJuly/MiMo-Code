@@ -12,7 +12,7 @@ import type { CheckpointPart, ToolPart, WithParts } from "./message-v2"
 
 const MAX_LINE_CHARS = 240
 const MAX_ARG_CHARS = 80
-const MAX_LINES = 200
+const MAX_LINES = 50
 
 function truncate(text: string, max: number): string {
   const cleaned = text.replace(/\s+/g, " ").trim()
@@ -74,7 +74,7 @@ export function lastStep(tail: readonly WithParts[]): WithParts | undefined {
   )
 }
 
-function digestLines(tail: readonly WithParts[]): { lines: string[]; marked: boolean } {
+function digestLines(tail: readonly WithParts[]): { lines: string[]; omitted: number; marked: boolean } {
   const lines: string[] = []
   const last = lastStep(tail)
   for (const msg of tail) {
@@ -100,15 +100,20 @@ function digestLines(tail: readonly WithParts[]): { lines: string[]; marked: boo
       }
     }
   }
-  // Keep the newest lines: the marked calls of the last step come last.
+  // Keep the newest lines: the marked calls of the last step come last. The
+  // omitted ones stay readable through the history tool.
   const kept = lines.slice(-MAX_LINES)
   // Only open with the note for lines that actually appear.
-  return { lines: kept, marked: kept.some((line) => line.includes("→ interrupted") || line.includes(UNSEEN_MARK)) }
+  return {
+    lines: kept,
+    omitted: lines.length - kept.length,
+    marked: kept.some((line) => line.includes("→ interrupted") || line.includes(UNSEEN_MARK)),
+  }
 }
 
 /** Section body only (header + lines). Empty string when there is nothing to list. */
 export function renderTailDigest(tail: readonly WithParts[]): string {
-  const { lines, marked } = digestLines(tail)
+  const { lines, omitted, marked } = digestLines(tail)
   if (lines.length === 0) return ""
   return [
     "# Recent activity",
@@ -119,6 +124,7 @@ export function renderTailDigest(tail: readonly WithParts[]): string {
           "",
         ]
       : []),
+    ...(omitted > 0 ? [`(${omitted} earlier activity lines omitted — use the history tool to read them)`] : []),
     ...lines,
   ].join("\n")
 }

@@ -258,7 +258,7 @@ describe("renderTailDigest", () => {
     expect(text).toContain(OPENING)
   })
 
-  test("a long tail keeps its newest lines, so the marked calls survive the line cap", () => {
+  test("a long tail keeps its newest 50 lines, so the marked calls survive, and names how many it omitted", () => {
     const earlier = Array.from({ length: 300 }, (_, i) => ({
       info: assistantInfo(`a${String(i).padStart(3, "0")}`, "u1"),
       parts: [textPart(`a${String(i).padStart(3, "0")}`, `t${i}`, `step ${i} done`)],
@@ -269,7 +269,17 @@ describe("renderTailDigest", () => {
     ])
     expect(text).toContain(`- read(path="last.ts") ${UNSEEN}`)
     expect(text).toContain(OPENING)
-    expect(text).not.toContain("step 0 done")
+    expect(text).toContain("(251 earlier activity lines omitted — use the history tool to read them)")
+    expect(text.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(50)
+    expect(text).toContain("- assistant: step 251 done")
+    expect(text).not.toContain("- assistant: step 250 done")
+  })
+
+  test("a tail within the limit names no omitted lines", () => {
+    const text = renderTailDigest([
+      { info: assistantInfo("a1", "u1"), parts: [completedTool("a1", "p1", "read", { path: "a.ts" })] },
+    ])
+    expect(text).not.toContain("omitted")
   })
 
   test("an assistant message without content after the last step does not take the mark", () => {
