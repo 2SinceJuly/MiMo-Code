@@ -43,9 +43,22 @@ export function sessionCap(user: MessageV2.User | undefined) {
   return user?.model.contextLimit
 }
 
-/** A raw context size (e.g. `model.limit.context`) lowered to the session cap. 0 (unknown) stays 0. */
-export function cappedContext(context: number, cap?: number) {
-  return cap && cap < context ? cap : context
+/**
+ * A synthetic user message the loop will treat as `lastUser` must keep the cap of
+ * the user turn it continues; otherwise that turn silently runs on the full window.
+ */
+export function withSessionCap(model: MessageV2.User["model"], user: MessageV2.User | undefined): MessageV2.User["model"] {
+  const cap = sessionCap(user)
+  return cap ? { ...model, contextLimit: cap } : model
+}
+
+/**
+ * The model's raw `limit.context` lowered to the session cap when `contextWindow`
+ * applies it, so raw-context consumers agree with the overflow window.
+ */
+export function cappedContext(input: { cfg: Config.Info; model: Provider.Model; cap?: number }) {
+  const win = contextWindow(input)
+  return win.source === "session" ? win.effective : input.model.limit.context
 }
 
 function reserves(input: { cfg: Config.Info; model: Provider.Model }) {

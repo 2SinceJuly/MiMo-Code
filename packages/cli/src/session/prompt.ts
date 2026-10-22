@@ -50,7 +50,7 @@ import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
 import { computeLastMessageInfo } from "./last-message-info"
-import { cappedContext, sessionCap, usable, isOverflow as overflowCheck } from "./overflow"
+import { cappedContext, sessionCap, usable, withSessionCap, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { NotFoundError, Database, eq, and, inArray, isNull } from "@/storage"
@@ -2325,7 +2325,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       deferMcpTools = shouldDeferMcpTools(
         searchMode,
         mcpCatalog.current.entries,
-        cappedContext(input.model.limit.context, input.contextLimit),
+        cappedContext({ cfg: yield* config.get(), model: input.model, cap: input.contextLimit }),
         deferredEarlier,
       )
       searchExposed =
@@ -2415,7 +2415,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const cfg = yield* config.get()
       let remaining = mcpToolCatalogBudget({
         usable: usable({ cfg, model: input.model, cap: input.contextLimit }),
-        context: cappedContext(input.model.limit.context, input.contextLimit),
+        context: cappedContext({ cfg, model: input.model, cap: input.contextLimit }),
       })
 
       const serverNames = input.readiness.servers
@@ -4302,6 +4302,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     if (newerUserOpt.value.info.time.created > turnEndedAt) return undefined as never
                     if (!isPendingHintLive(pending)) return undefined as never
                     const msgId = MessageID.ascending()
+                    // The hint becomes the loop's last user message; keep the turn's context cap.
                     yield* sessions.updateMessage({
                       id: msgId,
                       sessionID,
@@ -4309,7 +4310,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       agentID: resolvedAgentID,
                       time: { created: Date.now() },
                       agent: agentName,
-                      model,
+                      model: model && withSessionCap(model, newerUserOpt.value.info),
                       task_id: newerUserOpt.value.info.task_id,
                     } as MessageV2.User)
                     yield* sessions.updatePart({

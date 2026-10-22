@@ -14,7 +14,7 @@ import { SessionShare } from "@/share"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import { Agent } from "@/agent/agent"
 import { Snapshot } from "@/snapshot"
 import { Command } from "@/command"
@@ -75,6 +75,14 @@ export const resolveCurrentAgent = (sessionID: SessionID, defaultAgent: string) 
       if (info.role === "user") return info.agent || defaultAgent
     }
     return defaultAgent
+  })
+
+/** The main slice's latest user context cap; a compaction boundary must keep it. */
+export const resolveContextLimit = (sessionID: SessionID) =>
+  Effect.gen(function* () {
+    const session = yield* Session.Service
+    const last = yield* session.findMessage(sessionID, (m) => m.info.role === "user")
+    return Option.isSome(last) && last.value.info.role === "user" ? last.value.info.model.contextLimit : undefined
   })
 
 export const SessionRoutes = lazy(() =>
@@ -682,6 +690,7 @@ export const SessionRoutes = lazy(() =>
 
           yield* revert.cleanup(yield* session.get(sessionID))
           const currentAgent = yield* resolveCurrentAgent(sessionID, yield* agent.defaultAgent())
+          const contextLimit = yield* resolveContextLimit(sessionID)
 
           yield* compact.create({
             sessionID,
@@ -689,6 +698,7 @@ export const SessionRoutes = lazy(() =>
             model: {
               providerID: body.providerID,
               modelID: body.modelID,
+              ...(contextLimit ? { contextLimit } : {}),
             },
             auto: body.auto,
             agentID: "main",

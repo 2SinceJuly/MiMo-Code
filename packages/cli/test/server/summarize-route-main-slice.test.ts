@@ -12,7 +12,7 @@ import { Log } from "../../src/util"
 import { testEffect } from "../lib/effect"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
-import { resolveCurrentAgent } from "../../src/server/routes/instance/session"
+import { resolveContextLimit, resolveCurrentAgent } from "../../src/server/routes/instance/session"
 
 void Log.init({ print: false })
 
@@ -93,6 +93,34 @@ describe("summarize route — currentAgent lookup uses main slice", () => {
 
         const got = yield* resolveCurrentAgent(info.id, "build")
         expect(got).toBe("build")
+      }),
+    ),
+  )
+})
+
+// The summarize route's compaction boundary becomes the loop's next user
+// message, so it must carry the session's per-request context cap.
+describe("summarize route — context cap carried onto the boundary", () => {
+  const user = (sessionID: SessionNs.Info["id"], created: number, extra: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const id = MessageID.ascending()
+      yield* ssn.updateMessage({ id, role: "user" as const, sessionID, agent: "build", time: { created }, ...extra } as never)
+      yield* ssn.updatePart({ id: PartID.ascending(), messageID: id, sessionID, type: "text", text: "user prompt" })
+    })
+
+  it.live(
+    "reads the latest main-slice user cap and ignores subagent messages",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const info = yield* ssn.create({})
+        expect(yield* resolveContextLimit(info.id)).toBeUndefined()
+        yield* user(info.id, Date.now(), { model: { ...ref, contextLimit: 300_000 } })
+        yield* user(info.id, Date.now() + 1, { agentID: "worker-1", model: { ...ref, contextLimit: 900_000 } })
+        expect(yield* resolveContextLimit(info.id)).toBe(300_000)
+        yield* user(info.id, Date.now() + 2, { model: ref })
+        expect(yield* resolveContextLimit(info.id)).toBeUndefined()
       }),
     ),
   )

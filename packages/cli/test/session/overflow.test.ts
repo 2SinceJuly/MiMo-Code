@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { cappedContext, contextWindow, isOverflow, sessionCap, usable } from "../../src/session/overflow"
+import { cappedContext, contextWindow, isOverflow, sessionCap, usable, withSessionCap } from "../../src/session/overflow"
 import type { MessageV2 } from "../../src/session/message-v2"
 import { Token } from "../../src/util"
 import { Session as SessionNs } from "../../src/session"
@@ -666,14 +666,29 @@ describe("session context cap", () => {
     })
   })
 
-  test("sessionCap reads the user message model and cappedContext only lowers", () => {
+  test("withSessionCap carries the continued user turn's cap onto a synthetic message model", () => {
+    const base: MessageV2.User["model"] = { providerID: "test" as never, modelID: "test-model" as never, variant: "high" }
+    const capped = { model: { providerID: "test", modelID: "test-model", contextLimit: 300_000 } } as MessageV2.User
+    const uncapped = { model: { providerID: "test", modelID: "test-model" } } as MessageV2.User
+    expect(withSessionCap(base, capped)).toEqual({ ...base, contextLimit: 300_000 })
+    expect(withSessionCap(base, uncapped)).toBe(base)
+    expect(withSessionCap(base, undefined)).toBe(base)
+  })
+
+  test("sessionCap reads the user message model; cappedContext follows the window's cap decision", () => {
     const user = { model: { providerID: "test", modelID: "test-model", contextLimit: 300_000 } } as MessageV2.User
     expect(sessionCap(user)).toBe(300_000)
     expect(sessionCap(undefined)).toBeUndefined()
-    expect(cappedContext(1_050_000, 300_000)).toBe(300_000)
-    expect(cappedContext(128_000, 300_000)).toBe(128_000)
-    expect(cappedContext(0, 300_000)).toBe(0)
-    expect(cappedContext(1_050_000, undefined)).toBe(1_050_000)
+    const model = large()
+    const cfg = mockCfg()
+    expect(cappedContext({ cfg, model, cap: 300_000 })).toBe(300_000)
+    // Ignored caps (at/above the input cap, or inside the reserves) leave the raw context.
+    expect(cappedContext({ cfg, model, cap: 1_000_000 })).toBe(1_050_000)
+    expect(cappedContext({ cfg, model, cap: 20_000 })).toBe(1_050_000)
+    expect(cappedContext({ cfg, model })).toBe(1_050_000)
+    // A smaller global budget is the overflow window's source; raw context stays untouched.
+    expect(cappedContext({ cfg: mockCfg({ max_context: "200K" }), model, cap: 300_000 })).toBe(1_050_000)
+    expect(cappedContext({ cfg, model: createModel({ context: 0, output: 0 }), cap: 300_000 })).toBe(0)
   })
 })
 
