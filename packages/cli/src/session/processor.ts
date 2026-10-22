@@ -207,6 +207,8 @@ type Input = {
   assistantMessage: MessageV2.Assistant
   sessionID: SessionID
   model: Provider.Model
+  /** Session cap on the context window from the turn's user message. */
+  contextLimit?: number
   agentMetrics?: AgentMetrics
 }
 
@@ -297,6 +299,7 @@ export const layer: Layer.Layer<
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
         model: input.model,
+        contextLimit: input.contextLimit,
         agentMetrics: input.agentMetrics,
         toolcalls: {},
         shouldBreak: false,
@@ -752,7 +755,7 @@ export const layer: Layer.Layer<
               .pipe(Effect.ignore, Effect.forkIn(scope))
             if (
               !ctx.assistantMessage.summary &&
-              isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
+              isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model, cap: ctx.contextLimit })
             ) {
               ctx.needsOverflowHandling = true
             }

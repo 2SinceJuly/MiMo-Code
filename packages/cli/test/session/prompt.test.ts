@@ -11,6 +11,7 @@ import { Instance } from "../../src/project/instance"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Session } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionID } from "../../src/session/schema"
 import {
   SessionPrompt,
   isUserAttachmentImagePart,
@@ -1630,6 +1631,63 @@ describe("session.prompt agent variant", () => {
       if (prev === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = prev
     }
+  })
+})
+
+describe("session.prompt contextLimit", () => {
+  test("persists the request's context cap on the user message model", async () => {
+    await using tmp = await tmpdir({ git: true })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: () =>
+        run(
+          Effect.gen(function* () {
+            const prompt = yield* SessionPrompt.Service
+            const sessions = yield* Session.Service
+            const session = yield* sessions.create({})
+            const model = { providerID: ProviderID.make("opencode"), modelID: ModelID.make("kimi-k2.5-free") }
+
+            const capped = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              model,
+              contextLimit: 300_000,
+              noReply: true,
+              parts: [{ type: "text", text: "hello" }],
+            })
+            if (capped.info.role !== "user") throw new Error("expected user message")
+            expect(capped.info.model.contextLimit).toBe(300_000)
+
+            const plain = yield* prompt.prompt({
+              sessionID: session.id,
+              agent: "build",
+              model,
+              noReply: true,
+              parts: [{ type: "text", text: "hello again" }],
+            })
+            if (plain.info.role !== "user") throw new Error("expected user message")
+            expect(plain.info.model.contextLimit).toBeUndefined()
+
+            const stored = yield* sessions.messages({ sessionID: session.id })
+            const users = stored.flatMap((message) => (message.info.role === "user" ? [message.info] : []))
+            expect(users.find((info) => info.id === capped.info.id)?.model.contextLimit).toBe(300_000)
+            expect(users.find((info) => info.id === plain.info.id)?.model.contextLimit).toBeUndefined()
+
+            yield* sessions.remove(session.id)
+          }),
+        ),
+    })
+  })
+
+  test("rejects a non-positive or fractional cap", () => {
+    const base = {
+      sessionID: SessionID.descending(),
+      parts: [{ type: "text" as const, text: "hello" }],
+    }
+    expect(SessionPrompt.PromptInput.safeParse({ ...base, contextLimit: 500_000 }).success).toBe(true)
+    expect(SessionPrompt.PromptInput.safeParse({ ...base, contextLimit: 0 }).success).toBe(false)
+    expect(SessionPrompt.PromptInput.safeParse({ ...base, contextLimit: 1.5 }).success).toBe(false)
   })
 })
 

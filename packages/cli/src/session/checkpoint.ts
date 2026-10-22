@@ -534,7 +534,8 @@ export interface Interface {
     digestUpTo?: MessageID
     agentID?: string
     agent: string
-    model: { providerID: string; modelID: string }
+    /** `contextLimit` keeps the turn's session cap on the boundary, which becomes the loop's last user message. */
+    model: { providerID: string; modelID: string; contextLimit?: number }
     boundaryCreatedAt?: number
   }) => Effect.Effect<boolean>
 }
@@ -1607,7 +1608,7 @@ export const layer: Layer.Layer<
       digestUpTo?: MessageID
       agentID?: string
       agent: string
-      model: { providerID: string; modelID: string }
+      model: { providerID: string; modelID: string; contextLimit?: number }
       boundaryCreatedAt?: number
     }) {
       const rendered = yield* renderRebuildContext(input.sessionID, {
@@ -1628,7 +1629,11 @@ export const layer: Layer.Layer<
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user" as const,
-        model: { providerID: input.model.providerID as ProviderID, modelID: input.model.modelID as ModelID },
+        model: {
+          providerID: input.model.providerID as ProviderID,
+          modelID: input.model.modelID as ModelID,
+          contextLimit: input.model.contextLimit,
+        },
         sessionID: input.sessionID,
         agent: input.agent,
         time: { created: syntheticTime },

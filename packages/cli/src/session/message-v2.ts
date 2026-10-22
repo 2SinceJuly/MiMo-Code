@@ -551,6 +551,7 @@ export const User = Base.extend({
     providerID: ProviderID.zod,
     modelID: ModelID.zod,
     variant: z.string().optional(),
+    contextLimit: z.number().int().positive().optional(),
   }),
   system: z.string().optional(),
   systemMode: z.enum(["append", "replace-agent"]).optional(),

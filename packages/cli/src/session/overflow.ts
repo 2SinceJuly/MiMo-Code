@@ -24,11 +24,28 @@ const warned = new Set<string>()
 export type Window = {
   /** Largest prompt the provider accepts. 0 means unknown — overflow handling is off. */
   hard: number
-  /** Working window after the user's `compaction.max_context` budget is applied. */
+  /** Working window after the `compaction.max_context` budget and the request's session cap are applied. */
   effective: number
   /** Token count at which compaction fires (a fixed fraction of `effective`). */
   usable: number
-  source: "model" | "config"
+  source: "model" | "config" | "session"
+}
+
+type WindowInput = {
+  cfg: Config.Info
+  model: Provider.Model
+  /** Per-request cap from the turn's user message; it only lowers the window. */
+  cap?: number
+}
+
+/** The context window cap a turn's user message requests, if any. */
+export function sessionCap(user: MessageV2.User | undefined) {
+  return user?.model.contextLimit
+}
+
+/** A raw context size (e.g. `model.limit.context`) lowered to the session cap. 0 (unknown) stays 0. */
+export function cappedContext(context: number, cap?: number) {
+  return cap && cap < context ? cap : context
 }
 
 function reserves(input: { cfg: Config.Info; model: Provider.Model }) {
@@ -77,26 +94,30 @@ function budget(input: { cfg: Config.Info; model: Provider.Model }, hard: number
  * trigger for a model. `usable()` is the trigger; the other fields exist so the
  * TUI and CLI can explain where the number came from.
  */
-export function contextWindow(input: { cfg: Config.Info; model: Provider.Model }): Window {
+export function contextWindow(input: WindowInput): Window {
   const hard = input.model.limit.context === 0 ? 0 : input.model.limit.input || input.model.limit.context
   if (hard === 0) return { hard: 0, effective: 0, usable: 0, source: "model" }
 
   const reserved = reserves(input)
   const configured = budget(input, hard, reserved)
-  const effective = configured ?? hard
+  const base = configured ?? hard
+  // Same guards as the config budget: a cap that leaves no room for the
+  // reserves is ignored, and one at or above the provider cap is a no-op.
+  const cap = input.cap && input.cap > reserved && input.cap < hard ? input.cap : undefined
+  const effective = cap && cap < base ? cap : base
   return {
     hard,
     effective,
     usable: Math.floor(effective * Flag.MIMOCODE_COMPACTION_TRIGGER_RATIO),
-    source: configured === undefined ? "model" : "config",
+    source: effective !== base ? "session" : configured === undefined ? "model" : "config",
   }
 }
 
-export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
+export function usable(input: WindowInput) {
   return contextWindow(input).usable
 }
 
-export function isOverflow(input: { cfg: Config.Info; tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+export function isOverflow(input: WindowInput & { tokens: MessageV2.Assistant["tokens"] }) {
   if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
 

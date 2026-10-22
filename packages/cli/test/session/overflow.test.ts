@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { contextWindow, isOverflow, usable } from "../../src/session/overflow"
+import { cappedContext, contextWindow, isOverflow, sessionCap, usable } from "../../src/session/overflow"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { Token } from "../../src/util"
 import { Session as SessionNs } from "../../src/session"
 import type { Provider } from "../../src/provider"
@@ -596,6 +597,83 @@ describe("compaction.max_context", () => {
     expect(contextWindow({ cfg, model })).toEqual({ hard: 0, effective: 0, usable: 0, source: "model" })
     const tokens = { input: 500_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } as any
     expect(isOverflow({ cfg, tokens, model })).toBe(false)
+  })
+})
+
+describe("session context cap", () => {
+  const large = () => createModel({ context: 1_050_000, input: 922_000, output: 128_000, id: "gpt-5.6" })
+
+  test("lowers the effective window and the trigger", () => {
+    const model = large()
+    expect(contextWindow({ cfg: mockCfg(), model, cap: 300_000 })).toEqual({
+      hard: 922_000,
+      effective: 300_000,
+      usable: 270_000,
+      source: "session",
+    })
+    expect(usable({ cfg: mockCfg(), model, cap: 500_000 })).toBe(450_000)
+  })
+
+  test("a cap at or above the provider cap is a no-op", () => {
+    const model = large()
+    const uncapped = contextWindow({ cfg: mockCfg(), model })
+    expect(contextWindow({ cfg: mockCfg(), model, cap: 922_000 })).toEqual(uncapped)
+    expect(contextWindow({ cfg: mockCfg(), model, cap: 1_000_000 })).toEqual(uncapped)
+    expect(uncapped.source).toBe("model")
+  })
+
+  test("a cap that leaves no room for the reserves is ignored", () => {
+    // limit.input is set, so no output headroom is reserved: reserves = min(33K, 128K) = 33K.
+    const model = large()
+    expect(contextWindow({ cfg: mockCfg(), model, cap: 33_000 }).source).toBe("model")
+    expect(usable({ cfg: mockCfg(), model, cap: 20_000 })).toBe(829_800)
+    expect(usable({ cfg: mockCfg(), model, cap: 33_001 })).toBe(Math.floor(33_001 * 0.9))
+  })
+
+  test("combined with compaction.max_context the smaller one wins", () => {
+    const model = large()
+    expect(contextWindow({ cfg: mockCfg({ max_context: "500K" }), model, cap: 300_000 })).toEqual({
+      hard: 922_000,
+      effective: 300_000,
+      usable: 270_000,
+      source: "session",
+    })
+    expect(contextWindow({ cfg: mockCfg({ max_context: "200K" }), model, cap: 300_000 })).toEqual({
+      hard: 922_000,
+      effective: 200_000,
+      usable: 180_000,
+      source: "config",
+    })
+  })
+
+  test("isOverflow fires at the capped threshold", () => {
+    const model = large()
+    const cfg = mockCfg()
+    const at = { input: 270_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } as any
+    const under = { input: 269_999, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } as any
+    expect(isOverflow({ cfg, tokens: at, model, cap: 300_000 })).toBe(true)
+    expect(isOverflow({ cfg, tokens: under, model, cap: 300_000 })).toBe(false)
+    expect(isOverflow({ cfg, tokens: at, model })).toBe(false)
+  })
+
+  test("leaves overflow handling off when the model reports no window", () => {
+    const model = createModel({ context: 0, output: 0 })
+    expect(contextWindow({ cfg: mockCfg(), model, cap: 300_000 })).toEqual({
+      hard: 0,
+      effective: 0,
+      usable: 0,
+      source: "model",
+    })
+  })
+
+  test("sessionCap reads the user message model and cappedContext only lowers", () => {
+    const user = { model: { providerID: "test", modelID: "test-model", contextLimit: 300_000 } } as MessageV2.User
+    expect(sessionCap(user)).toBe(300_000)
+    expect(sessionCap(undefined)).toBeUndefined()
+    expect(cappedContext(1_050_000, 300_000)).toBe(300_000)
+    expect(cappedContext(128_000, 300_000)).toBe(128_000)
+    expect(cappedContext(0, 300_000)).toBe(0)
+    expect(cappedContext(1_050_000, undefined)).toBe(1_050_000)
   })
 })
 

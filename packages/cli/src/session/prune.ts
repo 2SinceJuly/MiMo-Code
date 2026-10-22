@@ -126,6 +126,8 @@ export interface Interface {
   readonly fireCheckpoints: (input: {
     sessionID: SessionID
     model: Provider.Model
+    /** Session cap on the context window from the turn's user message. */
+    contextLimit?: number
     tokens: MessageV2.Assistant["tokens"]
     promptOps: ActorPromptOps
     agentID?: string
@@ -167,6 +169,7 @@ export const layer: Layer.Layer<
     const fireCheckpoints = Effect.fn("SessionPrune.fireCheckpoints")(function* (input: {
       sessionID: SessionID
       model: Provider.Model
+      contextLimit?: number
       tokens: MessageV2.Assistant["tokens"]
       promptOps: ActorPromptOps
       agentID?: string
@@ -203,7 +206,7 @@ export const layer: Layer.Layer<
       }
 
       const cfg = yield* config.get()
-      const windowSize = usable({ cfg, model: input.model })
+      const windowSize = usable({ cfg, model: input.model, cap: input.contextLimit })
       if (windowSize === 0) return
       const raw = cfg.checkpoint?.thresholds ?? defaultThresholdsFor(windowSize)
 

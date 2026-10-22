@@ -50,7 +50,7 @@ import { SessionPrune } from "./prune"
 import { SessionCheckpoint } from "./checkpoint"
 import { SessionCompaction } from "./compaction"
 import { computeLastMessageInfo } from "./last-message-info"
-import { usable, isOverflow as overflowCheck } from "./overflow"
+import { cappedContext, sessionCap, usable, isOverflow as overflowCheck } from "./overflow"
 import { Config } from "@/config"
 import { isMemoryWriteEnabled } from "@/memory/write-gate"
 import { NotFoundError, Database, eq, and, inArray, isNull } from "@/storage"
@@ -924,7 +924,7 @@ export const layer = Layer.effect(
       msgs: MessageV2.WithParts[]
       agentID?: string
       agent: string
-      model: { providerID: string; id: string }
+      model: { providerID: string; id: string; contextLimit?: number }
     }) {
       const hasCP = yield* checkpoint
         .hasCheckpoint(input.sessionID)
@@ -948,7 +948,7 @@ export const layer = Layer.effect(
           digestUpTo: input.msgs.at(-1)?.info.id,
           agentID: input.agentID,
           agent: input.agent,
-          model: { providerID: input.model.providerID, modelID: input.model.id },
+          model: { providerID: input.model.providerID, modelID: input.model.id, contextLimit: input.model.contextLimit },
           boundaryCreatedAt: boundaryMsg?.info.time.created,
         })
         .pipe(Effect.catch(() => Effect.succeed(false)))
@@ -1022,7 +1022,7 @@ export const layer = Layer.effect(
       msgs: MessageV2.WithParts[]
       agentID?: string
       agent: string
-      model: { providerID: string; id: string }
+      model: { providerID: string; id: string; contextLimit?: number }
       /** Upper bound on the writer wait; see {AUTO,MANUAL}_WRITER_WAIT_MS. */
       writerWaitMs: number
       /** Run once, immediately before the wait begins, to explain the stall. */
@@ -1774,6 +1774,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const resolveTools = Effect.fn("SessionPrompt.resolveTools")(function* (input: {
       agent: Agent.Info
       model: Provider.Model
+      /** Session cap on the context window from the turn's user message. */
+      contextLimit?: number
       session: Session.Info
       tools?: Record<string, boolean>
       processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall" | "toolGate" | "executeTool" | "registerTool">
@@ -2323,7 +2325,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       deferMcpTools = shouldDeferMcpTools(
         searchMode,
         mcpCatalog.current.entries,
-        input.model.limit.context,
+        cappedContext(input.model.limit.context, input.contextLimit),
         deferredEarlier,
       )
       searchExposed =
@@ -2388,6 +2390,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       readiness: McpReadiness
       enabled: boolean
       model: Provider.Model
+      contextLimit?: number
     }) {
       if (!input.enabled) return
       const userIndex = input.messages.findLastIndex((message) => message.info.role === "user")
@@ -2411,8 +2414,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       if (!input.readiness.configured && byServer.size === 0) return
       const cfg = yield* config.get()
       let remaining = mcpToolCatalogBudget({
-        usable: usable({ cfg, model: input.model }),
-        context: input.model.limit.context,
+        usable: usable({ cfg, model: input.model, cap: input.contextLimit }),
+        context: cappedContext(input.model.limit.context, input.contextLimit),
       })
 
       const serverNames = input.readiness.servers
@@ -2961,6 +2964,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           providerID: model.providerID,
           modelID: model.modelID,
           variant,
+          contextLimit: input.contextLimit,
         },
         system: input.system,
         systemMode: input.systemMode,
@@ -5237,6 +5241,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const modelProviderID = modelOverride ? ProviderID.make(modelOverride.providerID) : lastUser.model.providerID
           const modelModelID = modelOverride ? ModelID.make(modelOverride.modelID) : lastUser.model.modelID
           const model = yield* getModel(modelProviderID, modelModelID, sessionID, lastUser)
+          const contextLimit = sessionCap(lastUser)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -5320,6 +5325,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .fireCheckpoints({
                 sessionID,
                 model,
+                contextLimit,
                 tokens: lastFinished.tokens,
                 promptOps: fireOps,
                 agentID: lastUser.agentID,
@@ -5333,7 +5339,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             !isBoundedComputation &&
             lastFinished &&
             lastFinished.summary !== true &&
-            overflowCheck({ cfg: yield* config.get(), tokens: lastFinished.tokens, model })
+            overflowCheck({ cfg: yield* config.get(), tokens: lastFinished.tokens, model, cap: contextLimit })
           ) {
             // Subagent overflow → per-actor compaction (lossy LLM summarization
             // scoped to the actor's (sessionID, agent_id) slice). Subagents
@@ -5372,7 +5378,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               msgs,
               agentID: lastUser.agentID,
               agent: lastUser.agent,
-              model: { providerID: model.providerID, id: model.id },
+              model: { providerID: model.providerID, id: model.id, contextLimit },
               writerWaitMs: AUTO_WRITER_WAIT_MS,
               // The turn is mid-flight, so explain the stall: without this the
               // TUI would sit on a bare spinner for minutes with no reason.
@@ -5406,7 +5412,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 .create({
                   sessionID,
                   agent: lastUser.agent,
-                  model: { providerID: model.providerID, modelID: model.id },
+                  model: { providerID: model.providerID, modelID: model.id, contextLimit },
                   auto: true,
                   agentID: lastUser.agentID,
                 })
@@ -5557,6 +5563,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 assistantMessage: msg,
                 sessionID,
                 model,
+                contextLimit,
                 agentMetrics,
               })
 
@@ -5568,6 +5575,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   agent,
                   session,
                   model,
+                  contextLimit,
                   tools: lastUser.tools,
                   processor: handle,
                   bypassAgentCheck,
@@ -5584,6 +5592,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   readiness: resolvedTools.mcpReadiness,
                   enabled: resolvedTools.searchExposed,
                   model,
+                  contextLimit,
                 })
 
                 if (lastUser.format?.type === "json_schema") {
@@ -6160,7 +6169,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                     msgs,
                     agentID: lastUser.agentID,
                     agent: lastUser.agent,
-                    model: { providerID: model.providerID, id: model.id },
+                    model: { providerID: model.providerID, id: model.id, contextLimit },
                     writerWaitMs: AUTO_WRITER_WAIT_MS,
                     // F55: only main owns session status — subagent onIdle never clears it.
                     onWaitingForWriter: (!agentID || agentID === "main")
@@ -6186,7 +6195,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       .create({
                         sessionID,
                         agent: lastUser.agent,
-                        model: { providerID: model.providerID, modelID: model.id },
+                        model: { providerID: model.providerID, modelID: model.id, contextLimit },
                         auto: true,
                         overflow: true,
                         agentID: lastUser.agentID,
@@ -6737,6 +6746,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         parts,
         titleLocale: input.titleLocale,
         variant: input.variant,
+        contextLimit: input.contextLimit,
         system: input.system,
         systemMode: input.systemMode,
         harness: input.harness,
@@ -7646,6 +7656,12 @@ export const PromptInput = z.object({
       "Harness mode selected by the session's first user query. Later values are ignored. Auto preserves model/process inference and explicit default forces the native tool schema for non-GPT models. MIMOCODE_CODEX_MODE=false forces the default harness for every model, including GPT.",
     ),
   variant: z.string().optional(),
+  contextLimit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Per-request cap on the context window in tokens. Can only lower the model's window, never raise it."),
   parts: z.array(
     z.discriminatedUnion("type", [
       MessageV2.TextPart.omit({
@@ -7735,6 +7751,12 @@ export const CommandInput = z.object({
   command: z.string(),
   titleLocale: z.string().optional().describe("BCP 47 locale used for automatic title generation."),
   variant: z.string().optional(),
+  contextLimit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Per-request cap on the context window in tokens. Can only lower the model's window, never raise it."),
   system: z
     .string()
     .optional()

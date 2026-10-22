@@ -237,7 +237,7 @@ export interface Interface {
   readonly create: (input: {
     sessionID: SessionID
     agent: string
-    model: { providerID: ProviderID; modelID: ModelID }
+    model: { providerID: ProviderID; modelID: ModelID; contextLimit?: number }
     auto: boolean
     overflow?: boolean
     agentID?: string
@@ -607,7 +607,7 @@ export const layer: Layer.Layer<
     const create = Effect.fn("SessionCompaction.create")(function* (input: {
       sessionID: SessionID
       agent: string
-      model: { providerID: ProviderID; modelID: ModelID }
+      model: { providerID: ProviderID; modelID: ModelID; contextLimit?: number }
       auto: boolean
       overflow?: boolean
       agentID?: string
