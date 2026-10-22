@@ -139,6 +139,8 @@ describe("rebuild boundary placement", () => {
                 expect(digest).toContain("# Recent activity")
                 for (const file of FILES) expect(digest).toContain(`read(file_path="${file}")`)
                 expect(digest).toContain("- assistant: checks passed")
+                // The reads were followed by the model's reply, so their results were seen.
+                expect(digest).not.toContain("result not seen")
                 for (const file of FILES) expect(JSON.stringify(first)).not.toContain(`${file} body line 0`)
                 const live = text(first[1]!)
                 expect(live).toContain("after rebuild")
@@ -234,8 +236,10 @@ describe("rebuild boundary placement", () => {
                 const digest = text(request[0]!)
                 expect(digest).toContain("run the checks on alpha and beta")
                 expect(digest).toContain("# Recent activity")
-                for (const file of FILES) expect(digest).toContain(`read(file_path="${file}")`)
+                for (const file of FILES) expect(digest).toContain(`read(file_path="${file}") → ran, result not seen`)
                 expect(digest).toContain("mid-loop in an autonomous task")
+                expect(digest).toContain('marked "result not seen"')
+                expect(digest).toContain("check the current state before repeating a call that changes files or runs commands")
                 for (const file of FILES) expect(JSON.stringify(request)).not.toContain(`${file} body line 0`)
               }),
             ),
