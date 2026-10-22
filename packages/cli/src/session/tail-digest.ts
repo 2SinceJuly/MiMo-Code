@@ -68,7 +68,9 @@ export function lastStep(tail: readonly WithParts[]): WithParts | undefined {
   return tail.findLast(
     (msg) =>
       msg.info.role === "assistant" &&
-      msg.parts.some((p) => p.type === "text" || p.type === "reasoning" || p.type === "tool"),
+      msg.parts.some(
+        (p) => p.type === "tool" || ((p.type === "text" || p.type === "reasoning") && p.text.trim().length > 0),
+      ),
   )
 }
 

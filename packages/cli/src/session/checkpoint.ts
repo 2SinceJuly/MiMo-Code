@@ -1720,11 +1720,15 @@ export const layer: Layer.Layer<
       const answered = tail.findLastIndex((m) => m.info.role !== "user") + 1
       const unanswered = tail.slice(answered)
       const digestUpTo = tail[answered - 1]?.info.id
-      const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
+      const recent = MessageV2.page({ sessionID: input.sessionID, limit: 10 }).items
+      const newest = recent.at(-1)
       // The closing reminder follows how the tail ends: an unanswered user, or
       // the last step that reached the model (an empty attempt after it does not
-      // count).
-      const ending = (unanswered.length > 0 ? unanswered.at(-1) : lastStep(tail)) ?? tail.at(-1) ?? newest
+      // count). An empty tail looks at the newest messages the same way.
+      const ending =
+        (unanswered.length > 0 ? unanswered.at(-1) : lastStep(tail)) ??
+        tail.at(-1) ??
+        (newest?.info.role === "user" ? newest : (lastStep(recent) ?? newest))
       const rendered = yield* renderRebuildContext(input.sessionID, {
         lastMessageInfo: ending ? computeLastMessageInfo([ending.info]) : undefined,
         agentID: input.agentID,

@@ -276,6 +276,7 @@ describe("renderTailDigest", () => {
     const text = renderTailDigest([
       { info: assistantInfo("a1", "u1"), parts: [completedTool("a1", "p1", "read", { path: "a.ts" })] },
       { info: assistantInfo("a2", "u1"), parts: [] },
+      { info: assistantInfo("a3", "u1"), parts: [textPart("a3", "p3", "  ")] },
     ])
     expect(text).toContain(`- read(path="a.ts") ${UNSEEN}`)
   })
