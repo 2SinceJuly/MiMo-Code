@@ -1172,6 +1172,7 @@ export type UserMessage = {
   system?: string
   systemMode?: "append" | "replace-agent"
   harness?: "auto" | "codex" | "default"
+  task_id?: string
   tools?: {
     [key: string]: boolean
   }
@@ -1490,9 +1491,15 @@ export type RetryPart = {
   messageID: string
   type: "retry"
   attempt: number
-  error: ApiError
+  phase: "request" | "stream"
+  scope: "request" | "live-step"
+  kind: "network" | "rate_limit" | "server" | "stream" | "unknown"
+  message: string
+  hostCode?: string
+  next: number
   time: {
     created: number
+    updated: number
   }
 }
 

@@ -3957,6 +3957,39 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
       })
 
+    // Removes the retry records of the user turns this run completed successfully.
+    // Called only at the run loop's success exits, never from failure, abort or
+    // interruption paths, so a failed turn keeps its records next to the error.
+    // `fromUserID` is the first real user message the run worked on; every
+    // assistant answering it or a later user message (synthetic re-entries,
+    // queued prompts admitted into the same run) belongs to completed work. A step
+    // superseded by a newer input holds nothing but its record, so it goes as well.
+    const clearTurnRetryRecords = Effect.fn("SessionPrompt.clearTurnRetryRecords")(function* (
+      sessionID: SessionID,
+      agentID: string,
+      fromUserID: MessageID,
+    ) {
+      for (const part of MessageV2.retryParts(sessionID, agentID, fromUserID)) {
+        yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+        if (MessageV2.parts(part.messageID).length === 0)
+          yield* sessions.removeMessage({ sessionID: part.sessionID, messageID: part.messageID })
+      }
+    })
+
+    // Completes once the lane holds an accepted input that no run has claimed yet:
+    // a steer or queued prompt the run loop would take at its next step.
+    const awaitNewInput = (lane: Lane) => {
+      const controller = inboxControllerRef.current
+      if (!controller) return undefined
+      return Effect.gen(function* () {
+        let revision = -1
+        for (;;) {
+          if ((yield* controller.listAccepted(lane)).length > 0) return
+          revision = yield* controller.observeInput(lane, revision)
+        }
+      })
+    }
+
     const runLoop: (
       sessionID: SessionID,
       agentID?: string,
@@ -4015,6 +4048,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // prose text instead of a structured tool_use). Local to runLoop so each
         // fresh user turn starts clean.
         let textToolCallRetries = 0
+        // Retry record of an empty step dropped by dropEmptyAssistant, re-attached
+        // to the next step's assistant answering the same user message.
+        let carriedRetry: { part: MessageV2.RetryPart; parentID: MessageID } | undefined
+        // First user message of this run; success exits clear retry records from here on.
+        let runFirstUserID: MessageID | undefined
         const resolvedAgentID = agentID ?? "main"
         // MAIN user turns own the hint token. Child/hook runLoops must not overwrite it
         // (SessionRunState.cancel targets session:main only).
@@ -4543,11 +4581,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // Stale empty / think-only assistant left in history (resume, crash). Drop
         // it and start a fresh step — the new step's process() raises
         // InvalidOutputError on empty output so SessionRetry.policy owns retries.
+        // Its retry record moves to the next step's assistant so the turn's retry
+        // count stays visible.
         const dropEmptyAssistant = Effect.fn("SessionPrompt.dropEmptyAssistant")(function* (input: {
           assistant: MessageV2.Assistant
         }) {
           if (input.assistant.error || input.assistant.summary || input.assistant.structured !== undefined) return false
           yield* slog.info("dropping empty assistant", { messageID: input.assistant.id })
+          const record = MessageV2.parts(input.assistant.id).find((part): part is MessageV2.RetryPart => part.type === "retry")
+          if (record) carriedRetry = { part: record, parentID: input.assistant.parentID }
           yield* sessions.removeMessage({
             sessionID: input.assistant.sessionID,
             messageID: input.assistant.id,
@@ -5077,6 +5119,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           if (!lastUser) {
             throw new Error("No user message found in stream. This should never happen.")
           }
+          runFirstUserID ??= msgs.findLast((msg) =>
+            msg.info.role === "user" && msg.info.id <= lastUser!.id && !msg.parts.every(isSyntheticPart),
+          )?.info.id ?? lastUser.id
           const taskReceipt = claimOwner.receipts.find((receipt) => receipt.inputMessageID === lastUser!.id)
           task_id = taskReceipt
             ? receiptPrompts.get(taskReceipt.id)?.task_id ?? lastUser.task_id
@@ -5189,6 +5234,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 continue
               }
               if (yield* goalGate(lastUser)) continue
+              if (classification.type === "final" && runFirstUserID)
+                yield* clearTurnRetryRecords(sessionID, resolvedAgentID, runFirstUserID)
               yield* slog.info("exiting loop", { classification: classification.type })
               break
             }
@@ -5565,13 +5612,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               for (const receipt of claimOwner.receipts) {
                 if (receipt.inputMessageID === message.parentID) receipt.preparedAssistantID = message.id
               }
-            }))),
+            })), Effect.tap((message) => {
+              const carried = carriedRetry
+              carriedRetry = undefined
+              return carried && carried.parentID === message.parentID
+                ? sessions.updatePart({ ...carried.part, id: PartID.ascending(), messageID: message.id })
+                : Effect.void
+            })),
             () => Effect.gen(function* () {
               const handle = yield* processor.create({
                 assistantMessage: msg,
                 sessionID,
                 model,
                 agentMetrics,
+                awaitNewInput: awaitNewInput({ sessionID, agentID: resolvedAgentID }),
               })
 
               const outcome: "break" | "continue" = yield* Effect.gen(function* () {
@@ -5781,6 +5835,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                           .pipe(Effect.ignore),
                       ),
                     )
+
+                  if (result === "superseded") return "continue" as const
 
                   if (
                     result === "continue" &&
@@ -6078,6 +6134,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   ),
                 )
 
+                if (result === "superseded") return "continue" as const
+
                 if (handle.message.time.completed && !handle.message.error) {
                   yield* SessionPrefixSnapshot.advance({
                     sessionID,
@@ -6300,6 +6358,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               continue
             }
             if (yield* goalGate(lastUser)) continue
+            if (structured !== undefined && !handle.message.error && runFirstUserID)
+              yield* clearTurnRetryRecords(sessionID, resolvedAgentID, runFirstUserID)
             break
           }
           continue
@@ -6320,6 +6380,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }).pipe(
           Effect.onExit(firePostSession),
           Effect.onExit((exit) => settleClaims({ sessionID, agentID: resolvedAgentID }, claimOwner, exit)),
+          // A record carried off a dropped empty step and never re-attached (the run
+          // ended before the next step's assistant existed) goes back onto the newest
+          // assistant of that user turn, so the turn keeps showing its retries.
+          Effect.onExit(() => Effect.gen(function* () {
+            const carried = carriedRetry
+            carriedRetry = undefined
+            if (!carried) return
+            const owner = (yield* sessions.messages({ sessionID, agentID: resolvedAgentID, limit: 20 }))
+              .findLast((msg) => msg.info.role === "assistant" && msg.info.parentID === carried.parentID)
+            if (owner) yield* sessions.updatePart({ ...carried.part, id: PartID.ascending(), messageID: owner.info.id })
+          })),
           Effect.ensuring(MCP.releaseTurnClients(mcpContext)),
           Effect.orDie,
         )

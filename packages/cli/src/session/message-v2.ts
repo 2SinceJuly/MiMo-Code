@@ -14,7 +14,7 @@ import {
 import { LSP } from "../lsp"
 import { Snapshot } from "@/snapshot"
 import { SyncEvent } from "../sync"
-import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/storage"
+import { Database, NotFoundError, and, desc, eq, inArray, lt, or, sql } from "@/storage"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProviderError } from "@/provider"
 import { errorMessage } from "@/util/error"
@@ -355,12 +355,21 @@ export const CompactionPart = PartBase.extend({
 })
 export type CompactionPart = z.infer<typeof CompactionPart>
 
+// Durable retry record of one assistant message: upserted on every retry of the
+// step, kept through retry cleanup, removed once the turn succeeds. Never sent
+// to the model.
 export const RetryPart = PartBase.extend({
   type: z.literal("retry"),
   attempt: z.number(),
-  error: APIError.Schema,
+  phase: z.enum(["request", "stream"]),
+  scope: z.enum(["request", "live-step"]),
+  kind: z.enum(["network", "rate_limit", "server", "stream", "unknown"]),
+  message: z.string(),
+  hostCode: z.string().optional(),
+  next: z.number(),
   time: z.object({
     created: z.number(),
+    updated: z.number(),
   }),
 }).meta({
   ref: "RetryPart",
@@ -1418,6 +1427,26 @@ export function* stream(sessionID: SessionID, options?: { agentID?: string }) {
     if (!next.more || !next.cursor) break
     before = next.cursor
   }
+}
+
+/** Retry records of one actor slice on assistants answering `fromUserID` or later, read without loading other parts. */
+export function retryParts(sessionID: SessionID, agentID: string, fromUserID: MessageID): RetryPart[] {
+  const rows = Database.use((db) =>
+    db
+      .select({ id: PartTable.id, message_id: PartTable.message_id, session_id: PartTable.session_id, data: PartTable.data })
+      .from(PartTable)
+      .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
+      .where(and(
+        eq(PartTable.session_id, sessionID),
+        eq(MessageTable.agent_id, agentID),
+        sql`json_extract(${PartTable.data}, '$.type') = 'retry'`,
+        sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
+        sql`json_extract(${MessageTable.data}, '$.parentID') >= ${fromUserID}`,
+      ))
+      .orderBy(PartTable.id)
+      .all(),
+  )
+  return rows.map((row) => ({ ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id }) as RetryPart)
 }
 
 export function parts(message_id: MessageID) {

@@ -475,6 +475,8 @@ export const layer: Layer.Layer<
 
       if (result === "text-repeat") return yield* rollback("Compaction produced repeated text")
       if (result === "stop") return yield* rollback("Compaction failed before producing a summary")
+      // The compaction processor is created without awaitNewInput, so no input supersedes it.
+      if (result === "superseded") return yield* Effect.die(new Error("Compaction step cannot be superseded"))
       if (
         !MessageV2.parts(msg.id).some((part) => part.type === "text" && part.text.trim().length > 0)
       )
