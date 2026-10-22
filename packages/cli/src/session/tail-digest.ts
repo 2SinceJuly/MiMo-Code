@@ -59,9 +59,22 @@ export function isRebuildBoundary(msg: WithParts): boolean {
   return msg.info.role === "user" && msg.parts.some((p) => p.type === "checkpoint")
 }
 
+/**
+ * The tail's last step that reached the model: its newest assistant message
+ * with content. A request the provider rejected (for example for context
+ * overflow) leaves an assistant message without content after it.
+ */
+export function lastStep(tail: readonly WithParts[]): WithParts | undefined {
+  return tail.findLast(
+    (msg) =>
+      msg.info.role === "assistant" &&
+      msg.parts.some((p) => p.type === "text" || p.type === "reasoning" || p.type === "tool"),
+  )
+}
+
 function digestLines(tail: readonly WithParts[]): { lines: string[]; marked: boolean } {
   const lines: string[] = []
-  const last = tail.findLast((msg) => msg.info.role === "assistant")
+  const last = lastStep(tail)
   for (const msg of tail) {
     // Never re-digest a prior rebuild/compaction boundary — that folds the
     // previous dump into itself on a second rebuild.
@@ -85,9 +98,9 @@ function digestLines(tail: readonly WithParts[]): { lines: string[]; marked: boo
       }
     }
   }
-  const kept = lines.slice(0, MAX_LINES)
-  // Only open with the note for lines that actually appear — otherwise it can
-  // fire for a tool that was dropped by the MAX_LINES cap.
+  // Keep the newest lines: the marked calls of the last step come last.
+  const kept = lines.slice(-MAX_LINES)
+  // Only open with the note for lines that actually appear.
   return { lines: kept, marked: kept.some((line) => line.includes("→ interrupted") || line.includes(UNSEEN_MARK)) }
 }
 

@@ -257,6 +257,28 @@ describe("renderTailDigest", () => {
     expect(text).toContain(`- read(path="a.ts") ${UNSEEN}`)
     expect(text).toContain(OPENING)
   })
+
+  test("a long tail keeps its newest lines, so the marked calls survive the line cap", () => {
+    const earlier = Array.from({ length: 300 }, (_, i) => ({
+      info: assistantInfo(`a${String(i).padStart(3, "0")}`, "u1"),
+      parts: [textPart(`a${String(i).padStart(3, "0")}`, `t${i}`, `step ${i} done`)],
+    }))
+    const text = renderTailDigest([
+      ...earlier,
+      { info: assistantInfo("z1", "u1"), parts: [completedTool("z1", "p1", "read", { path: "last.ts" })] },
+    ])
+    expect(text).toContain(`- read(path="last.ts") ${UNSEEN}`)
+    expect(text).toContain(OPENING)
+    expect(text).not.toContain("step 0 done")
+  })
+
+  test("an assistant message without content after the last step does not take the mark", () => {
+    const text = renderTailDigest([
+      { info: assistantInfo("a1", "u1"), parts: [completedTool("a1", "p1", "read", { path: "a.ts" })] },
+      { info: assistantInfo("a2", "u1"), parts: [] },
+    ])
+    expect(text).toContain(`- read(path="a.ts") ${UNSEEN}`)
+  })
 })
 
 describe("collapseCheckpointTail", () => {

@@ -44,7 +44,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
-import { isBoundaryUser, isRebuildBoundary, renderTailDigest } from "./tail-digest"
+import { isBoundaryUser, isRebuildBoundary, lastStep, renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -127,7 +127,7 @@ function autonomousLoopReminder(): string {
   return [
     "<system-reminder>",
     "You are mid-loop in an autonomous task.",
-    'The tool calls marked "result not seen" under Recent activity ran, but their results never reached you.',
+    'The tool calls marked "result not seen" or "interrupted" under Recent activity did not return their results to you.',
     "Continue the work loop from where the blocks above leave off: re-run a read-only call whose result you need,",
     "and check the current state before repeating a call that changes files or runs commands.",
     "</system-reminder>",
@@ -1721,7 +1721,10 @@ export const layer: Layer.Layer<
       const unanswered = tail.slice(answered)
       const digestUpTo = tail[answered - 1]?.info.id
       const newest = MessageV2.page({ sessionID: input.sessionID, limit: 1 }).items[0]
-      const ending = tail.at(-1) ?? newest
+      // The closing reminder follows how the tail ends: an unanswered user, or
+      // the last step that reached the model (an empty attempt after it does not
+      // count).
+      const ending = (unanswered.length > 0 ? unanswered.at(-1) : lastStep(tail)) ?? tail.at(-1) ?? newest
       const rendered = yield* renderRebuildContext(input.sessionID, {
         lastMessageInfo: ending ? computeLastMessageInfo([ending.info]) : undefined,
         agentID: input.agentID,

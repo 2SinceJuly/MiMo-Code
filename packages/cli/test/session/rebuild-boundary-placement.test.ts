@@ -646,6 +646,67 @@ describe("rebuild boundary placement", () => {
     },
     60_000,
   )
+
+  test(
+    "a rebuild after the provider rejects the next request for overflow marks the last tool step, not the empty attempt",
+    async () => {
+      const server = startScriptedLLMServer([
+        { lines: textStopResponse("starting") },
+        {
+          lines: toolCallsResponse(
+            FILES.map((file, index) => ({ id: `call-${index}`, name: "read", args: JSON.stringify({ file_path: file }) })),
+          ),
+        },
+        {
+          status: 400,
+          lines: [
+            JSON.stringify({
+              error: { message: "This model's maximum context length is 400000 tokens", code: "context_length_exceeded" },
+            }),
+          ],
+        },
+        { lines: textStopResponse("checks passed") },
+      ])
+      try {
+        await using tmp = await tmpdir({ git: true, config: config(server.origin) })
+        for (const file of FILES) await Bun.write(path.join(tmp.path, file), fileBody(file))
+        await Instance.provide({
+          directory: tmp.path,
+          fn: () =>
+            AppRuntime.runPromise(
+              Effect.gen(function* () {
+                const sessions = yield* Session.Service
+                const prompt = yield* SessionPrompt.Service
+                const session = yield* sessions.create({ title: "provider overflow rebuild" })
+                const say = (value: string) =>
+                  prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: value }] })
+
+                yield* say("start the task")
+                const watermark = (yield* sessions.messages({ sessionID: session.id })).at(-1)!
+                yield* seedCheckpoint(session.id, watermark.info.id)
+                yield* say("run the checks on alpha and beta")
+                expect(server.captures).toHaveLength(4)
+
+                const stored = yield* sessions.messages({ sessionID: session.id })
+                const boundary = stored.find((message) => message.parts.some((part) => part.type === "checkpoint"))!
+                const beforeBoundary = stored.slice(0, stored.findIndex((m) => m.info.id === boundary.info.id))
+                // The rejected request left an assistant message with no content just before the boundary.
+                const attempt = beforeBoundary.at(-1)!
+                expect(attempt.info.role).toBe("assistant")
+                expect(attempt.parts.some((part) => part.type === "text" || part.type === "tool")).toBe(false)
+
+                const digest = text(conversation(server.captures[3]!.messages)[0]!)
+                for (const file of FILES) expect(digest).toContain(`read(file_path="${file}") → ran, result not seen`)
+                expect(digest).toContain("mid-loop in an autonomous task")
+              }),
+            ),
+        })
+      } finally {
+        await server.stop()
+      }
+    },
+    60_000,
+  )
 })
 
 function seedCheckpoint(sessionID: SessionID, watermark: string) {
