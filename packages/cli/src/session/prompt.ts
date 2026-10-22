@@ -3962,7 +3962,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     // interruption paths, so a failed turn keeps its records next to the error.
     // `fromUserID` is the first real user message the run worked on; every
     // assistant answering it or a later user message (synthetic re-entries,
-    // queued prompts admitted into the same run) belongs to completed work.
+    // queued prompts admitted into the same run) belongs to completed work. A step
+    // superseded by a newer input holds nothing but its record, so it goes as well.
     const clearTurnRetryRecords = Effect.fn("SessionPrompt.clearTurnRetryRecords")(function* (
       sessionID: SessionID,
       agentID: string,
@@ -3970,8 +3971,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     ) {
       for (const part of MessageV2.retryParts(sessionID, agentID, fromUserID)) {
         yield* sessions.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+        if (MessageV2.parts(part.messageID).length === 0)
+          yield* sessions.removeMessage({ sessionID: part.sessionID, messageID: part.messageID })
       }
     })
+
+    // Completes once the lane holds an accepted input that no run has claimed yet:
+    // a steer or queued prompt the run loop would take at its next step.
+    const awaitNewInput = (lane: Lane) => {
+      const controller = inboxControllerRef.current
+      if (!controller) return undefined
+      return Effect.gen(function* () {
+        let revision = -1
+        for (;;) {
+          if ((yield* controller.listAccepted(lane)).length > 0) return
+          revision = yield* controller.observeInput(lane, revision)
+        }
+      })
+    }
 
     const runLoop: (
       sessionID: SessionID,
@@ -5608,6 +5625,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 sessionID,
                 model,
                 agentMetrics,
+                awaitNewInput: awaitNewInput({ sessionID, agentID: resolvedAgentID }),
               })
 
               const outcome: "break" | "continue" = yield* Effect.gen(function* () {
@@ -5817,6 +5835,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                           .pipe(Effect.ignore),
                       ),
                     )
+
+                  if (result === "superseded") return "continue" as const
 
                   if (
                     result === "continue" &&
@@ -6113,6 +6133,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       .pipe(Effect.ignore),
                   ),
                 )
+
+                if (result === "superseded") return "continue" as const
 
                 if (handle.message.time.completed && !handle.message.error) {
                   yield* SessionPrefixSnapshot.advance({

@@ -77,7 +77,7 @@ function describeTryBest(incident: TryBestIncident) {
   return `${incident.evidence.count} consecutive ${incident.evidence.action ?? "same-kind"} actions made no observable progress.`
 }
 
-export type Result = "overflow" | "stop" | "continue" | "text-repeat"
+export type Result = "overflow" | "stop" | "continue" | "text-repeat" | "superseded"
 
 export type Event = LLM.Event
 
@@ -208,6 +208,12 @@ type Input = {
   sessionID: SessionID
   model: Provider.Model
   agentMetrics?: AgentMetrics
+  /**
+   * Completes once a newer input waits in this agent's inbox lane. While the step
+   * is retrying a failure, that input supersedes the step so the run loop can
+   * claim it instead of holding it behind a persistent retry.
+   */
+  awaitNewInput?: Effect.Effect<void>
 }
 
 export interface Interface {
@@ -239,6 +245,12 @@ interface ProcessorContext extends Input {
   startedBusy: boolean
   /** Durable retry record of this assistant message; survives retry cleanup, never part of stepPartIds. */
   retryPart: MessageV2.RetryPart | undefined
+  /** A retry was recorded in this process() and no attempt has produced output since. */
+  retrying: boolean
+  /** Completed by the next recorded retry; set while a newer input waits for the step to start failing. */
+  retryWaiter: Deferred.Deferred<void> | undefined
+  /** The step gave way to a newer input; its interruption is not a user abort. */
+  superseded: boolean
 }
 
 type StreamEvent = Event
@@ -316,6 +328,9 @@ export const layer: Layer.Layer<
         retrySafe: true,
         startedBusy: false,
         retryPart: undefined,
+        retrying: false,
+        retryWaiter: undefined,
+        superseded: false,
       }
       let aborted = false
       // Only the main agent owns session-level status. Subagents (explore,
@@ -356,6 +371,8 @@ export const layer: Layer.Layer<
           next: info.next,
           time: { created: existing?.time.created ?? now, updated: now },
         } satisfies MessageV2.RetryPart)
+        ctx.retrying = true
+        if (ctx.retryWaiter) yield* Deferred.succeed(ctx.retryWaiter, undefined)
       })
 
       const parse = (e: unknown) =>
@@ -545,6 +562,7 @@ export const layer: Layer.Layer<
             return
 
           case "reasoning-start":
+            ctx.retrying = false
             if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             if (value.id in ctx.reasoningMap) return
             ctx.reasoningMap[value.id] = {
@@ -589,6 +607,7 @@ export const layer: Layer.Layer<
             return
 
           case "tool-input-start":
+            ctx.retrying = false
             if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             if (ctx.assistantMessage.summary) {
               throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
@@ -795,6 +814,7 @@ export const layer: Layer.Layer<
           }
 
           case "text-start":
+            ctx.retrying = false
             if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
             ctx.currentText = {
               id: PartID.ascending(),
@@ -960,6 +980,21 @@ export const layer: Layer.Layer<
         const cfg = yield* config.get()
         ctx.shouldBreak = cfg.experimental?.continue_loop_on_deny !== true
         const retryConfig = SessionRetry.resolve(cfg, streamInput.model.providerID)
+        ctx.retrying = false
+        ctx.retryWaiter = undefined
+        ctx.superseded = false
+        // A newer input supersedes the step only while it is failing: once the input
+        // waits, the step gives way at its current retry or at the next one.
+        const supersede = (awaitNewInput: Effect.Effect<void>) =>
+          Effect.gen(function* () {
+            yield* awaitNewInput
+            if (!ctx.retrying) {
+              const waiter = yield* Deferred.make<void>()
+              ctx.retryWaiter = waiter
+              yield* Deferred.await(waiter)
+            }
+            ctx.superseded = true
+          })
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
@@ -1064,6 +1099,7 @@ export const layer: Layer.Layer<
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
+                if (ctx.superseded) return
                 aborted = true
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
@@ -1140,6 +1176,7 @@ export const layer: Layer.Layer<
                   }),
               }),
             ),
+            (retried) => (input.awaitNewInput ? Effect.raceFirst(retried, supersede(input.awaitNewInput)) : retried),
             Effect.catch((e) =>
               Effect.gen(function* () {
                 // Codex-style auto-resume: after tools have fully completed, a
@@ -1227,6 +1264,25 @@ export const layer: Layer.Layer<
             Effect.ensuring(cleanup()),
           )
 
+          if (ctx.superseded) {
+            // The superseded step keeps only its retry record, which stays visible
+            // until the turn succeeds; it is complete so no orphan sweep aborts it.
+            for (const partId of ctx.stepPartIds) {
+              yield* session.removePart({
+                sessionID: ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                partID: partId,
+              })
+            }
+            ctx.stepPartIds = []
+            ctx.assistantMessage.finish = undefined
+            ctx.assistantMessage.error = undefined
+            ctx.assistantMessage.time.completed = Date.now()
+            yield* session.updateMessage(ctx.assistantMessage)
+            if (isMain) yield* status.set(ctx.sessionID, { type: "busy" })
+            slog.info("retry superseded by new input", { attempt: ctx.retryPart?.attempt })
+            return "superseded"
+          }
           if (ctx.needsOverflowHandling) return "overflow"
           if (ctx.textNgramRepeat) return "text-repeat"
           if (ctx.blocked || ctx.assistantMessage.error) return "stop"

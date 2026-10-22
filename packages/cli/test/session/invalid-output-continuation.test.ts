@@ -80,6 +80,35 @@ function writeConfig(dir: string, origin: string) {
   )
 }
 
+// Every retry waits a minute, so a step that finishes quickly after a retry
+// proves it gave way instead of sleeping through the backoff.
+function writeSlowRetryConfig(dir: string, origin: string) {
+  const slow = { initialDelayMs: 60_000, maxDelayMs: 60_000, jitterRatio: 0 }
+  return Bun.write(
+    path.join(dir, "mimocode.json"),
+    JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      enabled_providers: ["alibaba"],
+      provider: { alibaba: { options: { apiKey: "test-key", baseURL: `${origin}/v1` } } },
+      agent: { build: { model: "alibaba/qwen-plus" } },
+      retry: {
+        request: { ...slow, mode: "bounded", maxRetries: 5, noDeadline: true },
+        network: slow,
+        server: slow,
+        rateLimit: slow,
+        stream: slow,
+        unknown: slow,
+      },
+    }),
+  )
+}
+
+function waitFor(condition: () => boolean) {
+  return Effect.promise(async () => {
+    while (!condition()) await Bun.sleep(10)
+  }).pipe(Effect.timeout("10 seconds"))
+}
+
 function writeGPTConfig(dir: string, origin: string) {
   return Bun.write(
     path.join(dir, "mimocode.json"),
@@ -519,12 +548,29 @@ describe("invalid-output continuation — integration", () => {
     }
   })
 
-  test("a turn superseded by a queued prompt still clears its retry record once it succeeded", async () => {
+  test("a prompt queued while the recovered attempt streams waits for it and clears the record once both succeed", async () => {
     await using tmp = await tmpdir({ git: true })
+    // The second prompt arrives after the recovered attempt already produced text:
+    // the turn is no longer failing, so the prompt waits for the next step.
+    const streaming = Promise.withResolvers<void>()
     const queued = Promise.withResolvers<void>()
+    const [role, content, ...rest] = textStopResponse("first answer")
+    const encoder = new TextEncoder()
     const stub = startScriptedLLMServer([
       { lines: emptyStopResponse() },
-      { lines: textStopResponse("first answer"), beforeReply: () => queued.promise },
+      {
+        lines: [],
+        stream: new ReadableStream<Uint8Array>({
+          async start(ctrl) {
+            ctrl.enqueue(encoder.encode(role!))
+            ctrl.enqueue(encoder.encode(content!))
+            streaming.resolve()
+            await queued.promise
+            for (const line of rest) ctrl.enqueue(encoder.encode(line))
+            ctrl.close()
+          },
+        }),
+      },
       { lines: textStopResponse("second answer") },
     ])
     try {
@@ -542,18 +588,23 @@ describe("invalid-output continuation — integration", () => {
                 agent: "build",
                 parts: [{ type: "text", text: "First question." }],
               }).pipe(Effect.forkChild)
+              yield* Effect.promise(() => streaming.promise).pipe(Effect.timeout("10 seconds"))
               yield* Effect.promise(async () => {
-                while (stub.captures.length < 2) await Bun.sleep(10)
+                const streamed = () => assistantOnly(MessageV2.page({ sessionID: session.id, limit: 50 }).items)
+                  .some((m) => m.parts.some((p) => p.type === "text"))
+                while (!streamed()) await Bun.sleep(10)
               }).pipe(Effect.timeout("10 seconds"))
               const second = yield* prompt.prompt({
                 sessionID: session.id,
                 agent: "build",
                 parts: [{ type: "text", text: "Second question." }],
               }).pipe(Effect.forkChild)
+              yield* Effect.sleep("200 millis")
               queued.resolve()
               yield* Fiber.join(first)
               yield* Fiber.join(second)
               const msgs = yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+              expect(stub.captures.length).toBe(3)
               expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "first answer"))).toBe(true)
               expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "second answer"))).toBe(true)
               expect(retryParts(msgs)).toEqual([])
@@ -713,6 +764,219 @@ describe("invalid-output continuation — integration", () => {
             }),
           ),
       })
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a prompt sent while a retried attempt hangs supersedes the step and runs in the same turn", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const hanging = Promise.withResolvers<void>()
+    let readMain: (() => MessageV2.WithParts[]) | undefined
+    let beforeAnswer: MessageV2.WithParts[] = []
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      {
+        lines: textStopResponse("never delivered"),
+        beforeReply: () => {
+          hanging.resolve()
+          return new Promise(() => {})
+        },
+      },
+      { lines: textStopResponse("answer with the steer"), beforeReply: async () => { beforeAnswer = readMain?.() ?? [] } },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      const msgs = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "retry-superseded-by-steer" })
+              readMain = () => MessageV2.page({ sessionID: session.id, limit: 50 }).items
+              const first = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.forkChild)
+              yield* Effect.promise(() => hanging.promise).pipe(Effect.timeout("10 seconds"))
+              const steer = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Use this extra hint." }],
+              }).pipe(Effect.forkChild)
+              yield* Fiber.join(first).pipe(Effect.timeout("15 seconds"))
+              yield* Fiber.join(steer).pipe(Effect.timeout("15 seconds"))
+              return yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+            }),
+          ),
+      })
+      expect(stub.captures.length).toBe(3)
+      const request = JSON.stringify(stub.captures[2]!.messages)
+      expect(request).toContain("Answer my question.")
+      expect(request).toContain("Use this extra hint.")
+      expect(request).not.toContain("empty output")
+      // While the steered step ran, the superseded step still showed its retry record
+      // as a completed, error-free assistant holding nothing else.
+      const shell = assistantOnly(beforeAnswer).find((m) => m.parts.some((p) => p.type === "retry"))
+      expect(shell?.parts).toHaveLength(1)
+      expect(shell?.parts[0]).toMatchObject({ type: "retry", attempt: 1, kind: "server", message: "empty output" })
+      expect(shell?.info.error).toBeUndefined()
+      expect(shell?.info.time.completed).toBeDefined()
+      // The turn succeeded: the record and its empty step are gone.
+      const assistants = assistantOnly(msgs)
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]!.info.error).toBeUndefined()
+      expect(assistants[0]!.parts.some((p) => p.type === "text" && p.text === "answer with the steer")).toBe(true)
+      expect(retryParts(msgs)).toEqual([])
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a prompt sent during a request-phase retry wait supersedes the wait", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const errorLines = [JSON.stringify({ error: { code: "model_not_found", type: "new_api_error", message: "No available channel for model test/model" } })]
+    const stub = startScriptedLLMServer([
+      { lines: errorLines, status: 503 },
+      { lines: textStopResponse("answer with the steer") },
+    ])
+    try {
+      await writeSlowRetryConfig(tmp.path, stub.origin)
+      const msgs = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "request-retry-superseded" })
+              const first = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.forkChild)
+              yield* waitFor(() => retryParts(MessageV2.page({ sessionID: session.id, limit: 50 }).items).length > 0)
+              const steer = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Use this extra hint." }],
+              }).pipe(Effect.forkChild)
+              // The retry wait is a minute long; the steer must not sit behind it.
+              yield* Fiber.join(first).pipe(Effect.timeout("10 seconds"))
+              yield* Fiber.join(steer).pipe(Effect.timeout("10 seconds"))
+              return yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+            }),
+          ),
+      })
+      expect(stub.captures.length).toBe(2)
+      expect(JSON.stringify(stub.captures[1]!.messages)).toContain("Use this extra hint.")
+      expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "answer with the steer"))).toBe(true)
+      expect(retryParts(msgs)).toEqual([])
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a prompt that arrived before the step failed supersedes it at the first retry", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const steerQueued = Promise.withResolvers<void>()
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse(), beforeReply: () => steerQueued.promise },
+      { lines: textStopResponse("answer with the steer") },
+    ])
+    try {
+      await writeSlowRetryConfig(tmp.path, stub.origin)
+      const msgs = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "retry-superseded-by-earlier-steer" })
+              const first = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Answer my question." }],
+              }).pipe(Effect.forkChild)
+              yield* waitFor(() => stub.captures.length > 0)
+              const steer = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                parts: [{ type: "text", text: "Use this extra hint." }],
+              }).pipe(Effect.forkChild)
+              yield* waitFor(() => MessageV2.page({ sessionID: session.id, limit: 50 }).items
+                .some((m) => m.parts.some((p) => p.type === "text" && p.text === "Use this extra hint.")))
+              // The steer waits while the step has not failed; the empty reply records
+              // a retry with a minute-long backoff, and the step gives way at once.
+              steerQueued.resolve()
+              yield* Fiber.join(first).pipe(Effect.timeout("10 seconds"))
+              yield* Fiber.join(steer).pipe(Effect.timeout("10 seconds"))
+              return yield* sessions.messages({ sessionID: session.id, agentID: "main" })
+            }),
+          ),
+      })
+      expect(stub.captures.length).toBe(2)
+      expect(JSON.stringify(stub.captures[1]!.messages)).toContain("Use this extra hint.")
+      expect(msgs.some((m) => m.parts.some((p) => p.type === "text" && p.text === "answer with the steer"))).toBe(true)
+      expect(retryParts(msgs)).toEqual([])
+    } finally {
+      await stub.stop()
+    }
+  }, 30_000)
+
+  test("a message sent to a subagent while its retried attempt hangs supersedes the subagent step", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const hanging = Promise.withResolvers<void>()
+    const stub = startScriptedLLMServer([
+      { lines: emptyStopResponse() },
+      {
+        lines: textStopResponse("never delivered"),
+        beforeReply: () => {
+          hanging.resolve()
+          return new Promise(() => {})
+        },
+      },
+      { lines: textStopResponse("actor answer with the steer") },
+    ])
+    try {
+      await writeConfig(tmp.path, stub.origin)
+      const msgs = await Instance.provide({
+        directory: tmp.path,
+        fn: () =>
+          run(
+            Effect.gen(function* () {
+              const sessions = yield* Session.Service
+              const prompt = yield* SessionPrompt.Service
+              const session = yield* sessions.create({ title: "actor-retry-superseded" })
+              const first = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                agentID: "general-1",
+                parts: [{ type: "text", text: "Do delegated work." }],
+              }).pipe(Effect.forkChild)
+              yield* Effect.promise(() => hanging.promise).pipe(Effect.timeout("10 seconds"))
+              const steer = yield* prompt.prompt({
+                sessionID: session.id,
+                agent: "build",
+                agentID: "general-1",
+                parts: [{ type: "text", text: "Use this extra hint." }],
+              }).pipe(Effect.forkChild)
+              yield* Fiber.join(first).pipe(Effect.timeout("15 seconds"))
+              yield* Fiber.join(steer).pipe(Effect.timeout("15 seconds"))
+              return yield* sessions.messages({ sessionID: session.id, agentID: "general-1" })
+            }),
+          ),
+      })
+      expect(stub.captures.length).toBe(3)
+      expect(JSON.stringify(stub.captures[2]!.messages)).toContain("Use this extra hint.")
+      const assistants = assistantOnly(msgs)
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]!.parts.some((p) => p.type === "text" && p.text === "actor answer with the steer")).toBe(true)
+      expect(retryParts(msgs)).toEqual([])
     } finally {
       await stub.stop()
     }
