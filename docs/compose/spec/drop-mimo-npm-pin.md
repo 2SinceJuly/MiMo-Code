@@ -1,6 +1,6 @@
 ---
 feature: drop-mimo-npm-pin
-status: designed
+status: delivered
 updated: 2026-10-20
 source: feat/drop-mimo-npm-pin
 ---
@@ -8,6 +8,14 @@ source: feat/drop-mimo-npm-pin
 # Drop mimo model-id npm pin
 
 ## Report
+
+**What was built** — Model `api.npm` is pass-through (`model.provider.npm` → `provider.npm` → existing → models.dev → default `@ai-sdk/openai-compatible`). Deleted `isMimoOrSmartModel` / `resolveModelNpm`, which forced any `mimo`-named id onto `@ai-sdk/openai-compatible` and broke Anthropic-protocol custom providers (#2660). Official `xiaomi` / desktop `mimo-desktop` tracks already declare openai-compatible in catalog/config and are unaffected. Tests now assert explicit `@ai-sdk/anthropic` / `@ai-sdk/openai` survive on mimo-named ids.
+
+**Verification** —
+- `bun typecheck` (packages/cli): PASS
+- `bun test test/provider/` (packages/cli): 612 pass / 0 fail
+- Desktop gate (source review + reviewer): `xiaomi` and `mimo-desktop` bootstraps both `npm: "@ai-sdk/openai-compatible"`; `interleaved.reasoning_content` preserved; no xiaomi→Copilot loader remains (Copilot only via `@ai-sdk/github-copilot`)
+- Reviewer (general-1): spec compliance / correctness / consistency all met; no critical findings
 
 ## [S1] Problem
 
@@ -53,9 +61,11 @@ Removing the pin cannot change desktop official-track adapter selection because 
 
 ## Tasks
 
-- [ ] T1: Remove `isMimoOrSmartModel` / `resolveModelNpm` and pass npm through at both call sites — acceptance: no name-based npm rewrite remains in `packages/cli/src/provider/provider.ts` (covers: S2.1, S2.2)
-- [ ] T2: Replace pin tests with explicit-npm-respected cases — acceptance: tests assert `@ai-sdk/anthropic` and `@ai-sdk/openai` survive on mimo-named ids; stock default still openai-compatible (covers: S2.1)
-- [ ] T3: Verify desktop official path is unaffected — acceptance: desktop `xiaomi`/`mimo-desktop` npm and interleaved fields re-confirmed from `~/src/mimo-desktop` sources; no remaining xiaomi→Copilot loader (covers: S2.3)
-- [ ] T4: Typecheck + provider tests green in the worktree — acceptance: recorded command results (depends: T1, T2)
+- [x] T1: Remove `isMimoOrSmartModel` / `resolveModelNpm` and pass npm through at both call sites — acceptance: no name-based npm rewrite remains in `packages/cli/src/provider/provider.ts` (covers: S2.1, S2.2)
+- [x] T2: Replace pin tests with explicit-npm-respected cases — acceptance: tests assert `@ai-sdk/anthropic` and `@ai-sdk/openai` survive on mimo-named ids; stock default still openai-compatible (covers: S2.1)
+- [x] T3: Verify desktop official path is unaffected — acceptance: desktop `xiaomi`/`mimo-desktop` npm and interleaved fields re-confirmed from `~/src/mimo-desktop` sources; no remaining xiaomi→Copilot loader (covers: S2.3)
+- [x] T4: Typecheck + provider tests green in the worktree — acceptance: recorded command results (depends: T1, T2)
 
 ## Journey log
+
+- The pin's original motivation (Copilot fork stripping `reasoning_content`) was real but was fixed by dropping the xiaomi→Copilot loader (`294328d7`), not by name-based npm rewriting. Keep protocol selection on explicit `npm` only.
