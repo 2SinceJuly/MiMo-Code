@@ -2,7 +2,7 @@
 feature: drop-mimo-npm-pin
 status: delivered
 updated: 2026-10-20
-source: feat/drop-mimo-npm-pin
+source: https://github.com/XiaomiMiMo/MiMo-Code/pull/2717
 ---
 
 # Drop mimo model-id npm pin
